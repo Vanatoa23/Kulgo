@@ -1,1 +1,54 @@
 @import "tailwindcss";
+
+html,
+body,
+#root {
+  height: 100%;
+  margin: 0;
+  padding: 0;
+  background-color: #020617;
+  color: #f1f5f9;
+}
+
+/* Subtle dark-mode scrollbars */
+::-webkit-scrollbar {
+  width: 6px;
+  height: 6px;
+}
+
+::-webkit-scrollbar-track {
+  background: #0f172a;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #334155;
+  border-radius: 9999px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #475569;
+}
+
+/* Dark-mode overrides for MapLibre navigation controls */
+.maplibregl-ctrl-group {
+  background: rgba(15, 23, 42, 0.9) !important;
+  border: 1px solid rgba(51, 65, 85, 0.8) !important;
+  box-shadow: 0 4px 14px rgba(0, 0, 0, 0.45) !important;
+}
+
+.maplibregl-ctrl-group button {
+  background: transparent !important;
+  color: #e2e8f0 !important;
+}
+
+.maplibregl-ctrl-group button + button {
+  border-top: 1px solid rgba(51, 65, 85, 0.7) !important;
+}
+
+.maplibregl-ctrl-group button:hover {
+  background: rgba(30, 41, 59, 0.9) !important;
+}
+
+.maplibregl-ctrl-icon {
+  filter: invert(0.9);
+}

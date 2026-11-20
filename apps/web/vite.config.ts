@@ -4,6 +4,25 @@ import { defineConfig } from "vite";
 
 export default defineConfig({
   plugins: [react(), tailwindcss()],
+  build: {
+    rollupOptions: {
+      output: {
+        manualChunks(id) {
+          if (id.includes("node_modules/maplibre-gl")) {
+            return "maplibre";
+          }
+          if (
+            id.includes("node_modules/@deck.gl") ||
+            id.includes("node_modules/@luma.gl") ||
+            id.includes("node_modules/@loaders.gl")
+          ) {
+            return "deckgl";
+          }
+          return undefined;
+        },
+      },
+    },
+  },
   server: {
     port: 5173,
     proxy: {
