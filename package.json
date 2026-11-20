@@ -1,0 +1,23 @@
+{
+  "name": "kulgo",
+  "version": "0.1.0",
+  "private": true,
+  "packageManager": "pnpm@12.21.0",
+  "engines": {
+    "node": ">=22.0.0"
+  },
+  "scripts": {
+    "dev:api": "pnpm --filter @kulgo/api dev",
+    "dev:web": "pnpm --filter @kulgo/web dev",
+    "build": "pnpm -r build",
+    "typecheck": "pnpm -r typecheck",
+    "test": "pnpm -r test",
+    "test:unit": "pnpm --filter @kulgo/engine test",
+    "test:privacy": "pnpm --filter @kulgo/api test:privacy",
+    "db:bootstrap": "pnpm --filter @kulgo/api db:bootstrap"
+  },
+  "devDependencies": {
+    "typescript": "^5.8.2",
+    "vitest": "^3.1.1"
+  }
+}

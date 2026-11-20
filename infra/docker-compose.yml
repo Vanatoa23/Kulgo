@@ -1,0 +1,32 @@
+services:
+  arcadedb:
+    image: arcadedata/arcadedb:26.11.1
+    container_name: kulgo-arcadedb
+    restart: unless-stopped
+    # Local development bind ONLY on loopback (never expose 0.0.0.0 in production).
+    # In production (Hetzner / Coolify), remove `ports` so ArcadeDB is reachable
+    # exclusively over the private `kulgo-internal` Docker network.
+    ports:
+      - "127.0.0.1:2480:2480"
+    environment:
+      JAVA_OPTS: >-
+        -Darcadedb.server.rootPassword=${ARCADEDB_PASSWORD:-kulgo-dev-password-change-me}
+        -Darcadedb.server.mode=production
+        -Darcadedb.server.plugins=
+    volumes:
+      - arcadedb_data:/home/arcadedb/databases
+    networks:
+      - kulgo-internal
+    healthcheck:
+      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:2480/api/v1/ready || exit 1"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 15s
+
+volumes:
+  arcadedb_data:
+
+networks:
+  kulgo-internal:
+    driver: bridge
