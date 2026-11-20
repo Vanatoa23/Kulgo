@@ -1,4 +1,5 @@
 import {
+  BulkImportJsonRequestSchema,
   CreateFacilityInputSchema,
   CreateProductInputSchema,
   CreateSupplyInputInputSchema,
@@ -14,6 +15,12 @@ import { z } from "zod";
 import { createRequireAuth, type AuthVariables } from "../auth/middleware.js";
 import type { AuthRepository } from "../auth/repository.js";
 import type { RiskSignalRepository } from "../analytics/risk-signals.js";
+import {
+  buildWorkspaceExportJson,
+  executeBulkImport,
+  parseBulkImportCsv,
+  serializeNetworkToCsv,
+} from "./import-export.js";
 import {
   WorkspaceValidationError,
   type WorkspaceRepository,
@@ -84,6 +91,118 @@ export function createWorkspaceRoutes({
       WorkspaceNetworkResponseSchema.parse({ ...network, riskSignals }),
       201,
     );
+  });
+
+  // --- Bulk Import (JSON or CSV) ---
+  routes.post("/import", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    const contentType = (c.req.header("content-type") ?? "").toLowerCase();
+
+    try {
+      if (
+        contentType.includes("text/csv") ||
+        contentType.includes("text/plain")
+      ) {
+        const csvText = await c.req.text();
+        if (csvText.trim().length === 0) {
+          return c.json({ error: "CSV payload must not be empty" }, 400);
+        }
+        const parsedCsv = parseBulkImportCsv(csvText);
+        const summary = await executeBulkImport(workspaceRepo, orgId, {
+          facilities: parsedCsv.facilities,
+          lanes: parsedCsv.lanes,
+          initialErrors: parsedCsv.errors,
+        });
+        return c.json(summary, 200);
+      }
+
+      let body: unknown;
+      try {
+        body = await c.req.json();
+      } catch {
+        return c.json({ error: "Invalid JSON payload" }, 400);
+      }
+
+      const parsedBody = BulkImportJsonRequestSchema.safeParse(body);
+      if (!parsedBody.success) {
+        return c.json(
+          { error: "Validation failed", details: parsedBody.error.flatten() },
+          400,
+        );
+      }
+
+      if (parsedBody.data.csv) {
+        const parsedCsv = parseBulkImportCsv(parsedBody.data.csv);
+        const summary = await executeBulkImport(workspaceRepo, orgId, {
+          facilities: parsedCsv.facilities,
+          lanes: parsedCsv.lanes,
+          initialErrors: parsedCsv.errors,
+        });
+        return c.json(summary, 200);
+      }
+
+      const facilities = (parsedBody.data.facilities ?? []).map((raw, idx) => ({
+        rowNumber: idx + 1,
+        raw,
+      }));
+      const lanes = (parsedBody.data.lanes ?? []).map((raw, idx) => ({
+        rowNumber: idx + 1,
+        raw,
+      }));
+
+      if (facilities.length === 0 && lanes.length === 0) {
+        return c.json(
+          {
+            error:
+              "Import payload must contain at least one facility, lane, or csv string",
+          },
+          400,
+        );
+      }
+
+      const summary = await executeBulkImport(workspaceRepo, orgId, {
+        facilities,
+        lanes,
+      });
+      return c.json(summary, 200);
+    } catch (err) {
+      if (err instanceof WorkspaceValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
+  });
+
+  // --- Network Export (JSON or CSV — strictly org's own visible network) ---
+  routes.get("/export", async (c) => {
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
+    const format = (c.req.query("format") ?? "json").trim().toLowerCase();
+
+    if (format !== "json" && format !== "csv") {
+      return c.json(
+        { error: 'Invalid export format. Expected "json" or "csv".' },
+        400,
+      );
+    }
+
+    const network = await workspaceRepo.getNetwork(orgId);
+    const safeSlug = auth.organization.slug.replace(/[^a-zA-Z0-9_-]/g, "");
+
+    if (format === "csv") {
+      const csv = serializeNetworkToCsv(network);
+      return c.body(csv, 200, {
+        "Content-Type": "text/csv; charset=utf-8",
+        "Content-Disposition": `attachment; filename="kulgo-network-${safeSlug}.csv"`,
+      });
+    }
+
+    const jsonExport = buildWorkspaceExportJson(auth.organization, network);
+    c.header(
+      "Content-Disposition",
+      `attachment; filename="kulgo-network-${safeSlug}.json"`,
+    );
+    return c.json(jsonExport, 200);
   });
 
   // --- Products ---

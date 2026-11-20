@@ -47,3 +47,26 @@ export const AuthMeResponseSchema = z.object({
   organization: OrganizationSchema,
 });
 export type AuthMeResponse = z.infer<typeof AuthMeResponseSchema>;
+
+export const UpdateOrganizationProfileInputSchema = z
+  .object({
+    scope1Tco2e: z.number().finite().nonnegative().nullable().optional(),
+    scope2Tco2e: z.number().finite().nonnegative().nullable().optional(),
+    esgBadges: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
+    openToNewBuyers: z.boolean().optional(),
+    capabilities: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
+  })
+  .strict();
+export type UpdateOrganizationProfileInput = z.infer<
+  typeof UpdateOrganizationProfileInputSchema
+>;
+
+export const UpdateOrganizationProfileResponseSchema = z
+  .object({
+    organization: OrganizationSchema,
+  })
+  .strict();
+export type UpdateOrganizationProfileResponse = z.infer<
+  typeof UpdateOrganizationProfileResponseSchema
+>;
+

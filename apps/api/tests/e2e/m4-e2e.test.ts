@@ -1,0 +1,287 @@
+import {
+  AnalyticsSummarySchema,
+  AuthMeResponseSchema,
+  BulkImportSummarySchema,
+  DirectoryAlternativesResponseSchema,
+  ExecutiveReportSchema,
+  UpdateOrganizationProfileResponseSchema,
+  WorkspaceExportJsonSchema,
+  WorkspaceNetworkResponseSchema,
+} from "@kulgo/shared";
+import { describe, expect, it } from "vitest";
+import { createTestApp } from "../../src/app.js";
+
+function extractCookie(res: Response): string {
+  const header = res.headers.get("set-cookie") ?? "";
+  const match = /kulgo_session=([^;]+)/.exec(header);
+  if (!match?.[1]) {
+    throw new Error("Expected kulgo_session cookie");
+  }
+  return `kulgo_session=${match[1]}`;
+}
+
+async function registerOrg(
+  app: ReturnType<typeof createTestApp>,
+  params: {
+    email: string;
+    organizationName: string;
+    countryCode?: string;
+    sector?: string;
+  },
+): Promise<{ cookie: string; orgId: string }> {
+  const res = await app.request("/api/v1/auth/register", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      email: params.email,
+      password: "M4MilestonePassword2026!",
+      organizationName: params.organizationName,
+      countryCode: params.countryCode ?? "EE",
+      sector: params.sector ?? "Manufacturing",
+    }),
+  });
+  expect(res.status).toBe(201);
+  const body = AuthMeResponseSchema.parse(await res.json());
+  return { cookie: extractCookie(res), orgId: body.organization.orgId };
+}
+
+describe("Milestone 4 E2E — Org ESG Settings, Bulk CSV/JSON Import/Export & CSRD Report", () => {
+  it("updates org ESG & directory profile via PATCH /api/v1/auth/organization and reflects in analytics & directory", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, {
+      email: "esg-a@estonia-mfg.ee",
+      organizationName: "Estonia Green Mfg AS",
+      countryCode: "EE",
+      sector: "Electronics",
+    });
+    const orgB = await registerOrg(app, {
+      email: "buyer-b@nordic-buyer.fi",
+      organizationName: "Nordic Buyer Oy",
+      countryCode: "FI",
+    });
+
+    // Rejects unknown fields via strict Zod schema
+    const badPatch = await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        orgId: orgB.orgId,
+        scope1Tco2e: 100,
+      }),
+    });
+    expect(badPatch.status).toBe(400);
+
+    // Valid partial update of Scope 1/2, ESG badges, directory opt-in, capabilities
+    const patchRes = await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        scope1Tco2e: 310.5,
+        scope2Tco2e: 145.25,
+        esgBadges: ["ISO 14001", "EcoVadis Gold", "ISO 14001"],
+        openToNewBuyers: true,
+        capabilities: ["Cleanroom Electronics", "Nordic PCBA"],
+      }),
+    });
+    expect(patchRes.status).toBe(200);
+    const patched = UpdateOrganizationProfileResponseSchema.parse(
+      await patchRes.json(),
+    );
+    expect(patched.organization.scope1Tco2e).toBe(310.5);
+    expect(patched.organization.scope2Tco2e).toBe(145.25);
+    expect(patched.organization.esgBadges).toEqual([
+      "ISO 14001",
+      "EcoVadis Gold",
+    ]);
+    expect(patched.organization.openToNewBuyers).toBe(true);
+    expect(patched.organization.capabilities).toEqual([
+      "Cleanroom Electronics",
+      "Nordic PCBA",
+    ]);
+
+    // Analytics summary reflects updated Scope 1 & Scope 2 totals
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summary = AnalyticsSummarySchema.parse(await summaryRes.json());
+    expect(summary.esg.scope1Tco2e).toBe(310.5);
+    expect(summary.esg.scope2Tco2e).toBe(145.25);
+
+    // Org B discovers Org A in the Alternative Supplier Directory with its ESG badges
+    const dirRes = await app.request(
+      "/api/v1/directory/alternatives?countryCode=EE&capability=PCBA",
+      { headers: { Cookie: orgB.cookie } },
+    );
+    expect(dirRes.status).toBe(200);
+    const dir = DirectoryAlternativesResponseSchema.parse(await dirRes.json());
+    const found = dir.candidates.find((c) => c.orgId === orgA.orgId);
+    expect(found).toBeDefined();
+    expect(found?.esgBadges).toEqual(["ISO 14001", "EcoVadis Gold"]);
+  });
+
+  it("supports bulk JSON & CSV import with row-level error reporting and round-trip CSV/JSON export", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, {
+      email: "bulk@tallinn-ops.ee",
+      organizationName: "Tallinn Bulk Ops AS",
+    });
+
+    // 1. JSON bulk import with one invalid row + two valid facilities + one valid lane + one broken lane
+    const jsonImportRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        facilities: [
+          {
+            refKey: "hq-1",
+            name: "Tallinn Assembly HQ",
+            kind: "HQ",
+            countryCode: "EE",
+            lat: 59.437,
+            lng: 24.7536,
+            isOwnFacility: true,
+          },
+          {
+            refKey: "sup-1",
+            name: "Stockholm Precision Steel",
+            kind: "FACTORY",
+            countryCode: "SE",
+            lat: 59.3293,
+            lng: 18.0686,
+            isOwnFacility: false,
+          },
+          {
+            // Invalid countryCode -> recorded in errors without blocking valid rows
+            name: "Broken Facility",
+            countryCode: "INVALID",
+            lat: 50,
+            lng: 10,
+          },
+        ],
+        lanes: [
+          {
+            fromFacilityRef: "sup-1",
+            toFacilityRef: "hq-1",
+            materialCategory: "Stainless Steel",
+            transportMode: "SEA",
+            volumeSharePct: 100,
+            annualVolume: 250,
+            volumeUnit: "TONNES",
+            annualSpendEur: 420000,
+          },
+          {
+            fromFacilityRef: "does-not-exist",
+            toFacilityRef: "hq-1",
+            materialCategory: "Ghost Material",
+          },
+        ],
+      }),
+    });
+    expect(jsonImportRes.status).toBe(200);
+    const jsonSummary = BulkImportSummarySchema.parse(
+      await jsonImportRes.json(),
+    );
+    expect(jsonSummary.createdFacilities).toBe(2);
+    expect(jsonSummary.createdLanes).toBe(1);
+    expect(jsonSummary.errors).toHaveLength(2);
+
+    // 2. Export CSV & JSON
+    const exportJsonRes = await app.request(
+      "/api/v1/workspace/export?format=json",
+      { headers: { Cookie: orgA.cookie } },
+    );
+    expect(exportJsonRes.status).toBe(200);
+    expect(exportJsonRes.headers.get("content-disposition")).toContain(".json");
+    const exportedJson = WorkspaceExportJsonSchema.parse(
+      await exportJsonRes.json(),
+    );
+    expect(exportedJson.facilities).toHaveLength(2);
+    expect(exportedJson.lanes).toHaveLength(1);
+
+    const exportCsvRes = await app.request(
+      "/api/v1/workspace/export?format=csv",
+      { headers: { Cookie: orgA.cookie } },
+    );
+    expect(exportCsvRes.status).toBe(200);
+    expect(exportCsvRes.headers.get("content-type")).toContain("text/csv");
+    const exportedCsv = await exportCsvRes.text();
+    expect(exportedCsv).toContain("Tallinn Assembly HQ");
+    expect(exportedCsv).toContain("Stainless Steel");
+
+    // Invalid export format rejected with 400
+    const badExportRes = await app.request(
+      "/api/v1/workspace/export?format=xml",
+      { headers: { Cookie: orgA.cookie } },
+    );
+    expect(badExportRes.status).toBe(400);
+
+    // 3. Round-trip import exported CSV into a fresh Org B
+    const orgB = await registerOrg(app, {
+      email: "roundtrip@baltic-clone.ee",
+      organizationName: "Baltic Clone OU",
+    });
+    const csvImportRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/csv", Cookie: orgB.cookie },
+      body: exportedCsv,
+    });
+    expect(csvImportRes.status).toBe(200);
+    const csvSummary = BulkImportSummarySchema.parse(await csvImportRes.json());
+    expect(csvSummary.createdFacilities).toBe(2);
+    expect(csvSummary.createdLanes).toBe(1);
+    expect(csvSummary.errors).toHaveLength(0);
+
+    const orgBNetRes = await app.request("/api/v1/workspace/network", {
+      headers: { Cookie: orgB.cookie },
+    });
+    const orgBNet = WorkspaceNetworkResponseSchema.parse(
+      await orgBNetRes.json(),
+    );
+    expect(orgBNet.facilities).toHaveLength(2);
+    expect(orgBNet.lanes).toHaveLength(1);
+  });
+
+  it("generates a strict CSRD Executive Risk & ESG Report via GET /api/v1/analytics/report", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, {
+      email: "csrd@estonia-exec.ee",
+      organizationName: "Estonia CSRD Exec AS",
+    });
+
+    // Seed demo network & set Scope 1/2
+    const seedRes = await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(seedRes.status).toBe(201);
+
+    await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        scope1Tco2e: 200,
+        scope2Tco2e: 80,
+        esgBadges: ["CSRD Ready"],
+      }),
+    });
+
+    const reportRes = await app.request("/api/v1/analytics/report", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(reportRes.status).toBe(200);
+    const report = ExecutiveReportSchema.parse(await reportRes.json());
+
+    expect(report.reportVersion).toBe("1.0");
+    expect(report.organization.orgId).toBe(orgA.orgId);
+    expect(report.organization.scope1Tco2e).toBe(200);
+    expect(report.organization.scope2Tco2e).toBe(80);
+    expect(report.csrdDisclosures.scope1Status).toBe("REPORTED");
+    expect(report.csrdDisclosures.scope2Status).toBe("REPORTED");
+    expect(report.csrdDisclosures.totalReportedTco2e).toBeGreaterThan(280);
+    expect(report.verifiedPartnerCoverage.totalTier1Suppliers).toBeGreaterThan(
+      0,
+    );
+    expect(report.topRecommendedActions.length).toBeGreaterThan(0);
+  });
+});

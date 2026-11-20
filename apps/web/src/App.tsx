@@ -22,7 +22,9 @@ import {
   type MapInteractionMode,
   type WorkspaceViewMode,
 } from "./components/FilterBar.js";
+import { ImportExportModal } from "./components/ImportExportModal.js";
 import { LogicalGraphView } from "./components/LogicalGraphView.js";
+import { OrgSettingsModal } from "./components/OrgSettingsModal.js";
 import { SupplyMap } from "./components/SupplyMap.js";
 import { WhatIfSimulatorDrawer } from "./components/WhatIfSimulatorDrawer.js";
 import {
@@ -91,6 +93,10 @@ export function App() {
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [directoryInitialCapability, setDirectoryInitialCapability] =
     useState("");
+
+  // M4 Org ESG Settings & Import/Export modal state
+  const [orgSettingsOpen, setOrgSettingsOpen] = useState(false);
+  const [importExportOpen, setImportExportOpen] = useState(false);
 
   // Filter & selection state
   const [activeProductId, setActiveProductId] = useState<string | null>(null);
@@ -525,6 +531,12 @@ export function App() {
         onOpenAcceptInvite={() => {
           setAcceptInviteOpen(true);
         }}
+        onOpenOrgSettings={() => {
+          setOrgSettingsOpen(true);
+        }}
+        onOpenImportExport={() => {
+          setImportExportOpen(true);
+        }}
         onFitNetwork={() => setFitTrigger((n) => n + 1)}
         onFocusUnverifiedHq={() => {
           setMapMode("inspect");
@@ -718,6 +730,28 @@ export function App() {
           open={directoryOpen}
           initialCapability={directoryInitialCapability}
           onClose={() => setDirectoryOpen(false)}
+        />
+
+        <OrgSettingsModal
+          open={orgSettingsOpen}
+          organization={session.organization}
+          onClose={() => setOrgSettingsOpen(false)}
+          onUpdated={(updatedOrg) => {
+            setSession((prev) =>
+              prev ? { ...prev, organization: updatedOrg } : prev,
+            );
+          }}
+        />
+
+        <ImportExportModal
+          open={importExportOpen}
+          organization={session.organization}
+          activeProductId={activeProductId}
+          activeInputId={activeInputId}
+          onClose={() => setImportExportOpen(false)}
+          onImported={() => {
+            void loadWorkspaceNetwork(true);
+          }}
         />
       </div>
     </div>

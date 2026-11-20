@@ -1,7 +1,9 @@
 import {
   AnalyticsSummarySchema,
   AnonymizedRiskAlertSchema,
+  ExecutiveReportSchema,
   SimulateAnalyticsResponseSchema,
+  WorkspaceExportJsonSchema,
   WorkspaceNetworkResponseSchema,
 } from "@kulgo/shared";
 import { describe, expect, it } from "vitest";
@@ -622,35 +624,55 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     );
     expect(acceptRes.status).toBe(200);
 
-    // 4. Org A queries ALL its endpoints after verification
-    const [afterNetworkRes, afterSummaryRes, afterSimRes, invitesRes, dirRes] =
-      await Promise.all([
-        app.request("/api/v1/workspace/network", {
-          headers: { Cookie: orgA.cookie },
+    // 4. Org A queries ALL its endpoints after verification (including M4 export & CSRD report)
+    const [
+      afterNetworkRes,
+      afterSummaryRes,
+      afterSimRes,
+      invitesRes,
+      dirRes,
+      reportRes,
+      exportJsonRes,
+      exportCsvRes,
+    ] = await Promise.all([
+      app.request("/api/v1/workspace/network", {
+        headers: { Cookie: orgA.cookie },
+      }),
+      app.request("/api/v1/analytics/summary", {
+        headers: { Cookie: orgA.cookie },
+      }),
+      app.request("/api/v1/analytics/simulate", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+        body: JSON.stringify({
+          laneChanges: [{ laneId: aLane.laneId, transportMode: "RAIL" }],
         }),
-        app.request("/api/v1/analytics/summary", {
-          headers: { Cookie: orgA.cookie },
-        }),
-        app.request("/api/v1/analytics/simulate", {
-          method: "POST",
-          headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
-          body: JSON.stringify({
-            laneChanges: [{ laneId: aLane.laneId, transportMode: "RAIL" }],
-          }),
-        }),
-        app.request("/api/v1/invites", {
-          headers: { Cookie: orgA.cookie },
-        }),
-        app.request("/api/v1/directory/alternatives", {
-          headers: { Cookie: orgA.cookie },
-        }),
-      ]);
+      }),
+      app.request("/api/v1/invites", {
+        headers: { Cookie: orgA.cookie },
+      }),
+      app.request("/api/v1/directory/alternatives", {
+        headers: { Cookie: orgA.cookie },
+      }),
+      app.request("/api/v1/analytics/report", {
+        headers: { Cookie: orgA.cookie },
+      }),
+      app.request("/api/v1/workspace/export?format=json", {
+        headers: { Cookie: orgA.cookie },
+      }),
+      app.request("/api/v1/workspace/export?format=csv", {
+        headers: { Cookie: orgA.cookie },
+      }),
+    ]);
 
     expect(afterNetworkRes.status).toBe(200);
     expect(afterSummaryRes.status).toBe(200);
     expect(afterSimRes.status).toBe(200);
     expect(invitesRes.status).toBe(200);
     expect(dirRes.status).toBe(200);
+    expect(reportRes.status).toBe(200);
+    expect(exportJsonRes.status).toBe(200);
+    expect(exportCsvRes.status).toBe(200);
 
     const afterNetwork = WorkspaceNetworkResponseSchema.parse(
       await afterNetworkRes.json(),
@@ -663,6 +685,19 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     );
     const invitesJson = await invitesRes.json();
     const dirJson = await dirRes.json();
+    const reportJson = ExecutiveReportSchema.parse(await reportRes.json());
+    const exportJson = WorkspaceExportJsonSchema.parse(
+      await exportJsonRes.json(),
+    );
+    const exportCsv = await exportCsvRes.text();
+
+    // ExecutiveReportSchema strictly rejects any leaked Tier-2+ fields
+    expect(() =>
+      ExecutiveReportSchema.parse({
+        ...reportJson,
+        hiddenTier2Suppliers: ["Secret Kremlin Alloys LLC"],
+      }),
+    ).toThrow();
 
     // Org A's Tier-1 facility is now marked Network-Verified & SITE_VERIFIED
     const verifiedTier1 = afterNetwork.facilities.find(
@@ -689,13 +724,16 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(afterSummary.confidence).toBe("NETWORK_VERIFIED");
 
     // CRITICAL PRIVACY ASSERTION: ZERO Org C identifiers, names, emails, or coordinates
-    // may appear ANYWHERE in any of Org A's API responses!
+    // may appear ANYWHERE in any of Org A's API responses (including exports & CSRD report)!
     const allOrgAPayloads = JSON.stringify({
       afterNetwork,
       afterSummary,
       afterSim,
       invitesJson,
       dirJson,
+      reportJson,
+      exportJson,
+      exportCsv,
     });
 
     const forbiddenSecrets = [
@@ -714,5 +752,78 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     for (const secret of forbiddenSecrets) {
       expect(allOrgAPayloads).not.toContain(secret);
     }
+  });
+
+  it("enforces auth and strict org isolation on M4 endpoints (org profile, bulk import, export, CSRD report)", async () => {
+    const app = createTestApp();
+
+    // Unauthenticated requests return 401
+    expect(
+      (
+        await app.request("/api/v1/auth/organization", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ scope1Tco2e: 100 }),
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await app.request("/api/v1/workspace/import", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ facilities: [] }),
+        })
+      ).status,
+    ).toBe(401);
+    expect((await app.request("/api/v1/workspace/export?format=json")).status).toBe(
+      401,
+    );
+    expect((await app.request("/api/v1/analytics/report")).status).toBe(401);
+
+    const orgA = await registerOrg(app, "m4-a@org-a.ee", "M4 Alpha AS");
+    const orgB = await registerOrg(app, "m4-b@org-b.ee", "M4 Beta AS");
+
+    const seedARes = await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: orgA.cookie },
+    });
+    const networkA = WorkspaceNetworkResponseSchema.parse(await seedARes.json());
+    const orgAFacId = networkA.facilities[0]!.facilityId;
+
+    // Org B cannot bulk-import a lane referencing Org A's facilityId
+    const crossOrgImport = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        facilities: [
+          {
+            refKey: "b-hq",
+            ownerOrgId: orgA.orgId,
+            name: "Org B Own HQ",
+            countryCode: "EE",
+            lat: 59.437,
+            lng: 24.7536,
+          },
+        ],
+        lanes: [
+          {
+            fromFacilityId: orgAFacId,
+            toFacilityRef: "b-hq",
+            materialCategory: "Cross-Org Attempt",
+          },
+        ],
+      }),
+    });
+    expect(crossOrgImport.status).toBe(200);
+    const importSummary = (await crossOrgImport.json()) as {
+      createdFacilities: number;
+      createdLanes: number;
+      errors: Array<{ entity: string }>;
+    };
+    expect(importSummary.createdFacilities).toBe(1);
+    expect(importSummary.createdLanes).toBe(0);
+    expect(importSummary.errors).toHaveLength(1);
+    expect(importSummary.errors[0]?.entity).toBe("LANE");
   });
 });
