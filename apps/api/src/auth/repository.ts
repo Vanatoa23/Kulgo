@@ -3,6 +3,7 @@ import {
   OrganizationSchema,
   UserSchema,
   type Organization,
+  type UpdateOrganizationProfileInput,
   type User,
 } from "@kulgo/shared";
 import type { ArcadeDbClient } from "../db/client.js";
@@ -51,6 +52,10 @@ export interface AuthRepository {
   findUserByEmail(email: string): Promise<StoredUser | null>;
   findUserById(userId: string): Promise<User | null>;
   findOrganizationById(orgId: string): Promise<Organization | null>;
+  updateOrganizationProfile(
+    orgId: string,
+    input: UpdateOrganizationProfileInput,
+  ): Promise<Organization | null>;
   updateOrganizationDirectoryProfile(
     orgId: string,
     input: UpdateOrganizationDirectoryInput,
@@ -166,35 +171,71 @@ export class ArcadeDbAuthRepository implements AuthRepository {
     return row ? mapOrganizationRow(row) : null;
   }
 
-  async updateOrganizationDirectoryProfile(
+  async updateOrganizationProfile(
     orgId: string,
-    input: UpdateOrganizationDirectoryInput,
+    input: UpdateOrganizationProfileInput,
   ): Promise<Organization | null> {
     const existing = await this.findOrganizationById(orgId);
     if (!existing) return null;
 
-    const dedupedCapabilities = Array.from(
-      new Set(
-        input.capabilities
-          .map((item) => item.trim())
-          .filter((item) => item.length > 0),
-      ),
-    );
+    const dedupeList = (items: string[]): string[] =>
+      Array.from(
+        new Set(
+          items.map((item) => item.trim()).filter((item) => item.length > 0),
+        ),
+      );
+
+    const nextScope1 =
+      input.scope1Tco2e !== undefined
+        ? input.scope1Tco2e
+        : existing.scope1Tco2e;
+    const nextScope2 =
+      input.scope2Tco2e !== undefined
+        ? input.scope2Tco2e
+        : existing.scope2Tco2e;
+    const nextEsgBadges =
+      input.esgBadges !== undefined
+        ? dedupeList(input.esgBadges)
+        : existing.esgBadges;
+    const nextOpenToNewBuyers =
+      input.openToNewBuyers !== undefined
+        ? input.openToNewBuyers
+        : existing.openToNewBuyers;
+    const nextCapabilities =
+      input.capabilities !== undefined
+        ? dedupeList(input.capabilities)
+        : existing.capabilities;
 
     await this.db.command(
       "sql",
       `UPDATE Organization SET
+        scope1Tco2e = :scope1Tco2e,
+        scope2Tco2e = :scope2Tco2e,
+        esgBadges = :esgBadges,
         openToNewBuyers = :openToNewBuyers,
         capabilities = :capabilities
        WHERE orgId = :orgId`,
       {
-        openToNewBuyers: input.openToNewBuyers,
-        capabilities: dedupedCapabilities,
+        scope1Tco2e: nextScope1,
+        scope2Tco2e: nextScope2,
+        esgBadges: nextEsgBadges,
+        openToNewBuyers: nextOpenToNewBuyers,
+        capabilities: nextCapabilities,
         orgId,
       },
     );
 
     return this.findOrganizationById(orgId);
+  }
+
+  async updateOrganizationDirectoryProfile(
+    orgId: string,
+    input: UpdateOrganizationDirectoryInput,
+  ): Promise<Organization | null> {
+    return this.updateOrganizationProfile(orgId, {
+      openToNewBuyers: input.openToNewBuyers,
+      capabilities: input.capabilities,
+    });
   }
 
   async listDirectoryOrganizations(): Promise<Organization[]> {
@@ -397,25 +438,42 @@ export class InMemoryAuthRepository implements AuthRepository {
     });
   }
 
-  async updateOrganizationDirectoryProfile(
+  async updateOrganizationProfile(
     orgId: string,
-    input: UpdateOrganizationDirectoryInput,
+    input: UpdateOrganizationProfileInput,
   ): Promise<Organization | null> {
     const existing = this.organizations.get(orgId);
     if (!existing) return null;
 
-    const dedupedCapabilities = Array.from(
-      new Set(
-        input.capabilities
-          .map((item) => item.trim())
-          .filter((item) => item.length > 0),
-      ),
-    );
+    const dedupeList = (items: string[]): string[] =>
+      Array.from(
+        new Set(
+          items.map((item) => item.trim()).filter((item) => item.length > 0),
+        ),
+      );
 
     const updated = OrganizationSchema.parse({
       ...existing,
-      openToNewBuyers: input.openToNewBuyers,
-      capabilities: dedupedCapabilities,
+      scope1Tco2e:
+        input.scope1Tco2e !== undefined
+          ? input.scope1Tco2e
+          : existing.scope1Tco2e,
+      scope2Tco2e:
+        input.scope2Tco2e !== undefined
+          ? input.scope2Tco2e
+          : existing.scope2Tco2e,
+      esgBadges:
+        input.esgBadges !== undefined
+          ? dedupeList(input.esgBadges)
+          : existing.esgBadges,
+      openToNewBuyers:
+        input.openToNewBuyers !== undefined
+          ? input.openToNewBuyers
+          : existing.openToNewBuyers,
+      capabilities:
+        input.capabilities !== undefined
+          ? dedupeList(input.capabilities)
+          : existing.capabilities,
     });
     this.organizations.set(orgId, updated);
     return {
@@ -423,6 +481,16 @@ export class InMemoryAuthRepository implements AuthRepository {
       esgBadges: [...updated.esgBadges],
       capabilities: [...updated.capabilities],
     };
+  }
+
+  async updateOrganizationDirectoryProfile(
+    orgId: string,
+    input: UpdateOrganizationDirectoryInput,
+  ): Promise<Organization | null> {
+    return this.updateOrganizationProfile(orgId, {
+      openToNewBuyers: input.openToNewBuyers,
+      capabilities: input.capabilities,
+    });
   }
 
   async listDirectoryOrganizations(): Promise<Organization[]> {

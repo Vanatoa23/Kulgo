@@ -1,5 +1,6 @@
 import {
   AnalyticsSummarySchema,
+  ExecutiveReportSchema,
   SimulateAnalyticsRequestSchema,
   SimulateAnalyticsResponseSchema,
 } from "@kulgo/shared";
@@ -52,6 +53,39 @@ export function createAnalyticsRoutes({
 
     const summary = await analyticsRepo.getSummary(orgId, parsedQuery.data);
     return c.json(AnalyticsSummarySchema.parse(summary), 200);
+  });
+
+  routes.get("/report", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    const rawProductId = c.req.query("productId");
+    const rawInputId = c.req.query("inputId");
+
+    const parsedQuery = AnalyticsQuerySchema.safeParse({
+      productId: rawProductId || undefined,
+      inputId: rawInputId || undefined,
+    });
+    if (!parsedQuery.success) {
+      return c.json(
+        {
+          error: "Invalid query parameters",
+          details: parsedQuery.error.flatten(),
+        },
+        400,
+      );
+    }
+
+    try {
+      const report = await analyticsRepo.getExecutiveReport(
+        orgId,
+        parsedQuery.data,
+      );
+      return c.json(ExecutiveReportSchema.parse(report), 200);
+    } catch (err) {
+      if (err instanceof AnalyticsValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
   });
 
   routes.post("/simulate", async (c) => {

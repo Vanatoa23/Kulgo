@@ -2,6 +2,8 @@ import {
   AuthMeResponseSchema,
   LoginInputSchema,
   RegisterInputSchema,
+  UpdateOrganizationProfileInputSchema,
+  UpdateOrganizationProfileResponseSchema,
 } from "@kulgo/shared";
 import { Hono } from "hono";
 import type { AppConfig } from "../config.js";
@@ -174,6 +176,40 @@ export function createAuthRoutes({
   routes.get("/me", requireAuth, (c) => {
     const auth = c.get("auth");
     const payload = AuthMeResponseSchema.parse(auth);
+    return c.json(payload, 200);
+  });
+
+  routes.patch("/organization", requireAuth, async (c) => {
+    const auth = c.get("auth");
+    let rawBody: unknown;
+    try {
+      rawBody = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = UpdateOrganizationProfileInputSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return c.json(
+        {
+          error: "Validation failed",
+          details: parsed.error.flatten(),
+        },
+        400,
+      );
+    }
+
+    const updated = await authRepo.updateOrganizationProfile(
+      auth.organization.orgId,
+      parsed.data,
+    );
+    if (!updated) {
+      return c.json({ error: "Organization not found" }, 404);
+    }
+
+    const payload = UpdateOrganizationProfileResponseSchema.parse({
+      organization: updated,
+    });
     return c.json(payload, 200);
   });
 

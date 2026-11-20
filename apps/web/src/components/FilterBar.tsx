@@ -8,6 +8,7 @@ import type {
 import {
   Building2,
   Crosshair,
+  FileSpreadsheet,
   GitBranchPlus,
   Globe2,
   Link2,
@@ -17,6 +18,7 @@ import {
   MapPinPlus,
   Maximize2,
   Network,
+  Settings2,
   SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
@@ -55,6 +57,8 @@ export interface FilterBarProps {
   onOpenSimulator: () => void;
   onOpenDirectory: () => void;
   onOpenAcceptInvite: () => void;
+  onOpenOrgSettings: () => void;
+  onOpenImportExport: () => void;
   onFitNetwork: () => void;
   onFocusUnverifiedHq: () => void;
   onLogout: () => void;
@@ -83,6 +87,8 @@ export function FilterBar({
   onOpenSimulator,
   onOpenDirectory,
   onOpenAcceptInvite,
+  onOpenOrgSettings,
+  onOpenImportExport,
   onFitNetwork,
   onFocusUnverifiedHq,
   onLogout,
@@ -172,6 +178,24 @@ export function FilterBar({
           >
             <Link2 className="h-3.5 w-3.5 text-teal-400" />
             <span>Accept Invite</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenImportExport}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 hover:bg-sky-500/25 text-sky-200 font-medium text-xs px-3 py-1.5 transition-colors cursor-pointer"
+          >
+            <FileSpreadsheet className="h-3.5 w-3.5" />
+            <span>Import / Export</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenOrgSettings}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-xs px-3 py-1.5 transition-colors cursor-pointer"
+          >
+            <Settings2 className="h-3.5 w-3.5 text-emerald-400" />
+            <span>Org ESG</span>
           </button>
 
           <button

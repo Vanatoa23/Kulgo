@@ -241,3 +241,79 @@ export const UpdateSupplyLaneInputSchema = z.object({
 });
 export type UpdateSupplyLaneInput = z.infer<typeof UpdateSupplyLaneInputSchema>;
 
+// --- M4 Bulk Import & Export Schemas ---
+
+export const BulkImportFacilityRowSchema = CreateFacilityInputSchema.extend({
+  refKey: z.string().trim().min(1).max(100).optional(),
+});
+export type BulkImportFacilityRow = z.infer<typeof BulkImportFacilityRowSchema>;
+
+export const BulkImportLaneRowSchema = z.object({
+  fromFacilityId: z.string().uuid().optional(),
+  toFacilityId: z.string().uuid().optional(),
+  fromFacilityRef: z.string().trim().min(1).max(160).optional(),
+  toFacilityRef: z.string().trim().min(1).max(160).optional(),
+  inputId: z.string().uuid().nullable().optional(),
+  materialCategory: z.string().trim().min(1).max(80),
+  transportMode: TransportModeSchema.default("ROAD"),
+  volumeSharePct: z.number().finite().min(0).max(100).default(100),
+  annualVolume: z.number().finite().nonnegative().nullable().optional(),
+  volumeUnit: VolumeUnitSchema.default("TONNES"),
+  annualSpendEur: z.number().finite().nonnegative().nullable().optional(),
+  contractEndDate: z.string().date().nullable().optional(),
+  contractTerms: z.string().trim().max(240).nullable().optional(),
+  leadTimeDays: z.number().int().nonnegative().nullable().optional(),
+  distanceKm: z.number().finite().nonnegative().nullable().optional(),
+  estimatedLaneCo2e: z.number().finite().nonnegative().nullable().optional(),
+  riskStatus: RiskStatusSchema.default("GREEN"),
+  riskReason: z.string().trim().max(300).nullable().optional(),
+});
+export type BulkImportLaneRow = z.infer<typeof BulkImportLaneRowSchema>;
+
+export const BulkImportJsonRequestSchema = z.object({
+  facilities: z.array(z.unknown()).max(500).optional(),
+  lanes: z.array(z.unknown()).max(1000).optional(),
+  csv: z.string().min(1).max(2_000_000).optional(),
+});
+export type BulkImportJsonRequest = z.infer<typeof BulkImportJsonRequestSchema>;
+
+export const BulkImportErrorSchema = z
+  .object({
+    row: z.number().int().nonnegative(),
+    entity: z.enum(["FACILITY", "LANE", "ROW"]),
+    field: z.string().optional(),
+    message: z.string().min(1),
+  })
+  .strict();
+export type BulkImportError = z.infer<typeof BulkImportErrorSchema>;
+
+export const BulkImportSummarySchema = z
+  .object({
+    createdFacilities: z.number().int().nonnegative(),
+    createdLanes: z.number().int().nonnegative(),
+    errors: z.array(BulkImportErrorSchema),
+  })
+  .strict();
+export type BulkImportSummary = z.infer<typeof BulkImportSummarySchema>;
+
+export const WorkspaceExportJsonSchema = z
+  .object({
+    exportVersion: z.literal("1.0"),
+    exportedAt: z.string().datetime(),
+    organization: z
+      .object({
+        orgId: z.string().uuid(),
+        name: z.string().min(1).max(160),
+        countryCode: z.string().length(2),
+        sector: z.string().min(1).max(100),
+      })
+      .strict(),
+    products: z.array(ProductSchema),
+    inputs: z.array(SupplyInputSchema),
+    facilities: z.array(FacilitySchema),
+    lanes: z.array(SupplyLaneSchema),
+  })
+  .strict();
+export type WorkspaceExportJson = z.infer<typeof WorkspaceExportJsonSchema>;
+
+

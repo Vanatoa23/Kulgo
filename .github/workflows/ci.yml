@@ -70,3 +70,11 @@ jobs:
         run: |
           pnpm db:bootstrap
           pnpm db:bootstrap
+      - name: Live ArcadeDB Integration Tests
+        env:
+          ARCADEDB_URL: http://127.0.0.1:2480
+          ARCADEDB_DATABASE: kulgo_ci
+          ARCADEDB_USER: root
+          ARCADEDB_PASSWORD: ci-test-password
+        run: pnpm --filter @kulgo/api test:integration
+

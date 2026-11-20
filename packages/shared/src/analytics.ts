@@ -160,3 +160,82 @@ export const HealthResponseSchema = z.object({
   timestamp: z.string().datetime(),
 });
 export type HealthResponse = z.infer<typeof HealthResponseSchema>;
+
+// --- M4 CSRD / Executive Risk & ESG Report DTO ---
+
+export const ExecutiveReportOrganizationSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    name: z.string().min(1).max(160),
+    countryCode: z.string().length(2),
+    sector: z.string().min(1).max(100),
+    esgBadges: z.array(z.string()),
+    scope1Tco2e: z.number().nonnegative().nullable(),
+    scope2Tco2e: z.number().nonnegative().nullable(),
+    openToNewBuyers: z.boolean(),
+    capabilities: z.array(z.string()),
+  })
+  .strict();
+export type ExecutiveReportOrganization = z.infer<
+  typeof ExecutiveReportOrganizationSchema
+>;
+
+export const VerifiedPartnerCoverageSchema = z
+  .object({
+    totalTier1Suppliers: z.number().int().nonnegative(),
+    verifiedTier1Suppliers: z.number().int().nonnegative(),
+    unverifiedTier1Suppliers: z.number().int().nonnegative(),
+    verifiedCoveragePct: z.number().min(0).max(100),
+    siteVerifiedFacilities: z.number().int().nonnegative(),
+    hqEstimatedFacilities: z.number().int().nonnegative(),
+  })
+  .strict();
+export type VerifiedPartnerCoverage = z.infer<
+  typeof VerifiedPartnerCoverageSchema
+>;
+
+export const RecommendedActionSchema = z
+  .object({
+    priority: z.enum(["HIGH", "MEDIUM", "LOW"]),
+    category: z.string().min(1),
+    title: z.string().min(1),
+    action: z.string().min(1),
+    affectedTier1FacilityIds: z.array(z.string().uuid()),
+    confidence: ConfidenceLevelSchema,
+  })
+  .strict();
+export type RecommendedAction = z.infer<typeof RecommendedActionSchema>;
+
+export const CsrdDisclosuresSchema = z
+  .object({
+    scope1Status: z.enum(["REPORTED", "MISSING"]),
+    scope2Status: z.enum(["REPORTED", "MISSING"]),
+    scope3Methodology: z.enum([
+      "PRIMARY_VERIFIED",
+      "HYBRID_VERIFIED_AND_ESTIMATED",
+      "SPEND_AND_FACTOR_ESTIMATED",
+    ]),
+    totalReportedTco2e: z.number().nonnegative(),
+    privacyAttestation: z.string().min(1),
+  })
+  .strict();
+export type CsrdDisclosures = z.infer<typeof CsrdDisclosuresSchema>;
+
+/**
+ * Strictly anonymized CSRD / Executive Risk & ESG Report DTO.
+ * Every nested schema uses `.strict()` so no Tier-2+ identities, emails,
+ * or exact coordinates can ever be serialized.
+ */
+export const ExecutiveReportSchema = z
+  .object({
+    reportVersion: z.literal("1.0"),
+    generatedAt: z.string().datetime(),
+    organization: ExecutiveReportOrganizationSchema,
+    analytics: AnalyticsSummarySchema,
+    verifiedPartnerCoverage: VerifiedPartnerCoverageSchema,
+    topRecommendedActions: z.array(RecommendedActionSchema),
+    csrdDisclosures: CsrdDisclosuresSchema,
+  })
+  .strict();
+export type ExecutiveReport = z.infer<typeof ExecutiveReportSchema>;
+

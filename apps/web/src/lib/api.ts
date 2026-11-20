@@ -2,8 +2,10 @@ import {
   AcceptInviteResponseSchema,
   AnalyticsSummarySchema,
   AuthMeResponseSchema,
+  BulkImportSummarySchema,
   CreateInviteResponseSchema,
   DirectoryAlternativesResponseSchema,
+  ExecutiveReportSchema,
   FacilitySchema,
   HealthResponseSchema,
   ListInvitesResponseSchema,
@@ -12,22 +14,28 @@ import {
   SimulateAnalyticsResponseSchema,
   SupplyInputSchema,
   SupplyLaneSchema,
+  UpdateOrganizationProfileResponseSchema,
+  WorkspaceExportJsonSchema,
   WorkspaceNetworkResponseSchema,
   type AcceptInviteInput,
   type AcceptInviteResponse,
   type AlternativeCandidate,
   type AnalyticsSummary,
   type AuthMeResponse,
+  type BulkImportJsonRequest,
+  type BulkImportSummary,
   type CreateFacilityInput,
   type CreateInviteInput,
   type CreateInviteResponse,
   type CreateProductInput,
   type CreateSupplyInputInput,
   type CreateSupplyLaneInput,
+  type ExecutiveReport,
   type Facility,
   type HealthResponse,
   type Invitation,
   type LoginInput,
+  type Organization,
   type Product,
   type RegisterInput,
   type RevokeInviteResponse,
@@ -36,9 +44,11 @@ import {
   type SupplyInput,
   type SupplyLane,
   type UpdateFacilityInput,
+  type UpdateOrganizationProfileInput,
   type UpdateProductInput,
   type UpdateSupplyInputInput,
   type UpdateSupplyLaneInput,
+  type WorkspaceExportJson,
   type WorkspaceNetworkResponse,
 } from "@kulgo/shared";
 
@@ -453,3 +463,74 @@ export async function listDirectoryAlternatives(
   );
   return result.candidates;
 }
+
+// --- Org ESG & Directory Profile Settings (M4) ---
+
+export async function updateOrganizationProfile(
+  input: UpdateOrganizationProfileInput,
+): Promise<Organization> {
+  const result = await apiRequest(
+    "/api/v1/auth/organization",
+    { method: "PATCH", body: input },
+    (payload) => parseWithSchema(UpdateOrganizationProfileResponseSchema, payload),
+  );
+  return result.organization;
+}
+
+// --- Bulk Import & Export (M4) ---
+
+export async function bulkImportWorkspace(
+  payload: BulkImportJsonRequest,
+): Promise<BulkImportSummary> {
+  return apiRequest(
+    "/api/v1/workspace/import",
+    { method: "POST", body: payload },
+    (res) => parseWithSchema(BulkImportSummarySchema, res),
+  );
+}
+
+export async function exportWorkspaceJson(): Promise<WorkspaceExportJson> {
+  return apiRequest(
+    "/api/v1/workspace/export?format=json",
+    { method: "GET" },
+    (res) => parseWithSchema(WorkspaceExportJsonSchema, res),
+  );
+}
+
+export async function exportWorkspaceCsv(): Promise<string> {
+  const url = `${getApiBaseUrl()}/api/v1/workspace/export?format=csv`;
+  const response = await fetch(url, {
+    method: "GET",
+    credentials: "include",
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      text || `Export failed with status ${response.status}`,
+    );
+  }
+  return text;
+}
+
+// --- CSRD / Executive Risk & ESG Report (M4) ---
+
+export async function getExecutiveReport(
+  filters?: NetworkQueryFilters,
+): Promise<ExecutiveReport> {
+  const params = new URLSearchParams();
+  if (filters?.productId) {
+    params.set("productId", filters.productId);
+  }
+  if (filters?.inputId) {
+    params.set("inputId", filters.inputId);
+  }
+  const query = params.toString();
+  const path = query
+    ? `/api/v1/analytics/report?${query}`
+    : "/api/v1/analytics/report";
+  return apiRequest(path, { method: "GET" }, (res) =>
+    parseWithSchema(ExecutiveReportSchema, res),
+  );
+}
+
