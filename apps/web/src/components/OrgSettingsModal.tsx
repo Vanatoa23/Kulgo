@@ -1,21 +1,34 @@
 import type {
   Organization,
+  OrgMember,
   UpdateOrganizationProfileInput,
+  User,
+  UserRole,
 } from "@kulgo/shared";
 import {
   CheckCircle2,
   Leaf,
   Loader2,
+  Lock,
   Plus,
   Settings2,
   ShieldCheck,
+  Trash2,
+  UserPlus,
+  Users,
   X,
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
-import { updateOrganizationProfile } from "../lib/api.js";
+import {
+  addOrgMember,
+  listOrgMembers,
+  removeOrgMember,
+  updateOrganizationProfile,
+} from "../lib/api.js";
 
 export interface OrgSettingsModalProps {
   open: boolean;
+  currentUser: User;
   organization: Organization;
   onClose: () => void;
   onUpdated: (organization: Organization) => void;
@@ -43,10 +56,13 @@ function parseCommaList(raw: string): string[] {
 
 export function OrgSettingsModal({
   open,
+  currentUser,
   organization,
   onClose,
   onUpdated,
 }: OrgSettingsModalProps) {
+  const isOwner = currentUser.role === "OWNER";
+
   const [scope1Text, setScope1Text] = useState("");
   const [scope2Text, setScope2Text] = useState("");
   const [esgBadges, setEsgBadges] = useState<string[]>([]);
@@ -57,6 +73,17 @@ export function OrgSettingsModal({
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [savedBanner, setSavedBanner] = useState(false);
+
+  // Team Members (M5 RBAC)
+  const [members, setMembers] = useState<OrgMember[]>([]);
+  const [loadingMembers, setLoadingMembers] = useState(false);
+  const [membersError, setMembersError] = useState<string | null>(null);
+  const [memberBanner, setMemberBanner] = useState<string | null>(null);
+  const [newMemberEmail, setNewMemberEmail] = useState("");
+  const [newMemberPassword, setNewMemberPassword] = useState("");
+  const [newMemberRole, setNewMemberRole] = useState<UserRole>("MEMBER");
+  const [addingMember, setAddingMember] = useState(false);
+  const [removingUserId, setRemovingUserId] = useState<string | null>(null);
 
   useEffect(() => {
     if (!open) return;
@@ -72,19 +99,58 @@ export function OrgSettingsModal({
     setCapabilitiesText(organization.capabilities.join(", "));
     setError(null);
     setSavedBanner(false);
-  }, [open, organization]);
+    setMembersError(null);
+    setMemberBanner(null);
+    setNewMemberEmail("");
+    setNewMemberPassword("");
+    setNewMemberRole("MEMBER");
+
+    let cancelled = false;
+    setLoadingMembers(true);
+    listOrgMembers()
+      .then((list) => {
+        if (!cancelled) {
+          setMembers(list);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setMembersError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load organization team members.",
+          );
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingMembers(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+    // Intentionally only re-initialize when the modal opens or orgId changes,
+    // so saving settings (which updates `organization`) preserves `savedBanner`.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [open, organization.orgId]);
 
   if (!open) {
     return null;
   }
 
+  const ownerCount = members.filter((m) => m.role === "OWNER").length;
+
   const toggleBadge = (badge: string) => {
+    if (!isOwner) return;
     setEsgBadges((prev) =>
       prev.includes(badge) ? prev.filter((b) => b !== badge) : [...prev, badge],
     );
   };
 
   const handleAddCustomBadge = () => {
+    if (!isOwner) return;
     const trimmed = customBadge.trim();
     if (!trimmed) return;
     if (!esgBadges.includes(trimmed)) {
@@ -95,6 +161,7 @@ export function OrgSettingsModal({
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
+    if (!isOwner) return;
     setError(null);
     setSavedBanner(false);
 
@@ -142,6 +209,61 @@ export function OrgSettingsModal({
     }
   };
 
+  const handleAddMember = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!isOwner) return;
+    setMembersError(null);
+    setMemberBanner(null);
+
+    const trimmedEmail = newMemberEmail.trim();
+    if (!trimmedEmail || !trimmedEmail.includes("@")) {
+      setMembersError("Please enter a valid work email address.");
+      return;
+    }
+    if (newMemberPassword.length < 10) {
+      setMembersError("Initial password must be at least 10 characters.");
+      return;
+    }
+
+    setAddingMember(true);
+    try {
+      const created = await addOrgMember({
+        email: trimmedEmail,
+        password: newMemberPassword,
+        role: newMemberRole,
+      });
+      setMembers((prev) => [...prev, created]);
+      setNewMemberEmail("");
+      setNewMemberPassword("");
+      setNewMemberRole("MEMBER");
+      setMemberBanner(`Added ${created.email} as ${created.role}.`);
+    } catch (err) {
+      setMembersError(
+        err instanceof Error ? err.message : "Failed to add team member.",
+      );
+    } finally {
+      setAddingMember(false);
+    }
+  };
+
+  const handleRemoveMember = async (member: OrgMember) => {
+    if (!isOwner) return;
+    setMembersError(null);
+    setMemberBanner(null);
+    setRemovingUserId(member.userId);
+    try {
+      await removeOrgMember(member.userId);
+      setMembers((prev) => prev.filter((m) => m.userId !== member.userId));
+      setMemberBanner(`Removed ${member.email} from ${organization.name}.`);
+    } catch (err) {
+      setMembersError(
+        err instanceof Error ? err.message : "Failed to remove team member.",
+      );
+    } finally {
+      setRemovingUserId(null);
+    }
+  };
+
   return (
     <div
       role="dialog"
@@ -149,7 +271,7 @@ export function OrgSettingsModal({
       aria-labelledby="org-settings-modal-title"
       className="fixed inset-0 z-50 flex items-center justify-center bg-slate-950/80 backdrop-blur-sm p-4"
     >
-      <div className="w-full max-w-xl max-h-[88vh] flex flex-col rounded-2xl border border-slate-800 bg-slate-950 shadow-2xl overflow-hidden">
+      <div className="w-full max-w-2xl max-h-[88vh] flex flex-col rounded-2xl border border-slate-800 bg-slate-950 shadow-2xl overflow-hidden">
         {/* Header */}
         <div className="shrink-0 flex items-center justify-between px-5 py-4 border-b border-slate-800 bg-slate-900/60">
           <div className="flex items-center gap-2.5">
@@ -157,12 +279,23 @@ export function OrgSettingsModal({
               <Settings2 className="h-4 w-4" />
             </div>
             <div>
-              <h2
-                id="org-settings-modal-title"
-                className="text-sm font-semibold text-white"
-              >
-                Org ESG &amp; Directory Settings
-              </h2>
+              <div className="flex items-center gap-2">
+                <h2
+                  id="org-settings-modal-title"
+                  className="text-sm font-semibold text-white"
+                >
+                  Org ESG, Directory &amp; Team Settings
+                </h2>
+                <span
+                  className={`font-mono text-[10px] px-1.5 py-0.5 rounded border ${
+                    isOwner
+                      ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                      : "bg-sky-500/15 border-sky-500/40 text-sky-300"
+                  }`}
+                >
+                  {currentUser.role}
+                </span>
+              </div>
               <p className="text-[11px] text-slate-400">
                 {organization.name} ({organization.countryCode}) —{" "}
                 {organization.sector}
@@ -179,173 +312,358 @@ export function OrgSettingsModal({
           </button>
         </div>
 
-        {/* Form Body */}
-        <form
-          onSubmit={handleSubmit}
-          className="flex-1 overflow-y-auto p-5 space-y-5"
-        >
-          {error && (
-            <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
-              {error}
-            </div>
-          )}
-
-          {savedBanner && (
-            <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-200 flex items-center gap-2">
-              <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+        {/* Scrollable Body */}
+        <div className="flex-1 overflow-y-auto p-5 space-y-6">
+          {!isOwner && (
+            <div className="rounded-lg border border-amber-500/35 bg-amber-500/10 p-3 text-xs text-amber-200 flex items-center gap-2">
+              <Lock className="h-4 w-4 text-amber-400 shrink-0" />
               <span>
-                Organization ESG &amp; directory settings saved. Analytics and
-                CSRD report updated.
+                You are signed in as a <strong>MEMBER</strong>. Only
+                organization <strong>OWNER</strong> users can update Org ESG
+                settings or manage team members.
               </span>
             </div>
           )}
 
-          {/* Scope 1 & 2 CO2e */}
-          <section className="space-y-3">
-            <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
-              <Leaf className="h-3.5 w-3.5 text-emerald-400" />
-              <span>Annual Direct &amp; Energy Emissions (CSRD Scope 1 &amp; 2)</span>
-            </div>
-            <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
-              <label className="block space-y-1">
-                <span className="text-[11px] font-medium text-slate-400">
-                  Scope 1 Emissions (tCO2e / yr)
-                </span>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={scope1Text}
-                  onChange={(e) => setScope1Text(e.target.value)}
-                  placeholder="e.g. 420"
-                  className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
-                />
-              </label>
+          {/* Org ESG & Directory Form */}
+          <form onSubmit={handleSubmit} className="space-y-5">
+            {error && (
+              <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
+                {error}
+              </div>
+            )}
 
-              <label className="block space-y-1">
-                <span className="text-[11px] font-medium text-slate-400">
-                  Scope 2 Emissions (tCO2e / yr)
-                </span>
-                <input
-                  type="number"
-                  min="0"
-                  step="any"
-                  value={scope2Text}
-                  onChange={(e) => setScope2Text(e.target.value)}
-                  placeholder="e.g. 185"
-                  className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
-                />
-              </label>
-            </div>
-          </section>
-
-          {/* ESG Badges */}
-          <section className="space-y-2.5">
-            <span className="block text-xs font-semibold text-slate-200">
-              ESG Certifications &amp; Badges
-            </span>
-            <div className="flex flex-wrap gap-1.5">
-              {PRESET_ESG_BADGES.map((badge) => {
-                const active = esgBadges.includes(badge);
-                return (
-                  <button
-                    key={badge}
-                    type="button"
-                    onClick={() => toggleBadge(badge)}
-                    className={`px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors cursor-pointer ${
-                      active
-                        ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-200"
-                        : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200"
-                    }`}
-                  >
-                    {active ? "✓ " : "+ "}
-                    {badge}
-                  </button>
-                );
-              })}
-              {esgBadges
-                .filter((b) => !PRESET_ESG_BADGES.includes(b))
-                .map((badge) => (
-                  <button
-                    key={badge}
-                    type="button"
-                    onClick={() => toggleBadge(badge)}
-                    className="px-2.5 py-1 rounded-full text-[11px] font-medium border bg-emerald-500/20 border-emerald-500/50 text-emerald-200 cursor-pointer"
-                  >
-                    ✓ {badge} ×
-                  </button>
-                ))}
-            </div>
-            <div className="flex items-center gap-2">
-              <input
-                type="text"
-                value={customBadge}
-                onChange={(e) => setCustomBadge(e.target.value)}
-                onKeyDown={(e) => {
-                  if (e.key === "Enter") {
-                    e.preventDefault();
-                    handleAddCustomBadge();
-                  }
-                }}
-                placeholder="Add custom ESG badge (e.g. FSC Certified)..."
-                className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
-              />
-              <button
-                type="button"
-                onClick={handleAddCustomBadge}
-                className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 cursor-pointer"
-              >
-                <Plus className="h-3.5 w-3.5" />
-                <span>Add</span>
-              </button>
-            </div>
-          </section>
-
-          {/* Alternative Supplier Directory Opt-In */}
-          <section className="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-3">
-            <label className="flex items-start gap-3 cursor-pointer select-none">
-              <input
-                type="checkbox"
-                checked={openToNewBuyers}
-                onChange={(e) => setOpenToNewBuyers(e.target.checked)}
-                className="mt-0.5 rounded border-slate-700 bg-slate-950 text-emerald-500"
-              />
-              <div className="space-y-0.5">
-                <span className="block text-xs font-semibold text-white">
-                  Opt in to Kulgo Alternative Supplier Directory
-                </span>
-                <span className="block text-[11px] text-slate-400">
-                  Allow verified buyers searching for resilient alternatives to
-                  discover your organization by country, capabilities, and ESG
-                  badges.
+            {savedBanner && (
+              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-200 flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                <span>
+                  Organization ESG &amp; directory settings saved. Analytics and
+                  CSRD report updated.
                 </span>
               </div>
-            </label>
+            )}
 
-            <label className="block space-y-1">
-              <span className="text-[11px] font-medium text-slate-400">
-                Public Capabilities (comma-separated)
+            {/* Scope 1 & 2 CO2e */}
+            <section className="space-y-3">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                <Leaf className="h-3.5 w-3.5 text-emerald-400" />
+                <span>
+                  Annual Direct &amp; Energy Emissions (CSRD Scope 1 &amp; 2)
+                </span>
+              </div>
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
+                <label className="block space-y-1">
+                  <span className="text-[11px] font-medium text-slate-400">
+                    Scope 1 Emissions (tCO2e / yr)
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    disabled={!isOwner}
+                    value={scope1Text}
+                    onChange={(e) => setScope1Text(e.target.value)}
+                    placeholder="e.g. 420"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <span className="text-[11px] font-medium text-slate-400">
+                    Scope 2 Emissions (tCO2e / yr)
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    disabled={!isOwner}
+                    value={scope2Text}
+                    onChange={(e) => setScope2Text(e.target.value)}
+                    placeholder="e.g. 185"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+                  />
+                </label>
+              </div>
+            </section>
+
+            {/* ESG Badges */}
+            <section className="space-y-2.5">
+              <span className="block text-xs font-semibold text-slate-200">
+                ESG Certifications &amp; Badges
               </span>
-              <input
-                type="text"
-                value={capabilitiesText}
-                onChange={(e) => setCapabilitiesText(e.target.value)}
-                placeholder="e.g. Precision CNC, Specialty Alloys, Recycled Aluminum"
-                className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
-              />
-            </label>
+              <div className="flex flex-wrap gap-1.5">
+                {PRESET_ESG_BADGES.map((badge) => {
+                  const active = esgBadges.includes(badge);
+                  return (
+                    <button
+                      key={badge}
+                      type="button"
+                      disabled={!isOwner}
+                      onClick={() => toggleBadge(badge)}
+                      className={`px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
+                        active
+                          ? "bg-emerald-500/20 border-emerald-500/50 text-emerald-200"
+                          : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200"
+                      }`}
+                    >
+                      {active ? "✓ " : "+ "}
+                      {badge}
+                    </button>
+                  );
+                })}
+                {esgBadges
+                  .filter((b) => !PRESET_ESG_BADGES.includes(b))
+                  .map((badge) => (
+                    <button
+                      key={badge}
+                      type="button"
+                      disabled={!isOwner}
+                      onClick={() => toggleBadge(badge)}
+                      className="px-2.5 py-1 rounded-full text-[11px] font-medium border bg-emerald-500/20 border-emerald-500/50 text-emerald-200 cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed"
+                    >
+                      ✓ {badge} ×
+                    </button>
+                  ))}
+              </div>
+              {isOwner && (
+                <div className="flex items-center gap-2">
+                  <input
+                    type="text"
+                    value={customBadge}
+                    onChange={(e) => setCustomBadge(e.target.value)}
+                    onKeyDown={(e) => {
+                      if (e.key === "Enter") {
+                        e.preventDefault();
+                        handleAddCustomBadge();
+                      }
+                    }}
+                    placeholder="Add custom ESG badge (e.g. FSC Certified)..."
+                    className="flex-1 rounded-lg border border-slate-800 bg-slate-900 px-3 py-1.5 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
+                  />
+                  <button
+                    type="button"
+                    onClick={handleAddCustomBadge}
+                    className="inline-flex items-center gap-1 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 px-2.5 py-1.5 text-xs font-medium text-slate-200 cursor-pointer"
+                  >
+                    <Plus className="h-3.5 w-3.5" />
+                    <span>Add</span>
+                  </button>
+                </div>
+              )}
+            </section>
 
-            <div className="flex items-center gap-2 text-[11px] text-slate-400">
-              <ShieldCheck className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
-              <span>
-                Privacy Guarantee: Directory listings never expose your private
-                supply links, upstream suppliers, or existing buyers.
+            {/* Alternative Supplier Directory Opt-In */}
+            <section className="rounded-xl border border-slate-800 bg-slate-900/50 p-4 space-y-3">
+              <label className="flex items-start gap-3 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  disabled={!isOwner}
+                  checked={openToNewBuyers}
+                  onChange={(e) => setOpenToNewBuyers(e.target.checked)}
+                  className="mt-0.5 rounded border-slate-700 bg-slate-950 text-emerald-500 disabled:opacity-60"
+                />
+                <div className="space-y-0.5">
+                  <span className="block text-xs font-semibold text-white">
+                    Opt in to Kulgo Alternative Supplier Directory
+                  </span>
+                  <span className="block text-[11px] text-slate-400">
+                    Allow verified buyers searching for resilient alternatives
+                    to discover your organization by country, capabilities, and
+                    ESG badges.
+                  </span>
+                </div>
+              </label>
+
+              <label className="block space-y-1">
+                <span className="text-[11px] font-medium text-slate-400">
+                  Public Capabilities (comma-separated)
+                </span>
+                <input
+                  type="text"
+                  disabled={!isOwner}
+                  value={capabilitiesText}
+                  onChange={(e) => setCapabilitiesText(e.target.value)}
+                  placeholder="e.g. Precision CNC, Specialty Alloys, Recycled Aluminum"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+                />
+              </label>
+
+              <div className="flex items-center gap-2 text-[11px] text-slate-400">
+                <ShieldCheck className="h-3.5 w-3.5 text-emerald-400 shrink-0" />
+                <span>
+                  Privacy Guarantee: Directory listings never expose your
+                  private supply links, upstream suppliers, or existing buyers.
+                </span>
+              </div>
+            </section>
+
+            {/* Save Org Settings Action */}
+            <div className="flex items-center justify-end gap-2">
+              <button
+                type="submit"
+                disabled={saving || !isOwner}
+                className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 disabled:cursor-not-allowed px-4 py-2 text-xs font-semibold text-slate-950 cursor-pointer"
+              >
+                {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
+                <span>Save Org Settings</span>
+              </button>
+            </div>
+          </form>
+
+          {/* Team Members (RBAC) */}
+          <section
+            aria-labelledby="org-team-members-heading"
+            className="pt-5 border-t border-slate-800 space-y-3.5"
+          >
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                <Users className="h-3.5 w-3.5 text-sky-400" />
+                <h3 id="org-team-members-heading">Team Members</h3>
+              </div>
+              <span className="text-[11px] text-slate-500 font-mono">
+                {members.length} member{members.length === 1 ? "" : "s"}
               </span>
             </div>
+
+            {membersError && (
+              <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
+                {membersError}
+              </div>
+            )}
+
+            {memberBanner && (
+              <div className="rounded-lg border border-emerald-500/40 bg-emerald-500/10 p-3 text-xs text-emerald-200 flex items-center gap-2">
+                <CheckCircle2 className="h-4 w-4 text-emerald-400 shrink-0" />
+                <span>{memberBanner}</span>
+              </div>
+            )}
+
+            {loadingMembers ? (
+              <div className="flex items-center gap-2 text-xs text-slate-400 py-3">
+                <Loader2 className="h-3.5 w-3.5 animate-spin text-sky-400" />
+                <span>Loading team members...</span>
+              </div>
+            ) : (
+              <ul className="divide-y divide-slate-800/80 rounded-xl border border-slate-800 bg-slate-900/40 overflow-hidden">
+                {members.map((member) => {
+                  const isSelf = member.userId === currentUser.userId;
+                  const isLastOwner =
+                    member.role === "OWNER" && ownerCount <= 1;
+                  const canRemove = isOwner && !isLastOwner;
+                  return (
+                    <li
+                      key={member.userId}
+                      className="flex items-center justify-between gap-3 px-3.5 py-2.5 text-xs"
+                    >
+                      <div className="min-w-0 flex items-center gap-2">
+                        <span className="truncate font-medium text-slate-100">
+                          {member.email}
+                        </span>
+                        {isSelf && (
+                          <span className="text-[10px] text-slate-400">
+                            (You)
+                          </span>
+                        )}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0">
+                        <span
+                          className={`font-mono text-[10px] px-2 py-0.5 rounded border ${
+                            member.role === "OWNER"
+                              ? "bg-emerald-500/15 border-emerald-500/40 text-emerald-300"
+                              : "bg-sky-500/15 border-sky-500/40 text-sky-300"
+                          }`}
+                        >
+                          {member.role}
+                        </span>
+                        {isOwner && (
+                          <button
+                            type="button"
+                            disabled={!canRemove || removingUserId !== null}
+                            onClick={() => handleRemoveMember(member)}
+                            title={
+                              isLastOwner
+                                ? "Cannot remove the last organization owner"
+                                : `Remove ${member.email}`
+                            }
+                            aria-label={`Remove ${member.email}`}
+                            className="inline-flex items-center gap-1 rounded-md border border-slate-800 bg-slate-950 hover:border-red-500/40 hover:bg-red-950/40 hover:text-red-200 disabled:opacity-40 disabled:cursor-not-allowed px-2 py-1 text-[11px] text-slate-400 transition-colors cursor-pointer"
+                          >
+                            {removingUserId === member.userId ? (
+                              <Loader2 className="h-3 w-3 animate-spin" />
+                            ) : (
+                              <Trash2 className="h-3 w-3" />
+                            )}
+                            <span>Remove</span>
+                          </button>
+                        )}
+                      </div>
+                    </li>
+                  );
+                })}
+              </ul>
+            )}
+
+            {isOwner && (
+              <form
+                onSubmit={handleAddMember}
+                className="rounded-xl border border-slate-800 bg-slate-900/50 p-3.5 space-y-3"
+              >
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                  <UserPlus className="h-3.5 w-3.5 text-emerald-400" />
+                  <span>Add Team Member</span>
+                </div>
+                <div className="grid grid-cols-1 sm:grid-cols-3 gap-2.5">
+                  <input
+                    type="email"
+                    required
+                    value={newMemberEmail}
+                    onChange={(e) => setNewMemberEmail(e.target.value)}
+                    placeholder="colleague@company.ee"
+                    aria-label="New member email"
+                    className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
+                  />
+                  <input
+                    type="password"
+                    required
+                    minLength={10}
+                    value={newMemberPassword}
+                    onChange={(e) => setNewMemberPassword(e.target.value)}
+                    placeholder="Initial password (min 10 chars)"
+                    aria-label="New member password"
+                    className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
+                  />
+                  <select
+                    value={newMemberRole}
+                    onChange={(e) =>
+                      setNewMemberRole(e.target.value as UserRole)
+                    }
+                    aria-label="New member role"
+                    className="rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-slate-100 focus:border-emerald-500 focus:outline-none"
+                  >
+                    <option value="MEMBER">MEMBER (Workspace &amp; Analytics)</option>
+                    <option value="OWNER">OWNER (Full Admin &amp; Settings)</option>
+                  </select>
+                </div>
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={addingMember}
+                    className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/15 hover:bg-sky-500/25 disabled:opacity-50 px-3.5 py-1.5 text-xs font-semibold text-sky-200 cursor-pointer"
+                  >
+                    {addingMember ? (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    ) : (
+                      <UserPlus className="h-3.5 w-3.5" />
+                    )}
+                    <span>Add Member</span>
+                  </button>
+                </div>
+              </form>
+            )}
           </section>
 
-          {/* Actions */}
-          <div className="flex items-center justify-end gap-2 pt-2 border-t border-slate-800">
+          {/* Footer Close */}
+          <div className="flex items-center justify-end pt-2 border-t border-slate-800">
             <button
               type="button"
               onClick={onClose}
@@ -353,16 +671,8 @@ export function OrgSettingsModal({
             >
               Close
             </button>
-            <button
-              type="submit"
-              disabled={saving}
-              className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-60 px-4 py-2 text-xs font-semibold text-slate-950 cursor-pointer"
-            >
-              {saving && <Loader2 className="h-3.5 w-3.5 animate-spin" />}
-              <span>Save Org Settings</span>
-            </button>
           </div>
-        </form>
+        </div>
       </div>
     </div>
   );

@@ -1,13 +1,21 @@
 import {
+  AddOrgMemberInputSchema,
+  AddOrgMemberResponseSchema,
   AuthMeResponseSchema,
+  ListOrgMembersResponseSchema,
   LoginInputSchema,
   RegisterInputSchema,
+  RemoveOrgMemberResponseSchema,
   UpdateOrganizationProfileInputSchema,
   UpdateOrganizationProfileResponseSchema,
 } from "@kulgo/shared";
 import { Hono } from "hono";
 import type { AppConfig } from "../config.js";
-import { createRequireAuth, type AuthVariables } from "./middleware.js";
+import {
+  createRequireAuth,
+  requireOwner,
+  type AuthVariables,
+} from "./middleware.js";
 import { hashPassword, verifyPassword } from "./password.js";
 import {
   DuplicateEmailError,
@@ -179,7 +187,7 @@ export function createAuthRoutes({
     return c.json(payload, 200);
   });
 
-  routes.patch("/organization", requireAuth, async (c) => {
+  routes.patch("/organization", requireAuth, requireOwner, async (c) => {
     const auth = c.get("auth");
     let rawBody: unknown;
     try {
@@ -209,6 +217,92 @@ export function createAuthRoutes({
 
     const payload = UpdateOrganizationProfileResponseSchema.parse({
       organization: updated,
+    });
+    return c.json(payload, 200);
+  });
+
+  routes.get("/members", requireAuth, async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    const members = await authRepo.listOrgMembers(orgId);
+    const payload = ListOrgMembersResponseSchema.parse({ members });
+    return c.json(payload, 200);
+  });
+
+  routes.post("/members", requireAuth, requireOwner, async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    let rawBody: unknown;
+    try {
+      rawBody = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = AddOrgMemberInputSchema.safeParse(rawBody);
+    if (!parsed.success) {
+      return c.json(
+        {
+          error: "Validation failed",
+          details: parsed.error.flatten(),
+        },
+        400,
+      );
+    }
+
+    const email = normalizeEmail(parsed.data.email);
+    const existing = await authRepo.findUserByEmail(email);
+    if (existing) {
+      return c.json(
+        { error: "An account with this email already exists" },
+        409,
+      );
+    }
+
+    const passwordHash = await hashPassword(parsed.data.password);
+
+    try {
+      const member = await authRepo.createOrgMember({
+        orgId,
+        email,
+        passwordHash,
+        role: parsed.data.role,
+      });
+      const payload = AddOrgMemberResponseSchema.parse({ member });
+      return c.json(payload, 201);
+    } catch (err) {
+      if (err instanceof DuplicateEmailError) {
+        return c.json({ error: err.message }, 409);
+      }
+      throw err;
+    }
+  });
+
+  routes.delete("/members/:userId", requireAuth, requireOwner, async (c) => {
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
+    const targetUserId = c.req.param("userId");
+
+    const members = await authRepo.listOrgMembers(orgId);
+    const target = members.find((m) => m.userId === targetUserId);
+    if (!target) {
+      return c.json({ error: "Member not found" }, 404);
+    }
+
+    const ownerCount = members.filter((m) => m.role === "OWNER").length;
+    if (target.role === "OWNER" && ownerCount <= 1) {
+      return c.json(
+        { error: "Cannot remove the last organization owner" },
+        400,
+      );
+    }
+
+    const deleted = await authRepo.deleteOrgMember(orgId, targetUserId);
+    if (!deleted) {
+      return c.json({ error: "Member not found" }, 404);
+    }
+
+    const payload = RemoveOrgMemberResponseSchema.parse({
+      ok: true,
+      removedUserId: targetUserId,
     });
     return c.json(payload, 200);
   });

@@ -46,3 +46,17 @@ export function createRequireAuth(authRepo: AuthRepository) {
     await next();
   });
 }
+
+export const requireOwner = createMiddleware<{ Variables: AuthVariables }>(
+  async (c, next) => {
+    const auth = c.get("auth");
+    if (!auth || auth.user.role !== "OWNER") {
+      return c.json(
+        { error: "Forbidden: organization owner role required" },
+        403,
+      );
+    }
+    await next();
+  },
+);
+

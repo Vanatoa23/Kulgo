@@ -734,6 +734,7 @@ export function App() {
 
         <OrgSettingsModal
           open={orgSettingsOpen}
+          currentUser={session.user}
           organization={session.organization}
           onClose={() => setOrgSettingsOpen(false)}
           onUpdated={(updatedOrg) => {

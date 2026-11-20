@@ -826,4 +826,122 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(importSummary.errors).toHaveLength(1);
     expect(importSummary.errors[0]?.entity).toBe("LANE");
   });
+
+  it("enforces cross-org member isolation and OWNER-only RBAC on /api/v1/auth/members and /api/v1/auth/organization", async () => {
+    const app = createTestApp();
+
+    // Unauthenticated requests to member management endpoints return 401
+    expect((await app.request("/api/v1/auth/members")).status).toBe(401);
+    expect(
+      (
+        await app.request("/api/v1/auth/members", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            email: "anon@org.ee",
+            password: "PrivacyBoundaryPassword2026!",
+            role: "MEMBER",
+          }),
+        })
+      ).status,
+    ).toBe(401);
+    expect(
+      (
+        await app.request(
+          "/api/v1/auth/members/11111111-1111-4111-8111-111111111111",
+          { method: "DELETE" },
+        )
+      ).status,
+    ).toBe(401);
+
+    const orgA = await registerOrg(app, "m5-a@org-a.ee", "M5 Alpha AS");
+    const orgB = await registerOrg(app, "m5-b@org-b.ee", "M5 Beta AS");
+
+    // Org A adds a MEMBER
+    const addRes = await app.request("/api/v1/auth/members", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        email: "member-a@org-a.ee",
+        password: "PrivacyBoundaryPassword2026!",
+        role: "MEMBER",
+      }),
+    });
+    expect(addRes.status).toBe(201);
+    const { member: memberA } = (await addRes.json()) as {
+      member: { userId: string; orgId: string };
+    };
+    expect(memberA.orgId).toBe(orgA.orgId);
+
+    // Org B cannot see Org A's members
+    const orgBMembersRes = await app.request("/api/v1/auth/members", {
+      headers: { Cookie: orgB.cookie },
+    });
+    expect(orgBMembersRes.status).toBe(200);
+    const orgBMembersRaw = await orgBMembersRes.text();
+    expect(orgBMembersRaw).not.toContain("member-a@org-a.ee");
+    expect(orgBMembersRaw).not.toContain("m5-a@org-a.ee");
+    expect(orgBMembersRaw).not.toContain("passwordHash");
+
+    // Org B's OWNER cannot delete Org A's member (must return 404, never leak existence)
+    const crossOrgDeleteRes = await app.request(
+      `/api/v1/auth/members/${memberA.userId}`,
+      {
+        method: "DELETE",
+        headers: { Cookie: orgB.cookie },
+      },
+    );
+    expect(crossOrgDeleteRes.status).toBe(404);
+
+    // Org A's MEMBER logs in: cannot mutate Org A's org settings or manage members (403)
+    const memberALogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "member-a@org-a.ee",
+        password: "PrivacyBoundaryPassword2026!",
+      }),
+    });
+    expect(memberALogin.status).toBe(200);
+    const memberACookie = extractCookie(memberALogin);
+
+    expect(
+      (
+        await app.request("/api/v1/auth/organization", {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: memberACookie,
+          },
+          body: JSON.stringify({ scope1Tco2e: 999 }),
+        })
+      ).status,
+    ).toBe(403);
+
+    expect(
+      (
+        await app.request("/api/v1/auth/members", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: memberACookie,
+          },
+          body: JSON.stringify({
+            email: "escalate@org-a.ee",
+            password: "PrivacyBoundaryPassword2026!",
+            role: "OWNER",
+          }),
+        })
+      ).status,
+    ).toBe(403);
+
+    expect(
+      (
+        await app.request(`/api/v1/auth/members/${memberA.userId}`, {
+          method: "DELETE",
+          headers: { Cookie: memberACookie },
+        })
+      ).status,
+    ).toBe(403);
+  });
 });
