@@ -6,9 +6,11 @@ import type {
   User,
 } from "@kulgo/shared";
 import {
+  Building2,
   Crosshair,
   GitBranchPlus,
   Globe2,
+  Link2,
   Loader2,
   LogOut,
   Map as MapIcon,
@@ -51,6 +53,8 @@ export interface FilterBarProps {
   onOpenAddLane: () => void;
   onOpenAnalytics: () => void;
   onOpenSimulator: () => void;
+  onOpenDirectory: () => void;
+  onOpenAcceptInvite: () => void;
   onFitNetwork: () => void;
   onFocusUnverifiedHq: () => void;
   onLogout: () => void;
@@ -77,6 +81,8 @@ export function FilterBar({
   onOpenAddLane,
   onOpenAnalytics,
   onOpenSimulator,
+  onOpenDirectory,
+  onOpenAcceptInvite,
   onFitNetwork,
   onFocusUnverifiedHq,
   onLogout,
@@ -148,6 +154,24 @@ export function FilterBar({
           >
             <SlidersHorizontal className="h-3.5 w-3.5" />
             <span>What-If Simulator</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenDirectory}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-teal-500/40 bg-teal-500/15 hover:bg-teal-500/25 text-teal-200 font-medium text-xs px-3 py-1.5 transition-colors cursor-pointer"
+          >
+            <Building2 className="h-3.5 w-3.5" />
+            <span>Directory</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={onOpenAcceptInvite}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-xs px-3 py-1.5 transition-colors cursor-pointer"
+          >
+            <Link2 className="h-3.5 w-3.5 text-teal-400" />
+            <span>Accept Invite</span>
           </button>
 
           <button

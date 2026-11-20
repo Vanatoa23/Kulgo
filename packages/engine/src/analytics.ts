@@ -27,6 +27,8 @@ export interface HiddenPartnerAggregate {
   hiddenUpstreamScope3Tco2e: number;
   hasSanctionedUpstream: boolean;
   regionCode: string | null;
+  hasSharedChokepoint?: boolean;
+  chokepointRegionCode?: string | null;
 }
 
 export interface NetworkAnalyticsInput {
@@ -362,22 +364,53 @@ export function evaluateNetworkAnalytics(
 
   // 2e. Hidden Tier-2+ partner upstream risk (strictly anonymized)
   if (input.partnerHiddenSummaries) {
+    const chokepointByRegion = new Map<string, string[]>();
+
     for (const facility of activeSupplierFacilities) {
       const hidden = input.partnerHiddenSummaries.get(facility.facilityId);
-      if (!hidden?.hasSanctionedUpstream) continue;
+      if (!hidden) continue;
 
+      if (hidden.hasSanctionedUpstream) {
+        alerts.push({
+          alertId: `partner-upstream-${facility.facilityId}`,
+          severity: "RED",
+          category: "SECONDARY_SANCTION",
+          title: "Hidden upstream sanctions exposure",
+          summary:
+            "A Network-Verified Tier-1 partner has an anonymized upstream dependency linked to a sanctioned corridor.",
+          affectedTier1FacilityIds: [facility.facilityId],
+          affectedRegionCode: hidden.regionCode,
+          confidence: "NETWORK_VERIFIED",
+          recommendedAction:
+            "Engage verified Tier-1 partner on upstream compliance or evaluate alternative EU suppliers.",
+        });
+      }
+
+      if (hidden.hasSharedChokepoint) {
+        const regionKey = hidden.chokepointRegionCode ?? hidden.regionCode ?? "UPSTREAM";
+        const existing = chokepointByRegion.get(regionKey) ?? [];
+        existing.push(facility.facilityId);
+        chokepointByRegion.set(regionKey, existing);
+      }
+    }
+
+    for (const [regionKey, affectedIds] of chokepointByRegion) {
+      const isMultiPartner = affectedIds.length > 1;
       alerts.push({
-        alertId: `partner-upstream-${facility.facilityId}`,
-        severity: "RED",
-        category: "SECONDARY_SANCTION",
-        title: "Hidden upstream sanctions exposure",
-        summary:
-          "A Network-Verified Tier-1 partner has an anonymized upstream dependency linked to a sanctioned corridor.",
-        affectedTier1FacilityIds: [facility.facilityId],
-        affectedRegionCode: hidden.regionCode,
+        alertId: `partner-chokepoint-${regionKey.toLowerCase()}`,
+        severity: isMultiPartner ? "RED" : "YELLOW",
+        category: "SHARED_UPSTREAM_CHOKEPOINT",
+        title: isMultiPartner
+          ? "Shared hidden upstream chokepoint detected"
+          : "Hidden upstream chokepoint exposure",
+        summary: isMultiPartner
+          ? `${affectedIds.length} Network-Verified Tier-1 partners share an anonymized upstream dependency or transit chokepoint.`
+          : "A Network-Verified Tier-1 partner relies on an anonymized upstream chokepoint corridor.",
+        affectedTier1FacilityIds: affectedIds,
+        affectedRegionCode: regionKey === "UPSTREAM" ? null : regionKey,
         confidence: "NETWORK_VERIFIED",
         recommendedAction:
-          "Engage verified Tier-1 partner on upstream compliance or evaluate alternative EU suppliers.",
+          "Diversify sourcing via the Alternative Suppliers Directory or simulate reallocating volume in the What-If Simulator.",
       });
     }
   }

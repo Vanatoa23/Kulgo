@@ -9,11 +9,16 @@ import type {
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
+  acceptInvite,
   createFacility,
+  createInvite,
   getAnalyticsSummary,
   getMe,
   getNetwork,
+  listDirectoryAlternatives,
+  listInvites,
   login,
+  revokeInvite,
   seedDemo,
   simulateAnalytics,
   updateFacility,
@@ -26,8 +31,10 @@ import {
   buildRiskSignalPolygons,
   computeCorridorWidth,
   computeFacilitiesBounds,
+  extractInviteTokenFromSearch,
   filterWorkspaceNetwork,
   formatEur,
+  parseCapabilitiesInput,
 } from "../lib/workspace-utils.js";
 
 const ORG_ID = "11111111-1111-4111-8111-111111111111";
@@ -622,6 +629,143 @@ describe("api client", () => {
     expect(simMock).toHaveBeenCalledWith(
       "/api/v1/analytics/simulate",
       expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+  });
+
+  it("renders Network-Verified badges on Map View markers and Logical Graph View nodes", () => {
+    const network = makeSampleNetwork();
+    const verifiedFacilities = network.facilities.map((f) =>
+      f.facilityId === FAC_HELSINKI_ID ? { ...f, isPartnerVerified: true } : f,
+    );
+
+    const markers = buildFacilityMarkers(verifiedFacilities, null);
+    const verifiedMarker = markers.find(
+      (m) => m.facilityId === FAC_HELSINKI_ID,
+    )!;
+    expect(verifiedMarker.label).toBe("✓ Helsinki Nordic Polymers");
+    expect(verifiedMarker.fillColor[1]).toBe(184); // Teal Network-Verified
+
+    const graph = buildLogicalGraphModel({
+      products: network.products,
+      inputs: network.inputs,
+      facilities: verifiedFacilities,
+      lanes: network.lanes,
+      activeProductId: null,
+      activeInputId: null,
+      selectedFacilityId: null,
+      selectedLaneId: null,
+    });
+
+    const verifiedNode = graph.nodes.find(
+      (n) => n.id === `facility:${FAC_HELSINKI_ID}`,
+    )!;
+    expect(verifiedNode.isPartnerVerified).toBe(true);
+    expect(verifiedNode.badge).toBe("NETWORK-VERIFIED");
+  });
+
+  it("extracts invite tokens from query strings and parses deduplicated capabilities", () => {
+    expect(extractInviteTokenFromSearch("?invite=tok_abc123&foo=bar")).toBe(
+      "tok_abc123",
+    );
+    expect(extractInviteTokenFromSearch("?invite=%20%20")).toBeNull();
+    expect(extractInviteTokenFromSearch("")).toBeNull();
+
+    expect(
+      parseCapabilitiesInput("Aluminum Alloys, Precision CNC, Aluminum Alloys, "),
+    ).toEqual(["Aluminum Alloys", "Precision CNC"]);
+  });
+
+  it("calls M3 invite and directory endpoints with credentials and validates strict DTOs", async () => {
+    const inviteId = "88888888-8888-4888-8888-888888888888";
+    const sampleInvite = {
+      inviteId,
+      fromOrgId: ORG_ID,
+      targetFacilityId: FAC_HELSINKI_ID,
+      inviteeEmail: "partner@helsinki.fi",
+      status: "PENDING" as const,
+      expiresAt: "2026-12-04T12:00:00.000Z",
+      createdAt: "2026-11-20T12:00:00.000Z",
+    };
+
+    const createMock = mockFetchOnce(201, {
+      invitation: sampleInvite,
+      inviteToken: "secret-token-123",
+      inviteLink: "http://localhost:5173/?invite=secret-token-123",
+    });
+    const created = await createInvite({
+      targetFacilityId: FAC_HELSINKI_ID,
+      inviteeEmail: "partner@helsinki.fi",
+    });
+    expect(created.inviteToken).toBe("secret-token-123");
+    expect(createMock).toHaveBeenCalledWith(
+      "/api/v1/invites",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+
+    const listMock = mockFetchOnce(200, { invitations: [sampleInvite] });
+    const invites = await listInvites();
+    expect(invites).toHaveLength(1);
+    expect(listMock).toHaveBeenCalledWith(
+      "/api/v1/invites",
+      expect.objectContaining({ method: "GET", credentials: "include" }),
+    );
+
+    const acceptMock = mockFetchOnce(200, {
+      invitation: { ...sampleInvite, status: "ACCEPTED" as const },
+      verifiedPartnerLink: {
+        inviteId,
+        linkedAt: "2026-11-20T12:05:00.000Z",
+      },
+      organization: {
+        orgId: "99999999-9999-4999-8999-999999999999",
+        openToNewBuyers: true,
+        capabilities: ["Aluminum Alloys"],
+      },
+    });
+    const accepted = await acceptInvite("secret-token-123", {
+      openToNewBuyers: true,
+      capabilities: ["Aluminum Alloys"],
+    });
+    expect(accepted.invitation.status).toBe("ACCEPTED");
+    expect(acceptMock).toHaveBeenCalledWith(
+      "/api/v1/invites/secret-token-123/accept",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
+
+    const revokeMock = mockFetchOnce(200, {
+      ok: true,
+      invitation: { ...sampleInvite, status: "REVOKED" as const },
+    });
+    const revoked = await revokeInvite(inviteId);
+    expect(revoked.invitation.status).toBe("REVOKED");
+    expect(revokeMock).toHaveBeenCalledWith(
+      `/api/v1/invites/${inviteId}`,
+      expect.objectContaining({ method: "DELETE", credentials: "include" }),
+    );
+
+    const dirMock = mockFetchOnce(200, {
+      candidates: [
+        {
+          orgId: "90000001-0001-4001-8001-000000000001",
+          name: "Nordic AluWorks AB",
+          countryCode: "SE",
+          capabilities: ["Aluminum Alloys"],
+          esgBadges: ["ISO-14001"],
+          riskStatus: "GREEN",
+          source: "SEEDED_DIRECTORY",
+        },
+      ],
+    });
+    const candidates = await listDirectoryAlternatives({
+      countryCode: "se",
+      capability: "Aluminum",
+      excludeRed: true,
+    });
+    expect(candidates).toHaveLength(1);
+    expect(candidates[0]?.countryCode).toBe("SE");
+    expect(dirMock).toHaveBeenCalledWith(
+      "/api/v1/directory/alternatives?countryCode=SE&capability=Aluminum&excludeRed=true",
+      expect.objectContaining({ method: "GET", credentials: "include" }),
     );
   });
 });

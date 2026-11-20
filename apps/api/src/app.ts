@@ -2,6 +2,7 @@ import { HealthResponseSchema } from "@kulgo/shared";
 import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
+import { createPartnerHiddenSummaryResolver } from "./analytics/partner-resolver.js";
 import {
   OrgScopedAnalyticsRepository,
   type AnalyticsRepository,
@@ -21,6 +22,17 @@ import { createAuthRoutes } from "./auth/routes.js";
 import { loadConfig, type AppConfig } from "./config.js";
 import type { ArcadeDbClient } from "./db/client.js";
 import {
+  KulgoDirectoryRepository,
+  type DirectoryRepository,
+} from "./directory/repository.js";
+import { createDirectoryRoutes } from "./directory/routes.js";
+import {
+  ArcadeDbInvitationRepository,
+  InMemoryInvitationRepository,
+  type InvitationRepository,
+} from "./invites/repository.js";
+import { createInviteRoutes } from "./invites/routes.js";
+import {
   ArcadeDbWorkspaceRepository,
   InMemoryWorkspaceRepository,
   type WorkspaceRepository,
@@ -33,6 +45,8 @@ export interface AppDependencies {
   authRepo?: AuthRepository;
   workspaceRepo?: WorkspaceRepository;
   riskSignalRepo?: RiskSignalRepository;
+  inviteRepo?: InvitationRepository;
+  directoryRepo?: DirectoryRepository;
   analyticsRepo?: AnalyticsRepository;
 }
 
@@ -42,10 +56,24 @@ export function createApp({
   authRepo = new ArcadeDbAuthRepository(db),
   workspaceRepo = new ArcadeDbWorkspaceRepository(db),
   riskSignalRepo = new ArcadeDbRiskSignalRepository(db),
+  inviteRepo = new ArcadeDbInvitationRepository(db, {
+    authRepo,
+    workspaceRepo,
+  }),
+  directoryRepo = new KulgoDirectoryRepository({
+    authRepo,
+    riskSignalRepo,
+  }),
   analyticsRepo = new OrgScopedAnalyticsRepository({
     authRepo,
     workspaceRepo,
     riskSignalRepo,
+    resolvePartnerHiddenSummaries: createPartnerHiddenSummaryResolver({
+      authRepo,
+      workspaceRepo,
+      riskSignalRepo,
+      inviteRepo,
+    }),
   }),
 }: AppDependencies): Hono {
   const app = new Hono();
@@ -86,6 +114,14 @@ export function createApp({
     "/api/v1/analytics",
     createAnalyticsRoutes({ authRepo, analyticsRepo }),
   );
+  app.route(
+    "/api/v1/invites",
+    createInviteRoutes({ authRepo, inviteRepo, config }),
+  );
+  app.route(
+    "/api/v1/directory",
+    createDirectoryRoutes({ authRepo, directoryRepo }),
+  );
 
   app.notFound((c) => c.json({ error: "Not Found" }, 404));
 
@@ -98,9 +134,9 @@ export function createApp({
 }
 
 /**
- * Creates an isolated Hono app backed by InMemoryAuthRepository,
- * InMemoryWorkspaceRepository, InMemoryRiskSignalRepository,
- * OrgScopedAnalyticsRepository, and a healthy mock ArcadeDbClient
+ * Creates an isolated Hono app backed by InMemory repositories,
+ * OrgScopedAnalyticsRepository with partner hidden summary resolution,
+ * KulgoDirectoryRepository, and a healthy mock ArcadeDbClient
  * for deterministic zero-Docker unit, privacy, and opaque-box E2E tests.
  */
 export function createTestApp(overrides: Partial<AppConfig> = {}): Hono {
@@ -124,10 +160,24 @@ export function createTestApp(overrides: Partial<AppConfig> = {}): Hono {
   const authRepo = new InMemoryAuthRepository();
   const workspaceRepo = new InMemoryWorkspaceRepository();
   const riskSignalRepo = new InMemoryRiskSignalRepository();
+  const inviteRepo = new InMemoryInvitationRepository({
+    authRepo,
+    workspaceRepo,
+  });
+  const directoryRepo = new KulgoDirectoryRepository({
+    authRepo,
+    riskSignalRepo,
+  });
   const analyticsRepo = new OrgScopedAnalyticsRepository({
     authRepo,
     workspaceRepo,
     riskSignalRepo,
+    resolvePartnerHiddenSummaries: createPartnerHiddenSummaryResolver({
+      authRepo,
+      workspaceRepo,
+      riskSignalRepo,
+      inviteRepo,
+    }),
   });
 
   return createApp({
@@ -136,6 +186,8 @@ export function createTestApp(overrides: Partial<AppConfig> = {}): Hono {
     authRepo,
     workspaceRepo,
     riskSignalRepo,
+    inviteRepo,
+    directoryRepo,
     analyticsRepo,
   });
 }

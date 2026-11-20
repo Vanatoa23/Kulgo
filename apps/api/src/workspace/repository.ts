@@ -197,11 +197,23 @@ export interface WorkspaceRepository {
   deleteInput(orgId: string, inputId: string): Promise<boolean>;
 
   listFacilities(orgId: string): Promise<Facility[]>;
+  getFacilityById(orgId: string, facilityId: string): Promise<Facility | null>;
   createFacility(orgId: string, input: CreateFacilityInput): Promise<Facility>;
   updateFacility(
     orgId: string,
     facilityId: string,
     input: UpdateFacilityInput,
+  ): Promise<Facility | null>;
+  markFacilityPartnerVerified(
+    ownerOrgId: string,
+    facilityId: string,
+    partnerOrgId: string,
+    refinedSite?: {
+      kind: Facility["kind"];
+      lat: number;
+      lng: number;
+      countryCode: string;
+    },
   ): Promise<Facility | null>;
   deleteFacility(orgId: string, facilityId: string): Promise<boolean>;
   getFacilityWkt(orgId: string, facilityId: string): Promise<string | null>;
@@ -734,6 +746,79 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         sector: updated.sector,
         esgBadges: updated.esgBadges,
         estimatedScope12Tco2e: updated.estimatedScope12Tco2e,
+        facilityId,
+        orgId: safeOrgId,
+      },
+    );
+
+    const coordsChanged =
+      updated.lat !== existing.lat || updated.lng !== existing.lng;
+    if (coordsChanged) {
+      await this.recomputeConnectedLanes(safeOrgId, updated);
+    }
+
+    return updated;
+  }
+
+  async getFacilityById(
+    orgId: string,
+    facilityId: string,
+  ): Promise<Facility | null> {
+    const safeOrgId = assertOrgId(orgId);
+    return this.findFacility(safeOrgId, facilityId);
+  }
+
+  async markFacilityPartnerVerified(
+    ownerOrgId: string,
+    facilityId: string,
+    partnerOrgId: string,
+    refinedSite?: {
+      kind: Facility["kind"];
+      lat: number;
+      lng: number;
+      countryCode: string;
+    },
+  ): Promise<Facility | null> {
+    const safeOrgId = assertOrgId(ownerOrgId);
+    const safePartnerOrgId = assertOrgId(partnerOrgId);
+    const existing = await this.findFacility(safeOrgId, facilityId);
+    if (!existing) return null;
+
+    const updated = FacilitySchema.parse({
+      ...existing,
+      isPartnerVerified: true,
+      kind: refinedSite ? refinedSite.kind : existing.kind,
+      lat: refinedSite ? refinedSite.lat : existing.lat,
+      lng: refinedSite ? refinedSite.lng : existing.lng,
+      countryCode: refinedSite
+        ? refinedSite.countryCode.trim().toUpperCase()
+        : existing.countryCode,
+      locationPrecision: refinedSite
+        ? "SITE_VERIFIED"
+        : existing.locationPrecision,
+    });
+
+    const locationWkt = formatPointWkt(updated.lng, updated.lat);
+    await this.db.command(
+      "sql",
+      `UPDATE Facility SET
+        isPartnerVerified = true,
+        partnerOrgId = :partnerOrgId,
+        kind = :kind,
+        locationPrecision = :locationPrecision,
+        countryCode = :countryCode,
+        lat = :lat,
+        lng = :lng,
+        locationWkt = :locationWkt
+       WHERE facilityId = :facilityId AND ownerOrgId = :orgId`,
+      {
+        partnerOrgId: safePartnerOrgId,
+        kind: updated.kind,
+        locationPrecision: updated.locationPrecision,
+        countryCode: updated.countryCode,
+        lat: updated.lat,
+        lng: updated.lng,
+        locationWkt,
         facilityId,
         orgId: safeOrgId,
       },
@@ -1408,6 +1493,86 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
         input.estimatedScope12Tco2e !== undefined
           ? input.estimatedScope12Tco2e
           : existing.estimatedScope12Tco2e,
+    });
+
+    this.facilities.set(facilityId, {
+      facility: updated,
+      locationWkt: formatPointWkt(updated.lng, updated.lat),
+    });
+
+    const coordsChanged =
+      updated.lat !== existing.lat || updated.lng !== existing.lng;
+    if (coordsChanged) {
+      for (const [laneId, lane] of this.lanes.entries()) {
+        if (
+          lane.ownerOrgId === safeOrgId &&
+          (lane.fromFacilityId === facilityId ||
+            lane.toFacilityId === facilityId)
+        ) {
+          const from = this.facilities.get(lane.fromFacilityId)?.facility;
+          const to = this.facilities.get(lane.toFacilityId)?.facility;
+          if (!from || !to) continue;
+          const metrics = computeLaneMetrics({
+            from,
+            to,
+            transportMode: lane.transportMode,
+            annualVolume: lane.annualVolume,
+            volumeUnit: lane.volumeUnit,
+          });
+          this.lanes.set(laneId, {
+            ...lane,
+            distanceKm: metrics.distanceKm,
+            estimatedLaneCo2e: metrics.estimatedLaneCo2e,
+          });
+        }
+      }
+    }
+
+    return { ...updated, esgBadges: [...updated.esgBadges] };
+  }
+
+  async getFacilityById(
+    orgId: string,
+    facilityId: string,
+  ): Promise<Facility | null> {
+    const safeOrgId = assertOrgId(orgId);
+    const record = this.facilities.get(facilityId);
+    if (!record || record.facility.ownerOrgId !== safeOrgId) return null;
+    return {
+      ...record.facility,
+      esgBadges: [...record.facility.esgBadges],
+    };
+  }
+
+  async markFacilityPartnerVerified(
+    ownerOrgId: string,
+    facilityId: string,
+    partnerOrgId: string,
+    refinedSite?: {
+      kind: Facility["kind"];
+      lat: number;
+      lng: number;
+      countryCode: string;
+    },
+  ): Promise<Facility | null> {
+    const safeOrgId = assertOrgId(ownerOrgId);
+    assertOrgId(partnerOrgId);
+    const record = this.facilities.get(facilityId);
+    if (!record || record.facility.ownerOrgId !== safeOrgId) return null;
+
+    const existing = record.facility;
+    const updated = FacilitySchema.parse({
+      ...existing,
+      isPartnerVerified: true,
+      kind: refinedSite ? refinedSite.kind : existing.kind,
+      lat: refinedSite ? refinedSite.lat : existing.lat,
+      lng: refinedSite ? refinedSite.lng : existing.lng,
+      countryCode: refinedSite
+        ? refinedSite.countryCode.trim().toUpperCase()
+        : existing.countryCode,
+      locationPrecision: refinedSite
+        ? "SITE_VERIFIED"
+        : existing.locationPrecision,
     });
 
     this.facilities.set(facilityId, {

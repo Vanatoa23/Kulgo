@@ -76,6 +76,15 @@ export const AlternativeCandidateSchema = z
   .strict();
 export type AlternativeCandidate = z.infer<typeof AlternativeCandidateSchema>;
 
+export const DirectoryAlternativesResponseSchema = z
+  .object({
+    candidates: z.array(AlternativeCandidateSchema),
+  })
+  .strict();
+export type DirectoryAlternativesResponse = z.infer<
+  typeof DirectoryAlternativesResponseSchema
+>;
+
 export const AnalyticsSummarySchema = z
   .object({
     resilienceScore: z.number().min(0).max(100),

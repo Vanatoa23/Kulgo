@@ -42,10 +42,20 @@ export class DuplicateEmailError extends Error {
   }
 }
 
+export interface UpdateOrganizationDirectoryInput {
+  openToNewBuyers: boolean;
+  capabilities: string[];
+}
+
 export interface AuthRepository {
   findUserByEmail(email: string): Promise<StoredUser | null>;
   findUserById(userId: string): Promise<User | null>;
   findOrganizationById(orgId: string): Promise<Organization | null>;
+  updateOrganizationDirectoryProfile(
+    orgId: string,
+    input: UpdateOrganizationDirectoryInput,
+  ): Promise<Organization | null>;
+  listDirectoryOrganizations(): Promise<Organization[]>;
   createOrganizationAndOwner(
     input: CreateOrgAndOwnerInput,
   ): Promise<{ user: User; organization: Organization }>;
@@ -154,6 +164,45 @@ export class ArcadeDbAuthRepository implements AuthRepository {
     );
     const row = rows[0];
     return row ? mapOrganizationRow(row) : null;
+  }
+
+  async updateOrganizationDirectoryProfile(
+    orgId: string,
+    input: UpdateOrganizationDirectoryInput,
+  ): Promise<Organization | null> {
+    const existing = await this.findOrganizationById(orgId);
+    if (!existing) return null;
+
+    const dedupedCapabilities = Array.from(
+      new Set(
+        input.capabilities
+          .map((item) => item.trim())
+          .filter((item) => item.length > 0),
+      ),
+    );
+
+    await this.db.command(
+      "sql",
+      `UPDATE Organization SET
+        openToNewBuyers = :openToNewBuyers,
+        capabilities = :capabilities
+       WHERE orgId = :orgId`,
+      {
+        openToNewBuyers: input.openToNewBuyers,
+        capabilities: dedupedCapabilities,
+        orgId,
+      },
+    );
+
+    return this.findOrganizationById(orgId);
+  }
+
+  async listDirectoryOrganizations(): Promise<Organization[]> {
+    const rows = await this.db.query<Record<string, unknown>>(
+      "sql",
+      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, openToNewBuyers, capabilities, createdAt FROM Organization WHERE openToNewBuyers = true",
+    );
+    return rows.map(mapOrganizationRow);
   }
 
   async createOrganizationAndOwner(
@@ -346,6 +395,46 @@ export class InMemoryAuthRepository implements AuthRepository {
       esgBadges: [...org.esgBadges],
       capabilities: [...org.capabilities],
     });
+  }
+
+  async updateOrganizationDirectoryProfile(
+    orgId: string,
+    input: UpdateOrganizationDirectoryInput,
+  ): Promise<Organization | null> {
+    const existing = this.organizations.get(orgId);
+    if (!existing) return null;
+
+    const dedupedCapabilities = Array.from(
+      new Set(
+        input.capabilities
+          .map((item) => item.trim())
+          .filter((item) => item.length > 0),
+      ),
+    );
+
+    const updated = OrganizationSchema.parse({
+      ...existing,
+      openToNewBuyers: input.openToNewBuyers,
+      capabilities: dedupedCapabilities,
+    });
+    this.organizations.set(orgId, updated);
+    return {
+      ...updated,
+      esgBadges: [...updated.esgBadges],
+      capabilities: [...updated.capabilities],
+    };
+  }
+
+  async listDirectoryOrganizations(): Promise<Organization[]> {
+    return Array.from(this.organizations.values())
+      .filter((org) => org.openToNewBuyers)
+      .map((org) =>
+        OrganizationSchema.parse({
+          ...org,
+          esgBadges: [...org.esgBadges],
+          capabilities: [...org.capabilities],
+        }),
+      );
   }
 
   async createOrganizationAndOwner(

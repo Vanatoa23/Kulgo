@@ -1,24 +1,36 @@
 import {
+  AcceptInviteResponseSchema,
   AnalyticsSummarySchema,
   AuthMeResponseSchema,
+  CreateInviteResponseSchema,
+  DirectoryAlternativesResponseSchema,
   FacilitySchema,
   HealthResponseSchema,
+  ListInvitesResponseSchema,
   ProductSchema,
+  RevokeInviteResponseSchema,
   SimulateAnalyticsResponseSchema,
   SupplyInputSchema,
   SupplyLaneSchema,
   WorkspaceNetworkResponseSchema,
+  type AcceptInviteInput,
+  type AcceptInviteResponse,
+  type AlternativeCandidate,
   type AnalyticsSummary,
   type AuthMeResponse,
   type CreateFacilityInput,
+  type CreateInviteInput,
+  type CreateInviteResponse,
   type CreateProductInput,
   type CreateSupplyInputInput,
   type CreateSupplyLaneInput,
   type Facility,
   type HealthResponse,
+  type Invitation,
   type LoginInput,
   type Product,
   type RegisterInput,
+  type RevokeInviteResponse,
   type SimulateAnalyticsRequest,
   type SimulateAnalyticsResponse,
   type SupplyInput,
@@ -367,4 +379,77 @@ export async function simulateAnalytics(
     { method: "POST", body: request },
     (payload) => parseWithSchema(SimulateAnalyticsResponseSchema, payload),
   );
+}
+
+// --- Partner Invitations (M3) ---
+
+export async function createInvite(
+  input: CreateInviteInput,
+): Promise<CreateInviteResponse> {
+  return apiRequest(
+    "/api/v1/invites",
+    { method: "POST", body: input },
+    (payload) => parseWithSchema(CreateInviteResponseSchema, payload),
+  );
+}
+
+export async function listInvites(): Promise<Invitation[]> {
+  const result = await apiRequest(
+    "/api/v1/invites",
+    { method: "GET" },
+    (payload) => parseWithSchema(ListInvitesResponseSchema, payload),
+  );
+  return result.invitations;
+}
+
+export async function acceptInvite(
+  token: string,
+  input: AcceptInviteInput,
+): Promise<AcceptInviteResponse> {
+  return apiRequest(
+    `/api/v1/invites/${encodeURIComponent(token.trim())}/accept`,
+    { method: "POST", body: input },
+    (payload) => parseWithSchema(AcceptInviteResponseSchema, payload),
+  );
+}
+
+export async function revokeInvite(
+  inviteId: string,
+): Promise<RevokeInviteResponse> {
+  return apiRequest(
+    `/api/v1/invites/${encodeURIComponent(inviteId)}`,
+    { method: "DELETE" },
+    (payload) => parseWithSchema(RevokeInviteResponseSchema, payload),
+  );
+}
+
+// --- Opt-In Alternative Supplier Directory (M3) ---
+
+export interface DirectoryQueryFilters {
+  countryCode?: string;
+  capability?: string;
+  excludeRed?: boolean;
+}
+
+export async function listDirectoryAlternatives(
+  filters?: DirectoryQueryFilters,
+): Promise<AlternativeCandidate[]> {
+  const params = new URLSearchParams();
+  if (filters?.countryCode && filters.countryCode.trim().length > 0) {
+    params.set("countryCode", filters.countryCode.trim().toUpperCase());
+  }
+  if (filters?.capability && filters.capability.trim().length > 0) {
+    params.set("capability", filters.capability.trim());
+  }
+  if (filters?.excludeRed) {
+    params.set("excludeRed", "true");
+  }
+  const query = params.toString();
+  const path = query
+    ? `/api/v1/directory/alternatives?${query}`
+    : "/api/v1/directory/alternatives";
+  const result = await apiRequest(path, { method: "GET" }, (payload) =>
+    parseWithSchema(DirectoryAlternativesResponseSchema, payload),
+  );
+  return result.candidates;
 }

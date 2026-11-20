@@ -2,15 +2,20 @@ import type {
   AnalyticsSummary,
   AuthMeResponse,
   CreateFacilityInput,
+  CreateInviteInput,
+  CreateInviteResponse,
   CreateProductInput,
   CreateSupplyInputInput,
   CreateSupplyLaneInput,
+  Invitation,
   UpdateFacilityInput,
   UpdateSupplyLaneInput,
   WorkspaceNetworkResponse,
 } from "@kulgo/shared";
 import { AlertCircle, Globe2, Loader2, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useState } from "react";
+import { AcceptInviteModal } from "./components/AcceptInviteModal.js";
+import { AlternativeDirectoryModal } from "./components/AlternativeDirectoryModal.js";
 import { AuthView } from "./components/AuthView.js";
 import {
   FilterBar,
@@ -27,6 +32,7 @@ import {
 import {
   ApiError,
   createFacility,
+  createInvite,
   createLane,
   createProduct,
   createSupplyInput,
@@ -37,12 +43,17 @@ import {
   getAnalyticsSummary,
   getMe,
   getNetwork,
+  listInvites,
   logout,
+  revokeInvite,
   seedDemo,
   updateFacility,
   updateLane,
 } from "./lib/api.js";
-import { filterWorkspaceNetwork } from "./lib/workspace-utils.js";
+import {
+  extractInviteTokenFromSearch,
+  filterWorkspaceNetwork,
+} from "./lib/workspace-utils.js";
 
 const EMPTY_NETWORK: WorkspaceNetworkResponse = {
   products: [],
@@ -64,6 +75,22 @@ export function App() {
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
   const [simulatorOpen, setSimulatorOpen] = useState(false);
+
+  // M3 Partner Invites & Alternative Directory state
+  const [invitations, setInvitations] = useState<Invitation[]>([]);
+  const [pendingInviteToken, setPendingInviteToken] = useState<string>(() =>
+    typeof window !== "undefined"
+      ? (extractInviteTokenFromSearch(window.location.search) ?? "")
+      : "",
+  );
+  const [acceptInviteOpen, setAcceptInviteOpen] = useState<boolean>(() =>
+    typeof window !== "undefined"
+      ? extractInviteTokenFromSearch(window.location.search) !== null
+      : false,
+  );
+  const [directoryOpen, setDirectoryOpen] = useState(false);
+  const [directoryInitialCapability, setDirectoryInitialCapability] =
+    useState("");
 
   // Filter & selection state
   const [activeProductId, setActiveProductId] = useState<string | null>(null);
@@ -92,8 +119,12 @@ export function App() {
   const loadWorkspaceNetwork = useCallback(async (shouldFit: boolean) => {
     setLoadingNetwork(true);
     try {
-      const data = await getNetwork();
+      const [data, invites] = await Promise.all([
+        getNetwork(),
+        listInvites().catch(() => [] as Invitation[]),
+      ]);
       setNetwork(data);
+      setInvitations(invites);
       if (shouldFit && data.facilities.length > 0) {
         setFitTrigger((n) => n + 1);
       }
@@ -375,6 +406,51 @@ export function App() {
       }
     });
 
+  const handleCreateInvite = async (
+    input: CreateInviteInput,
+  ): Promise<CreateInviteResponse | null> => {
+    setBusy(true);
+    setBannerError(null);
+    try {
+      const result = await createInvite(input);
+      setInvitations((prev) => [result.invitation, ...prev]);
+      return result;
+    } catch (err) {
+      if (err instanceof ApiError && err.status === 401) {
+        setSession(null);
+        return null;
+      }
+      setBannerError(
+        err instanceof Error
+          ? err.message
+          : "Failed to create partner invitation.",
+      );
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
+
+  const handleRevokeInvite = (inviteId: string) =>
+    runMutation(async () => {
+      const result = await revokeInvite(inviteId);
+      setInvitations((prev) =>
+        prev.map((inv) =>
+          inv.inviteId === inviteId ? result.invitation : inv,
+        ),
+      );
+    });
+
+  const clearInviteQueryParam = () => {
+    if (typeof window !== "undefined") {
+      const url = new URL(window.location.href);
+      if (url.searchParams.has("invite")) {
+        url.searchParams.delete("invite");
+        window.history.replaceState({}, "", url.toString());
+      }
+    }
+  };
+
   if (bootstrapping) {
     return (
       <div className="h-screen bg-slate-950 text-slate-200 flex flex-col items-center justify-center gap-3">
@@ -441,6 +517,13 @@ export function App() {
         }}
         onOpenSimulator={() => {
           setSimulatorOpen(true);
+        }}
+        onOpenDirectory={() => {
+          setDirectoryInitialCapability("");
+          setDirectoryOpen(true);
+        }}
+        onOpenAcceptInvite={() => {
+          setAcceptInviteOpen(true);
         }}
         onFitNetwork={() => setFitTrigger((n) => n + 1)}
         onFocusUnverifiedHq={() => {
@@ -545,6 +628,7 @@ export function App() {
           inputs={network.inputs}
           facilities={network.facilities}
           visibleLanes={filtered.lanes}
+          invitations={invitations}
           stats={filtered.stats}
           analytics={analytics}
           loadingAnalytics={loadingAnalytics}
@@ -565,6 +649,10 @@ export function App() {
             setActiveTab("lane");
           }}
           onOpenSimulator={() => setSimulatorOpen(true)}
+          onOpenDirectory={(cap) => {
+            setDirectoryInitialCapability(cap ?? "");
+            setDirectoryOpen(true);
+          }}
           onStartPickNewFacility={() => {
             setViewMode("map");
             setMapMode("pick-new-facility");
@@ -584,6 +672,8 @@ export function App() {
           onDeleteProduct={handleDeleteProduct}
           onCreateSupplyInput={handleCreateSupplyInput}
           onDeleteSupplyInput={handleDeleteSupplyInput}
+          onCreateInvite={handleCreateInvite}
+          onRevokeInvite={handleRevokeInvite}
         />
 
         <WhatIfSimulatorDrawer
@@ -594,6 +684,40 @@ export function App() {
           activeProductId={activeProductId}
           activeInputId={activeInputId}
           onClose={() => setSimulatorOpen(false)}
+        />
+
+        <AcceptInviteModal
+          open={acceptInviteOpen}
+          initialToken={pendingInviteToken}
+          organization={session.organization}
+          onClose={() => {
+            setAcceptInviteOpen(false);
+            setPendingInviteToken("");
+            clearInviteQueryParam();
+          }}
+          onAccepted={(result) => {
+            setSession((prev) =>
+              prev
+                ? {
+                    ...prev,
+                    organization: {
+                      ...prev.organization,
+                      openToNewBuyers: result.organization.openToNewBuyers,
+                      capabilities: result.organization.capabilities,
+                    },
+                  }
+                : prev,
+            );
+            setPendingInviteToken("");
+            clearInviteQueryParam();
+            void loadWorkspaceNetwork(false);
+          }}
+        />
+
+        <AlternativeDirectoryModal
+          open={directoryOpen}
+          initialCapability={directoryInitialCapability}
+          onClose={() => setDirectoryOpen(false)}
         />
       </div>
     </div>

@@ -430,4 +430,289 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       }),
     ).toThrow();
   });
+
+  it("enforces Org A -> Org B -> Org C hidden Tier-2 privacy boundary across analytics, simulation, workspace, invites, and directory", async () => {
+    const app = createTestApp();
+
+    // Unauthenticated M3 endpoints must return 401
+    expect((await app.request("/api/v1/invites")).status).toBe(401);
+    expect(
+      (await app.request("/api/v1/directory/alternatives")).status,
+    ).toBe(401);
+
+    const orgA = await registerOrg(app, "buyer-a@estonia-mfg.ee", "Estonia Buyer AS");
+    const orgB = await registerOrg(app, "tier1-b@nordic-tier1.fi", "Nordic Tier1 Oy");
+    const orgC = await registerOrg(
+      app,
+      "ops@secret-kremlin-alloys.ru",
+      "Secret Kremlin Alloys LLC",
+    );
+
+    // 1. Org A creates its own HQ + a Tier-1 supplier facility representing Org B + an active lane
+    const aHqRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Tallinn Assembly HQ",
+        kind: "HQ",
+        locationPrecision: "SITE_VERIFIED",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: true,
+        estimatedScope12Tco2e: 120,
+      }),
+    });
+    expect(aHqRes.status).toBe(201);
+    const { facility: aHq } = (await aHqRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const aTier1Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Nordic Tier1 Partner",
+        kind: "HQ",
+        locationPrecision: "HQ_ESTIMATED",
+        countryCode: "FI",
+        lat: 60.1699,
+        lng: 24.9384,
+        isOwnFacility: false,
+        sector: "Metals",
+        estimatedScope12Tco2e: 150,
+      }),
+    });
+    expect(aTier1Res.status).toBe(201);
+    const { facility: aTier1 } = (await aTier1Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const aLaneRes = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: aTier1.facilityId,
+        toFacilityId: aHq.facilityId,
+        materialCategory: "Specialty Alloys",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+        annualVolume: 500,
+        volumeUnit: "TONNES",
+        annualSpendEur: 750000,
+        riskStatus: "GREEN",
+      }),
+    });
+    expect(aLaneRes.status).toBe(201);
+    const { lane: aLane } = (await aLaneRes.json()) as {
+      lane: { laneId: string };
+    };
+
+    // Baseline Org A summary before partner verification (no hidden upstream Scope 3 or sanction alert)
+    const beforeSummaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(beforeSummaryRes.status).toBe(200);
+    const beforeSummary = AnalyticsSummarySchema.parse(
+      await beforeSummaryRes.json(),
+    );
+    expect(
+      beforeSummary.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
+    ).toBe(false);
+    const baselineUpstreamScope3 = beforeSummary.esg.upstreamScope3Tco2e;
+
+    // 2. Org B maps its own private upstream network with hidden Tier-2 supplier Org C (in sanctioned RU)
+    const bOwnRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Tampere Processing Plant",
+        kind: "FACTORY",
+        locationPrecision: "SITE_VERIFIED",
+        countryCode: "FI",
+        lat: 61.4978,
+        lng: 23.761,
+        isOwnFacility: true,
+        estimatedScope12Tco2e: 200,
+      }),
+    });
+    expect(bOwnRes.status).toBe(201);
+    const { facility: bOwn } = (await bOwnRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const bSecretTier2Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Secret Kremlin Alloys LLC",
+        kind: "EXTRACTION",
+        locationPrecision: "SITE_VERIFIED",
+        countryCode: "RU",
+        lat: 55.7558,
+        lng: 37.6173,
+        isOwnFacility: false,
+        sector: "Mining",
+        estimatedScope12Tco2e: 640,
+      }),
+    });
+    expect(bSecretTier2Res.status).toBe(201);
+    const { facility: bSecretTier2 } = (await bSecretTier2Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const bLaneRes = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        fromFacilityId: bSecretTier2.facilityId,
+        toFacilityId: bOwn.facilityId,
+        materialCategory: "Raw Nickel Ore",
+        transportMode: "RAIL",
+        volumeSharePct: 100,
+        annualVolume: 400,
+        volumeUnit: "TONNES",
+        riskStatus: "RED",
+        riskReason: "Secondary sanctions risk from Secret Kremlin Alloys LLC",
+      }),
+    });
+    expect(bLaneRes.status).toBe(201);
+
+    // 3. Org A invites Org B for aTier1; Org B accepts, refines site, and opts into directory
+    const createInviteRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        targetFacilityId: aTier1.facilityId,
+        inviteeEmail: "tier1-b@nordic-tier1.fi",
+      }),
+    });
+    expect(createInviteRes.status).toBe(201);
+    const createdInvite = (await createInviteRes.json()) as {
+      invitation: { inviteId: string };
+      inviteToken: string;
+    };
+
+    // Org B cannot revoke Org A's invite (must return 404)
+    expect(
+      (
+        await app.request(`/api/v1/invites/${createdInvite.invitation.inviteId}`, {
+          method: "DELETE",
+          headers: { Cookie: orgB.cookie },
+        })
+      ).status,
+    ).toBe(404);
+
+    const acceptRes = await app.request(
+      `/api/v1/invites/${createdInvite.inviteToken}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+        body: JSON.stringify({
+          openToNewBuyers: true,
+          capabilities: ["Specialty Alloys", "Nordic Metallurgy"],
+          refinedSite: {
+            kind: "FACTORY",
+            lat: 61.4978,
+            lng: 23.761,
+            countryCode: "FI",
+          },
+        }),
+      },
+    );
+    expect(acceptRes.status).toBe(200);
+
+    // 4. Org A queries ALL its endpoints after verification
+    const [afterNetworkRes, afterSummaryRes, afterSimRes, invitesRes, dirRes] =
+      await Promise.all([
+        app.request("/api/v1/workspace/network", {
+          headers: { Cookie: orgA.cookie },
+        }),
+        app.request("/api/v1/analytics/summary", {
+          headers: { Cookie: orgA.cookie },
+        }),
+        app.request("/api/v1/analytics/simulate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+          body: JSON.stringify({
+            laneChanges: [{ laneId: aLane.laneId, transportMode: "RAIL" }],
+          }),
+        }),
+        app.request("/api/v1/invites", {
+          headers: { Cookie: orgA.cookie },
+        }),
+        app.request("/api/v1/directory/alternatives", {
+          headers: { Cookie: orgA.cookie },
+        }),
+      ]);
+
+    expect(afterNetworkRes.status).toBe(200);
+    expect(afterSummaryRes.status).toBe(200);
+    expect(afterSimRes.status).toBe(200);
+    expect(invitesRes.status).toBe(200);
+    expect(dirRes.status).toBe(200);
+
+    const afterNetwork = WorkspaceNetworkResponseSchema.parse(
+      await afterNetworkRes.json(),
+    );
+    const afterSummary = AnalyticsSummarySchema.parse(
+      await afterSummaryRes.json(),
+    );
+    const afterSim = SimulateAnalyticsResponseSchema.parse(
+      await afterSimRes.json(),
+    );
+    const invitesJson = await invitesRes.json();
+    const dirJson = await dirRes.json();
+
+    // Org A's Tier-1 facility is now marked Network-Verified & SITE_VERIFIED
+    const verifiedTier1 = afterNetwork.facilities.find(
+      (f) => f.facilityId === aTier1.facilityId,
+    );
+    expect(verifiedTier1?.isPartnerVerified).toBe(true);
+    expect(verifiedTier1?.locationPrecision).toBe("SITE_VERIFIED");
+
+    // Org A receives anonymized hidden-upstream secondary-sanction alert referencing ONLY aTier1
+    const hiddenSanctionAlert = afterSummary.alerts.find(
+      (a) => a.category === "SECONDARY_SANCTION",
+    );
+    expect(hiddenSanctionAlert).toBeDefined();
+    expect(hiddenSanctionAlert?.confidence).toBe("NETWORK_VERIFIED");
+    expect(hiddenSanctionAlert?.affectedTier1FacilityIds).toEqual([
+      aTier1.facilityId,
+    ]);
+
+    // Org A's Scope 3 upstream rolled up Org B's hidden Tier-2 emissions
+    expect(afterSummary.esg.upstreamScope3Tco2e).toBeGreaterThan(
+      baselineUpstreamScope3,
+    );
+    expect(afterSummary.verifiedCoveragePct).toBe(100);
+    expect(afterSummary.confidence).toBe("NETWORK_VERIFIED");
+
+    // CRITICAL PRIVACY ASSERTION: ZERO Org C identifiers, names, emails, or coordinates
+    // may appear ANYWHERE in any of Org A's API responses!
+    const allOrgAPayloads = JSON.stringify({
+      afterNetwork,
+      afterSummary,
+      afterSim,
+      invitesJson,
+      dirJson,
+    });
+
+    const forbiddenSecrets = [
+      orgC.orgId,
+      bSecretTier2.facilityId,
+      "Secret Kremlin Alloys",
+      "secret-kremlin-alloys.ru",
+      "ops@secret-kremlin-alloys.ru",
+      "55.7558",
+      "37.6173",
+      "Raw Nickel Ore",
+      "Tampere Processing Plant",
+      bOwn.facilityId,
+    ];
+
+    for (const secret of forbiddenSecrets) {
+      expect(allOrgAPayloads).not.toContain(secret);
+    }
+  });
 });
