@@ -1,11 +1,14 @@
 import {
+  AnalyticsSummarySchema,
   AuthMeResponseSchema,
   FacilitySchema,
   HealthResponseSchema,
   ProductSchema,
+  SimulateAnalyticsResponseSchema,
   SupplyInputSchema,
   SupplyLaneSchema,
   WorkspaceNetworkResponseSchema,
+  type AnalyticsSummary,
   type AuthMeResponse,
   type CreateFacilityInput,
   type CreateProductInput,
@@ -16,6 +19,8 @@ import {
   type LoginInput,
   type Product,
   type RegisterInput,
+  type SimulateAnalyticsRequest,
+  type SimulateAnalyticsResponse,
   type SupplyInput,
   type SupplyLane,
   type UpdateFacilityInput,
@@ -330,5 +335,36 @@ export async function deleteLane(laneId: string): Promise<{ ok: true }> {
     `/api/v1/workspace/lanes/${encodeURIComponent(laneId)}`,
     { method: "DELETE" },
     parseOkResponse,
+  );
+}
+
+// --- Analytics & What-If Simulation ---
+
+export async function getAnalyticsSummary(
+  filters?: NetworkQueryFilters,
+): Promise<AnalyticsSummary> {
+  const params = new URLSearchParams();
+  if (filters?.productId) {
+    params.set("productId", filters.productId);
+  }
+  if (filters?.inputId) {
+    params.set("inputId", filters.inputId);
+  }
+  const query = params.toString();
+  const path = query
+    ? `/api/v1/analytics/summary?${query}`
+    : "/api/v1/analytics/summary";
+  return apiRequest(path, { method: "GET" }, (payload) =>
+    parseWithSchema(AnalyticsSummarySchema, payload),
+  );
+}
+
+export async function simulateAnalytics(
+  request: SimulateAnalyticsRequest,
+): Promise<SimulateAnalyticsResponse> {
+  return apiRequest(
+    "/api/v1/analytics/simulate",
+    { method: "POST", body: request },
+    (payload) => parseWithSchema(SimulateAnalyticsResponseSchema, payload),
   );
 }

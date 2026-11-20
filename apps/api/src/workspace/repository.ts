@@ -165,6 +165,7 @@ function filterNetwork(
     inputs,
     facilities,
     lanes,
+    riskSignals: network.riskSignals,
   });
 }
 
@@ -305,7 +306,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       this.listFacilities(safeOrgId),
       this.listLanes(safeOrgId),
     ]);
-    return filterNetwork({ products, inputs, facilities, lanes }, filters);
+    return filterNetwork({ products, inputs, facilities, lanes, riskSignals: [] }, filters);
   }
 
   async listProducts(orgId: string): Promise<Product[]> {
@@ -1177,7 +1178,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       this.listFacilities(safeOrgId),
       this.listLanes(safeOrgId),
     ]);
-    return filterNetwork({ products, inputs, facilities, lanes }, filters);
+    return filterNetwork({ products, inputs, facilities, lanes, riskSignals: [] }, filters);
   }
 
   async listProducts(orgId: string): Promise<Product[]> {

@@ -1,4 +1,5 @@
 import type {
+  AnalyticsSummary,
   Organization,
   Product,
   SupplyInput,
@@ -10,8 +11,11 @@ import {
   Globe2,
   Loader2,
   LogOut,
+  Map as MapIcon,
   MapPinPlus,
   Maximize2,
+  Network,
+  SlidersHorizontal,
   Sparkles,
 } from "lucide-react";
 import {
@@ -24,6 +28,8 @@ export type MapInteractionMode =
   | "pick-new-facility"
   | "refine-site";
 
+export type WorkspaceViewMode = "map" | "graph";
+
 export interface FilterBarProps {
   user: User;
   organization: Organization;
@@ -32,14 +38,19 @@ export interface FilterBarProps {
   activeProductId: string | null;
   activeInputId: string | null;
   stats: WorkspaceSummaryStats;
+  analytics: AnalyticsSummary | null;
+  viewMode: WorkspaceViewMode;
   mapMode: MapInteractionMode;
   seedingDemo: boolean;
   loggingOut: boolean;
+  onChangeViewMode: (mode: WorkspaceViewMode) => void;
   onSelectProduct: (productId: string | null) => void;
   onSelectInput: (inputId: string | null) => void;
   onSeedDemo: () => void;
   onToggleAddFacility: () => void;
   onOpenAddLane: () => void;
+  onOpenAnalytics: () => void;
+  onOpenSimulator: () => void;
   onFitNetwork: () => void;
   onFocusUnverifiedHq: () => void;
   onLogout: () => void;
@@ -53,14 +64,19 @@ export function FilterBar({
   activeProductId,
   activeInputId,
   stats,
+  analytics,
+  viewMode,
   mapMode,
   seedingDemo,
   loggingOut,
+  onChangeViewMode,
   onSelectProduct,
   onSelectInput,
   onSeedDemo,
   onToggleAddFacility,
   onOpenAddLane,
+  onOpenAnalytics,
+  onOpenSimulator,
   onFitNetwork,
   onFocusUnverifiedHq,
   onLogout,
@@ -93,6 +109,47 @@ export function FilterBar({
         </div>
 
         <div className="flex flex-wrap items-center gap-2">
+          {/* Map View <-> Logical Graph View Toggle */}
+          <div
+            role="group"
+            aria-label="Workspace view mode"
+            className="inline-flex items-center rounded-lg border border-slate-800 bg-slate-900 p-0.5"
+          >
+            <button
+              type="button"
+              onClick={() => onChangeViewMode("map")}
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                viewMode === "map"
+                  ? "bg-emerald-500/20 text-emerald-200 border border-emerald-500/40"
+                  : "text-slate-400 hover:text-slate-200 border border-transparent"
+              }`}
+            >
+              <MapIcon className="h-3.5 w-3.5" />
+              <span>Map View</span>
+            </button>
+            <button
+              type="button"
+              onClick={() => onChangeViewMode("graph")}
+              className={`inline-flex items-center gap-1.5 rounded-md px-2.5 py-1 text-xs font-medium transition-colors cursor-pointer ${
+                viewMode === "graph"
+                  ? "bg-indigo-500/20 text-indigo-200 border border-indigo-500/40"
+                  : "text-slate-400 hover:text-slate-200 border border-transparent"
+              }`}
+            >
+              <Network className="h-3.5 w-3.5" />
+              <span>Logical Graph</span>
+            </button>
+          </div>
+
+          <button
+            type="button"
+            onClick={onOpenSimulator}
+            className="inline-flex items-center gap-1.5 rounded-lg border border-indigo-500/40 bg-indigo-500/15 hover:bg-indigo-500/25 text-indigo-200 font-medium text-xs px-3 py-1.5 transition-colors cursor-pointer"
+          >
+            <SlidersHorizontal className="h-3.5 w-3.5" />
+            <span>What-If Simulator</span>
+          </button>
+
           <button
             type="button"
             onClick={onSeedDemo}
@@ -133,15 +190,17 @@ export function FilterBar({
             <span>+ Add Lane</span>
           </button>
 
-          <button
-            type="button"
-            onClick={onFitNetwork}
-            title="Fit map to visible supply network"
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 hover:bg-slate-800 text-slate-300 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer"
-          >
-            <Maximize2 className="h-3.5 w-3.5" />
-            <span className="hidden sm:inline">Fit Network</span>
-          </button>
+          {viewMode === "map" && (
+            <button
+              type="button"
+              onClick={onFitNetwork}
+              title="Fit map to visible supply network"
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-800 bg-slate-900/80 hover:bg-slate-800 text-slate-300 text-xs font-medium px-2.5 py-1.5 transition-colors cursor-pointer"
+            >
+              <Maximize2 className="h-3.5 w-3.5" />
+              <span className="hidden sm:inline">Fit Network</span>
+            </button>
+          )}
 
           <button
             type="button"
@@ -238,6 +297,21 @@ export function FilterBar({
 
         {/* Live summary metrics */}
         <div className="flex items-center gap-2 text-xs shrink-0">
+          {analytics && (
+            <button
+              type="button"
+              onClick={onOpenAnalytics}
+              className={`px-2.5 py-1 rounded-md border font-medium transition-colors cursor-pointer ${
+                analytics.overallStatus === "RED"
+                  ? "bg-red-500/15 border-red-500/40 text-red-200 hover:bg-red-500/25"
+                  : analytics.overallStatus === "YELLOW"
+                    ? "bg-amber-500/15 border-amber-500/40 text-amber-200 hover:bg-amber-500/25"
+                    : "bg-emerald-500/15 border-emerald-500/40 text-emerald-200 hover:bg-emerald-500/25"
+              }`}
+            >
+              Resilience: <span className="font-mono font-semibold">{analytics.resilienceScore}/100</span>
+            </button>
+          )}
           <span className="px-2.5 py-1 rounded-md bg-slate-900 border border-slate-800 text-slate-300 font-medium">
             Spend: <span className="text-white">{formatEur(stats.totalSpendEur)}</span>
           </span>

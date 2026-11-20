@@ -13,6 +13,7 @@ import { Hono } from "hono";
 import { z } from "zod";
 import { createRequireAuth, type AuthVariables } from "../auth/middleware.js";
 import type { AuthRepository } from "../auth/repository.js";
+import type { RiskSignalRepository } from "../analytics/risk-signals.js";
 import {
   WorkspaceValidationError,
   type WorkspaceRepository,
@@ -22,6 +23,7 @@ import { seedEstoniaProductXDemo } from "./seed-demo.js";
 export interface WorkspaceRoutesDependencies {
   authRepo: AuthRepository;
   workspaceRepo: WorkspaceRepository;
+  riskSignalRepo?: RiskSignalRepository;
 }
 
 const NetworkQuerySchema = z.object({
@@ -32,6 +34,7 @@ const NetworkQuerySchema = z.object({
 export function createWorkspaceRoutes({
   authRepo,
   workspaceRepo,
+  riskSignalRepo,
 }: WorkspaceRoutesDependencies): Hono<{ Variables: AuthVariables }> {
   const routes = new Hono<{ Variables: AuthVariables }>();
   const requireAuth = createRequireAuth(authRepo);
@@ -58,15 +61,29 @@ export function createWorkspaceRoutes({
       );
     }
 
-    const network = await workspaceRepo.getNetwork(orgId, parsedQuery.data);
-    return c.json(WorkspaceNetworkResponseSchema.parse(network), 200);
+    const [network, riskSignals] = await Promise.all([
+      workspaceRepo.getNetwork(orgId, parsedQuery.data),
+      riskSignalRepo ? riskSignalRepo.listActive() : Promise.resolve([]),
+    ]);
+    return c.json(
+      WorkspaceNetworkResponseSchema.parse({ ...network, riskSignals }),
+      200,
+    );
   });
 
   // --- Demo Seeder ---
   routes.post("/seed-demo", async (c) => {
     const orgId = c.get("auth").organization.orgId;
-    const network = await seedEstoniaProductXDemo(workspaceRepo, orgId);
-    return c.json(WorkspaceNetworkResponseSchema.parse(network), 201);
+    const [network, riskSignals] = await Promise.all([
+      seedEstoniaProductXDemo(workspaceRepo, orgId),
+      riskSignalRepo
+        ? riskSignalRepo.ensureDemoSignals()
+        : Promise.resolve([]),
+    ]);
+    return c.json(
+      WorkspaceNetworkResponseSchema.parse({ ...network, riskSignals }),
+      201,
+    );
   });
 
   // --- Products ---

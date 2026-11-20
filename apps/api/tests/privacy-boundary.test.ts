@@ -1,6 +1,7 @@
 import {
   AnalyticsSummarySchema,
   AnonymizedRiskAlertSchema,
+  SimulateAnalyticsResponseSchema,
   WorkspaceNetworkResponseSchema,
 } from "@kulgo/shared";
 import { describe, expect, it } from "vitest";
@@ -340,5 +341,93 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(networkAAfter.products).toHaveLength(networkA.products.length);
     expect(networkAAfter.facilities).toHaveLength(networkA.facilities.length);
     expect(networkAAfter.lanes).toHaveLength(networkA.lanes.length);
+  });
+
+  it("enforces auth, strict DTOs, and two-org isolation on /api/v1/analytics/summary and /api/v1/analytics/simulate", async () => {
+    const app = createTestApp();
+
+    // Unauthenticated analytics endpoints return 401
+    expect((await app.request("/api/v1/analytics/summary")).status).toBe(401);
+    expect(
+      (
+        await app.request("/api/v1/analytics/simulate", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({
+            laneChanges: [
+              {
+                laneId: "11111111-1111-4111-8111-111111111111",
+                volumeSharePct: 50,
+              },
+            ],
+          }),
+        })
+      ).status,
+    ).toBe(401);
+
+    const orgA = await registerOrg(app, "analytics-a@org-a.ee", "Analytics Alpha OU");
+    const orgB = await registerOrg(app, "analytics-b@org-b.ee", "Analytics Beta OU");
+
+    const seedARes = await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(seedARes.status).toBe(201);
+    const networkA = WorkspaceNetworkResponseSchema.parse(await seedARes.json());
+    const orgAFacilityIds = new Set(networkA.facilities.map((f) => f.facilityId));
+    const orgALaneId = networkA.lanes[0]!.laneId;
+
+    // Org A gets strict AnalyticsSummary with alerts referencing ONLY Org A's Tier-1 facility IDs
+    const summaryARes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(summaryARes.status).toBe(200);
+    const summaryA = AnalyticsSummarySchema.parse(await summaryARes.json());
+    expect(summaryA.alerts.length).toBeGreaterThan(0);
+    for (const alert of summaryA.alerts) {
+      for (const fid of alert.affectedTier1FacilityIds) {
+        expect(orgAFacilityIds.has(fid)).toBe(true);
+      }
+    }
+
+    // Org B sees zero HHI, zero alerts, zero upstream Scope 3 from Org A
+    const summaryBRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgB.cookie },
+    });
+    expect(summaryBRes.status).toBe(200);
+    const summaryB = AnalyticsSummarySchema.parse(await summaryBRes.json());
+    expect(summaryB.hhiMetrics).toHaveLength(0);
+    expect(summaryB.alerts).toHaveLength(0);
+    expect(summaryB.esg.upstreamScope3Tco2e).toBe(0);
+    expect(summaryB.esg.transportScope3Tco2e).toBe(0);
+
+    // Org B cannot simulate Org A's laneId (must reject with 400)
+    const crossOrgSimRes = await app.request("/api/v1/analytics/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        laneChanges: [{ laneId: orgALaneId, volumeSharePct: 0 }],
+      }),
+    });
+    expect(crossOrgSimRes.status).toBe(400);
+
+    // SimulateAnalyticsResponseSchema strictly rejects leaked Tier-2+ fields
+    const validSimRes = await app.request("/api/v1/analytics/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        laneChanges: [{ laneId: orgALaneId, volumeSharePct: 50 }],
+      }),
+    });
+    expect(validSimRes.status).toBe(200);
+    const validSim = SimulateAnalyticsResponseSchema.parse(
+      await validSimRes.json(),
+    );
+    expect(() =>
+      SimulateAnalyticsResponseSchema.parse({
+        ...validSim,
+        leakedTier2Suppliers: ["Secret Upstream Co"],
+      }),
+    ).toThrow();
   });
 });

@@ -1,4 +1,5 @@
 import type {
+  AnalyticsSummary,
   AuthMeResponse,
   CreateFacilityInput,
   CreateProductInput,
@@ -14,8 +15,11 @@ import { AuthView } from "./components/AuthView.js";
 import {
   FilterBar,
   type MapInteractionMode,
+  type WorkspaceViewMode,
 } from "./components/FilterBar.js";
+import { LogicalGraphView } from "./components/LogicalGraphView.js";
 import { SupplyMap } from "./components/SupplyMap.js";
+import { WhatIfSimulatorDrawer } from "./components/WhatIfSimulatorDrawer.js";
 import {
   WorkspaceSidebar,
   type SidebarTab,
@@ -30,6 +34,7 @@ import {
   deleteLane,
   deleteProduct,
   deleteSupplyInput,
+  getAnalyticsSummary,
   getMe,
   getNetwork,
   logout,
@@ -44,6 +49,7 @@ const EMPTY_NETWORK: WorkspaceNetworkResponse = {
   inputs: [],
   facilities: [],
   lanes: [],
+  riskSignals: [],
 };
 
 export function App() {
@@ -53,6 +59,12 @@ export function App() {
     useState<WorkspaceNetworkResponse>(EMPTY_NETWORK);
   const [loadingNetwork, setLoadingNetwork] = useState(false);
 
+  // M2 Analytics & View Mode state
+  const [viewMode, setViewMode] = useState<WorkspaceViewMode>("map");
+  const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
+  const [loadingAnalytics, setLoadingAnalytics] = useState(false);
+  const [simulatorOpen, setSimulatorOpen] = useState(false);
+
   // Filter & selection state
   const [activeProductId, setActiveProductId] = useState<string | null>(null);
   const [activeInputId, setActiveInputId] = useState<string | null>(null);
@@ -60,7 +72,7 @@ export function App() {
     null,
   );
   const [selectedLaneId, setSelectedLaneId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<SidebarTab>("overview");
+  const [activeTab, setActiveTab] = useState<SidebarTab>("analytics");
   const [mapMode, setMapMode] = useState<MapInteractionMode>("inspect");
   const [refiningFacilityId, setRefiningFacilityId] = useState<string | null>(
     null,
@@ -131,6 +143,40 @@ export function App() {
     [network, activeProductId, activeInputId],
   );
 
+  // Sync live Risk & ESG analytics whenever session, network, or active filters change
+  useEffect(() => {
+    if (!session) {
+      setAnalytics(null);
+      return;
+    }
+
+    let cancelled = false;
+    setLoadingAnalytics(true);
+    getAnalyticsSummary({
+      productId: activeProductId ?? undefined,
+      inputId: activeInputId ?? undefined,
+    })
+      .then((summary) => {
+        if (!cancelled) {
+          setAnalytics(summary);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled && err instanceof ApiError && err.status === 401) {
+          setSession(null);
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setLoadingAnalytics(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [session, network, activeProductId, activeInputId]);
+
   const handleAuthenticated = (me: AuthMeResponse) => {
     setSession(me);
     setBannerError(null);
@@ -147,6 +193,8 @@ export function App() {
       setLoggingOut(false);
       setSession(null);
       setNetwork(EMPTY_NETWORK);
+      setAnalytics(null);
+      setSimulatorOpen(false);
       setActiveProductId(null);
       setActiveInputId(null);
       setSelectedFacilityId(null);
@@ -359,9 +407,17 @@ export function App() {
         activeProductId={activeProductId}
         activeInputId={activeInputId}
         stats={filtered.stats}
+        analytics={analytics}
+        viewMode={viewMode}
         mapMode={mapMode}
         seedingDemo={seedingDemo}
         loggingOut={loggingOut}
+        onChangeViewMode={(nextMode) => {
+          setViewMode(nextMode);
+          if (nextMode === "graph") {
+            setMapMode("inspect");
+          }
+        }}
         onSelectProduct={handleSelectProduct}
         onSelectInput={setActiveInputId}
         onSeedDemo={handleSeedDemo}
@@ -369,6 +425,7 @@ export function App() {
           if (mapMode === "pick-new-facility") {
             setMapMode("inspect");
           } else {
+            setViewMode("map");
             setSelectedFacilityId(null);
             setActiveTab("facility");
             setMapMode("pick-new-facility");
@@ -378,6 +435,12 @@ export function App() {
           setSelectedLaneId(null);
           setMapMode("inspect");
           setActiveTab("lane");
+        }}
+        onOpenAnalytics={() => {
+          setActiveTab("analytics");
+        }}
+        onOpenSimulator={() => {
+          setSimulatorOpen(true);
         }}
         onFitNetwork={() => setFitTrigger((n) => n + 1)}
         onFocusUnverifiedHq={() => {
@@ -407,40 +470,66 @@ export function App() {
       )}
 
       <div className="flex-1 flex flex-col lg:flex-row min-h-0 relative">
-        <SupplyMap
-          facilities={filtered.facilities}
-          lanes={filtered.lanes}
-          inputs={network.inputs}
-          selectedFacilityId={selectedFacilityId}
-          selectedLaneId={selectedLaneId}
-          mapMode={mapMode}
-          refiningFacilityName={refiningFacilityName}
-          fitTrigger={fitTrigger}
-          onSelectFacility={(facilityId) => {
-            setSelectedFacilityId(facilityId);
-            setSelectedLaneId(null);
-            setActiveTab("facility");
-          }}
-          onSelectLane={(laneId) => {
-            setSelectedLaneId(laneId);
-            setSelectedFacilityId(null);
-            setActiveTab("lane");
-          }}
-          onMapPickCoordinates={(coords) => {
-            setPickedCoords(coords);
-            if (mapMode === "pick-new-facility") {
-              setSelectedFacilityId(null);
+        {viewMode === "map" ? (
+          <SupplyMap
+            facilities={filtered.facilities}
+            lanes={filtered.lanes}
+            inputs={network.inputs}
+            riskSignals={network.riskSignals}
+            selectedFacilityId={selectedFacilityId}
+            selectedLaneId={selectedLaneId}
+            mapMode={mapMode}
+            refiningFacilityName={refiningFacilityName}
+            fitTrigger={fitTrigger}
+            onSelectFacility={(facilityId) => {
+              setSelectedFacilityId(facilityId);
+              setSelectedLaneId(null);
               setActiveTab("facility");
-            } else if (mapMode === "refine-site") {
-              setActiveTab("overview");
-            }
-            setMapMode("inspect");
-          }}
-          onCancelMapMode={() => {
-            setMapMode("inspect");
-            setRefiningFacilityId(null);
-          }}
-        />
+            }}
+            onSelectLane={(laneId) => {
+              setSelectedLaneId(laneId);
+              setSelectedFacilityId(null);
+              setActiveTab("lane");
+            }}
+            onMapPickCoordinates={(coords) => {
+              setPickedCoords(coords);
+              if (mapMode === "pick-new-facility") {
+                setSelectedFacilityId(null);
+                setActiveTab("facility");
+              } else if (mapMode === "refine-site") {
+                setActiveTab("overview");
+              }
+              setMapMode("inspect");
+            }}
+            onCancelMapMode={() => {
+              setMapMode("inspect");
+              setRefiningFacilityId(null);
+            }}
+          />
+        ) : (
+          <LogicalGraphView
+            products={network.products}
+            inputs={filtered.inputs}
+            facilities={filtered.facilities}
+            lanes={filtered.lanes}
+            activeProductId={activeProductId}
+            activeInputId={activeInputId}
+            selectedFacilityId={selectedFacilityId}
+            selectedLaneId={selectedLaneId}
+            onSelectProduct={handleSelectProduct}
+            onSelectInput={setActiveInputId}
+            onSelectFacility={(facilityId) => {
+              setSelectedFacilityId(facilityId);
+              setSelectedLaneId(null);
+              setActiveTab("facility");
+            }}
+            onSelectLane={(laneId) => {
+              setSelectedLaneId(laneId);
+              setSelectedFacilityId(null);
+              setActiveTab("lane");
+            }}
+          />
+        )}
 
         {loadingNetwork && (
           <div className="pointer-events-none absolute top-3 left-3 z-20 inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/90 px-3 py-1.5 text-xs text-slate-300">
@@ -457,6 +546,8 @@ export function App() {
           facilities={network.facilities}
           visibleLanes={filtered.lanes}
           stats={filtered.stats}
+          analytics={analytics}
+          loadingAnalytics={loadingAnalytics}
           selectedFacilityId={selectedFacilityId}
           selectedLaneId={selectedLaneId}
           pickedCoords={pickedCoords}
@@ -473,10 +564,13 @@ export function App() {
             setSelectedFacilityId(null);
             setActiveTab("lane");
           }}
+          onOpenSimulator={() => setSimulatorOpen(true)}
           onStartPickNewFacility={() => {
+            setViewMode("map");
             setMapMode("pick-new-facility");
           }}
           onStartRefineFacilityOnMap={(facilityId) => {
+            setViewMode("map");
             setRefiningFacilityId(facilityId);
             setMapMode("refine-site");
           }}
@@ -490,6 +584,16 @@ export function App() {
           onDeleteProduct={handleDeleteProduct}
           onCreateSupplyInput={handleCreateSupplyInput}
           onDeleteSupplyInput={handleDeleteSupplyInput}
+        />
+
+        <WhatIfSimulatorDrawer
+          open={simulatorOpen}
+          lanes={filtered.lanes}
+          facilities={network.facilities}
+          inputs={network.inputs}
+          activeProductId={activeProductId}
+          activeInputId={activeInputId}
+          onClose={() => setSimulatorOpen(false)}
         />
       </div>
     </div>

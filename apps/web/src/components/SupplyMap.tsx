@@ -1,7 +1,17 @@
 import type { PickingInfo } from "@deck.gl/core";
-import { ArcLayer, ScatterplotLayer, TextLayer } from "@deck.gl/layers";
+import {
+  ArcLayer,
+  PolygonLayer,
+  ScatterplotLayer,
+  TextLayer,
+} from "@deck.gl/layers";
 import { MapboxOverlay } from "@deck.gl/mapbox";
-import type { Facility, SupplyInput, SupplyLane } from "@kulgo/shared";
+import type {
+  Facility,
+  RiskSignal,
+  SupplyInput,
+  SupplyLane,
+} from "@kulgo/shared";
 import { AlertTriangle, Crosshair, X } from "lucide-react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
@@ -9,10 +19,12 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import {
   buildCorridorArcs,
   buildFacilityMarkers,
+  buildRiskSignalPolygons,
   computeFacilitiesBounds,
   formatEur,
   type CorridorArcDatum,
   type FacilityMarkerDatum,
+  type RiskSignalPolygonDatum,
 } from "../lib/workspace-utils.js";
 import type { MapInteractionMode } from "./FilterBar.js";
 
@@ -26,6 +38,7 @@ export interface SupplyMapProps {
   facilities: readonly Facility[];
   lanes: readonly SupplyLane[];
   inputs: readonly SupplyInput[];
+  riskSignals?: readonly RiskSignal[];
   selectedFacilityId: string | null;
   selectedLaneId: string | null;
   mapMode: MapInteractionMode;
@@ -40,12 +53,14 @@ export interface SupplyMapProps {
 type HoverState =
   | { kind: "lane"; x: number; y: number; datum: CorridorArcDatum }
   | { kind: "facility"; x: number; y: number; datum: FacilityMarkerDatum }
+  | { kind: "signal"; x: number; y: number; datum: RiskSignalPolygonDatum }
   | null;
 
 export function SupplyMap({
   facilities,
   lanes,
   inputs,
+  riskSignals = [],
   selectedFacilityId,
   selectedLaneId,
   mapMode,
@@ -102,6 +117,11 @@ export function SupplyMap({
   const markers = useMemo(
     () => buildFacilityMarkers(facilities, selectedFacilityId),
     [facilities, selectedFacilityId],
+  );
+
+  const riskPolygons = useMemo(
+    () => buildRiskSignalPolygons(riskSignals),
+    [riskSignals],
   );
 
   // Imperative MapLibre + Deck.gl MapboxOverlay lifecycle (React 19 StrictMode safe)
@@ -296,10 +316,34 @@ export function SupplyMap({
       fontWeight: 600,
     });
 
-    overlay.setProps({
-      layers: [arcLayer, facilityLayer, labelLayer],
+    const riskSignalLayer = new PolygonLayer<RiskSignalPolygonDatum>({
+      id: "kulgo-risk-signal-polygons",
+      data: riskPolygons,
+      pickable: !isPickingCoords,
+      stroked: true,
+      filled: true,
+      lineWidthMinPixels: 1.5,
+      getPolygon: (d) => d.polygon,
+      getFillColor: (d) => d.fillColor,
+      getLineColor: (d) => d.lineColor,
+      onHover: (info: PickingInfo<RiskSignalPolygonDatum>) => {
+        if (info.object) {
+          setHover({
+            kind: "signal",
+            x: info.x,
+            y: info.y,
+            datum: info.object,
+          });
+        } else {
+          setHover((prev) => (prev?.kind === "signal" ? null : prev));
+        }
+      },
     });
-  }, [arcs, markers, selectedFacilityId, selectedLaneId, mapMode]);
+
+    overlay.setProps({
+      layers: [riskSignalLayer, arcLayer, facilityLayer, labelLayer],
+    });
+  }, [riskPolygons, arcs, markers, selectedFacilityId, selectedLaneId, mapMode]);
 
   // Fit bounds when requested (initial data load, demo seed, or "Fit Network")
   useEffect(() => {
@@ -427,6 +471,28 @@ export function SupplyMap({
               {hover.datum.lane.riskReason && (
                 <p className="pt-1 border-t border-slate-800 text-[11px] text-amber-200 leading-snug">
                   {hover.datum.lane.riskReason}
+                </p>
+              )}
+            </div>
+          ) : hover.kind === "signal" ? (
+            <div className="space-y-1">
+              <div className="flex items-center justify-between gap-2">
+                <span className="font-semibold text-white">
+                  {hover.datum.signal.title}
+                </span>
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-semibold ${
+                    hover.datum.signal.severity === "RED"
+                      ? "bg-red-500/20 text-red-300 border border-red-500/40"
+                      : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  }`}
+                >
+                  {hover.datum.signal.kind}
+                </span>
+              </div>
+              {hover.datum.signal.description && (
+                <p className="text-[11px] text-slate-300 leading-snug">
+                  {hover.datum.signal.description}
                 </p>
               )}
             </div>
