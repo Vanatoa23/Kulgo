@@ -34,7 +34,8 @@ export function createInviteRoutes({
   routes.use("*", requireAuth);
 
   routes.post("/", async (c) => {
-    const orgId = c.get("auth").organization.orgId;
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
     let body: unknown;
     try {
       body = await c.req.json();
@@ -56,6 +57,20 @@ export function createInviteRoutes({
         parsed.data,
         config.WEB_ORIGIN,
       );
+
+      await authRepo.recordAuditEvent({
+        orgId,
+        actorUserId: auth.user.userId,
+        actorEmail: auth.user.email,
+        action: "INVITE_CREATED",
+        summary: `Created partner invitation for ${result.invitation.inviteeEmail}`,
+        metadata: {
+          inviteId: result.invitation.inviteId,
+          targetFacilityId: result.invitation.targetFacilityId,
+          inviteeEmail: result.invitation.inviteeEmail,
+        },
+      });
+
       return c.json(CreateInviteResponseSchema.parse(result), 201);
     } catch (err) {
       if (err instanceof InviteValidationError) {
@@ -72,7 +87,8 @@ export function createInviteRoutes({
   });
 
   routes.post("/:token/accept", async (c) => {
-    const orgId = c.get("auth").organization.orgId;
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
     const token = c.req.param("token");
 
     let body: unknown = {};
@@ -95,6 +111,19 @@ export function createInviteRoutes({
 
     try {
       const result = await inviteRepo.acceptInvite(token, orgId, parsed.data);
+
+      await authRepo.recordAuditEvent({
+        orgId,
+        actorUserId: auth.user.userId,
+        actorEmail: auth.user.email,
+        action: "INVITE_ACCEPTED",
+        summary: `Accepted partner invitation ${result.invitation.inviteId}`,
+        metadata: {
+          inviteId: result.invitation.inviteId,
+          openToNewBuyers: parsed.data.openToNewBuyers ?? false,
+        },
+      });
+
       return c.json(AcceptInviteResponseSchema.parse(result), 200);
     } catch (err) {
       if (err instanceof InviteNotFoundError) {
@@ -111,11 +140,25 @@ export function createInviteRoutes({
   });
 
   routes.delete("/:inviteId", async (c) => {
-    const orgId = c.get("auth").organization.orgId;
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
     const inviteId = c.req.param("inviteId");
 
     try {
       const invitation = await inviteRepo.revokeInvite(orgId, inviteId);
+
+      await authRepo.recordAuditEvent({
+        orgId,
+        actorUserId: auth.user.userId,
+        actorEmail: auth.user.email,
+        action: "INVITE_REVOKED",
+        summary: `Revoked partner invitation ${invitation.inviteId}`,
+        metadata: {
+          inviteId: invitation.inviteId,
+          targetFacilityId: invitation.targetFacilityId,
+        },
+      });
+
       return c.json(
         RevokeInviteResponseSchema.parse({ ok: true, invitation }),
         200,

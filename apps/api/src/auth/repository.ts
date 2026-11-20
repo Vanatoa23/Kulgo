@@ -1,13 +1,19 @@
 import { randomUUID } from "node:crypto";
 import {
+  AuditEventSchema,
   OrganizationSchema,
   UserSchema,
+  type AuditEvent,
   type Organization,
   type UpdateOrganizationProfileInput,
   type User,
   type UserRole,
 } from "@kulgo/shared";
 import type { ArcadeDbClient } from "../db/client.js";
+import {
+  sanitizeAuditMetadata,
+  type RecordAuditEventInput,
+} from "./audit.js";
 
 export interface StoredUser extends User {
   passwordHash: string;
@@ -78,6 +84,8 @@ export interface AuthRepository {
   createSession(input: CreateSessionInput): Promise<StoredSession>;
   findSessionByTokenHash(tokenHash: string): Promise<StoredSession | null>;
   deleteSessionByTokenHash(tokenHash: string): Promise<void>;
+  recordAuditEvent(input: RecordAuditEventInput): Promise<AuditEvent>;
+  listAuditEvents(orgId: string, limit?: number): Promise<AuditEvent[]>;
 }
 
 export function normalizeEmail(email: string): string {
@@ -143,6 +151,44 @@ function mapSessionRow(row: Record<string, unknown>): StoredSession {
     expiresAt: String(row.expiresAt),
     createdAt: String(row.createdAt),
   };
+}
+
+function clampAuditLimit(limit?: number): number {
+  if (limit === undefined || !Number.isFinite(limit)) {
+    return 50;
+  }
+  return Math.max(1, Math.min(100, Math.floor(limit)));
+}
+
+function mapAuditEventRow(row: Record<string, unknown>): AuditEvent {
+  let rawMetadata: Record<string, unknown> = {};
+  if (typeof row.metadataJson === "string" && row.metadataJson.trim().length > 0) {
+    try {
+      const parsed: unknown = JSON.parse(row.metadataJson);
+      if (parsed && typeof parsed === "object" && !Array.isArray(parsed)) {
+        rawMetadata = parsed as Record<string, unknown>;
+      }
+    } catch {
+      rawMetadata = {};
+    }
+  } else if (
+    row.metadata &&
+    typeof row.metadata === "object" &&
+    !Array.isArray(row.metadata)
+  ) {
+    rawMetadata = row.metadata as Record<string, unknown>;
+  }
+
+  return AuditEventSchema.parse({
+    eventId: row.eventId,
+    orgId: row.orgId,
+    actorUserId: row.actorUserId,
+    actorEmail: row.actorEmail,
+    action: row.action,
+    summary: row.summary,
+    metadata: sanitizeAuditMetadata(rawMetadata),
+    createdAt: row.createdAt,
+  });
 }
 
 /**
@@ -486,6 +532,58 @@ export class ArcadeDbAuthRepository implements AuthRepository {
       { tokenHash },
     );
   }
+
+  async recordAuditEvent(input: RecordAuditEventInput): Promise<AuditEvent> {
+    const event = AuditEventSchema.parse({
+      eventId: randomUUID(),
+      orgId: input.orgId,
+      actorUserId: input.actorUserId,
+      actorEmail: normalizeEmail(input.actorEmail),
+      action: input.action,
+      summary: input.summary.trim().slice(0, 500),
+      metadata: sanitizeAuditMetadata(input.metadata),
+      createdAt: new Date().toISOString(),
+    });
+
+    await this.db.command(
+      "sql",
+      `CREATE VERTEX AuditEvent SET
+        eventId = :eventId,
+        orgId = :orgId,
+        actorUserId = :actorUserId,
+        actorEmail = :actorEmail,
+        action = :action,
+        summary = :summary,
+        metadataJson = :metadataJson,
+        createdAt = :createdAt`,
+      {
+        eventId: event.eventId,
+        orgId: event.orgId,
+        actorUserId: event.actorUserId,
+        actorEmail: event.actorEmail,
+        action: event.action,
+        summary: event.summary,
+        metadataJson: JSON.stringify(event.metadata),
+        createdAt: event.createdAt,
+      },
+    );
+
+    return event;
+  }
+
+  async listAuditEvents(orgId: string, limit = 50): Promise<AuditEvent[]> {
+    const safeLimit = clampAuditLimit(limit);
+    const rows = await this.db.query<Record<string, unknown>>(
+      "sql",
+      `SELECT eventId, orgId, actorUserId, actorEmail, action, summary, metadataJson, createdAt
+       FROM AuditEvent
+       WHERE orgId = :orgId
+       ORDER BY createdAt DESC
+       LIMIT ${safeLimit}`,
+      { orgId },
+    );
+    return rows.map(mapAuditEventRow);
+  }
 }
 
 /**
@@ -496,6 +594,8 @@ export class InMemoryAuthRepository implements AuthRepository {
   private readonly users = new Map<string, StoredUser>();
   private readonly emailToUserId = new Map<string, string>();
   private readonly sessions = new Map<string, StoredSession>();
+  private readonly auditEvents: Array<{ seq: number; event: AuditEvent }> = [];
+  private auditSeq = 0;
 
   async findUserByEmail(email: string): Promise<StoredUser | null> {
     const userId = this.emailToUserId.get(normalizeEmail(email));
@@ -713,5 +813,41 @@ export class InMemoryAuthRepository implements AuthRepository {
 
   async deleteSessionByTokenHash(tokenHash: string): Promise<void> {
     this.sessions.delete(tokenHash);
+  }
+
+  async recordAuditEvent(input: RecordAuditEventInput): Promise<AuditEvent> {
+    const event = AuditEventSchema.parse({
+      eventId: randomUUID(),
+      orgId: input.orgId,
+      actorUserId: input.actorUserId,
+      actorEmail: normalizeEmail(input.actorEmail),
+      action: input.action,
+      summary: input.summary.trim().slice(0, 500),
+      metadata: sanitizeAuditMetadata(input.metadata),
+      createdAt: new Date().toISOString(),
+    });
+    this.auditSeq += 1;
+    this.auditEvents.push({
+      seq: this.auditSeq,
+      event: { ...event, metadata: { ...event.metadata } },
+    });
+    return { ...event, metadata: { ...event.metadata } };
+  }
+
+  async listAuditEvents(orgId: string, limit = 50): Promise<AuditEvent[]> {
+    const safeLimit = clampAuditLimit(limit);
+    return this.auditEvents
+      .filter((entry) => entry.event.orgId === orgId)
+      .sort((a, b) => {
+        const cmp = b.event.createdAt.localeCompare(a.event.createdAt);
+        return cmp !== 0 ? cmp : b.seq - a.seq;
+      })
+      .slice(0, safeLimit)
+      .map((entry) =>
+        AuditEventSchema.parse({
+          ...entry.event,
+          metadata: { ...entry.event.metadata },
+        }),
+      );
   }
 }

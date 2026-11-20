@@ -3,14 +3,14 @@ services:
     image: arcadedata/arcadedb:26.11.1
     container_name: kulgo-arcadedb
     restart: unless-stopped
-    # Local development bind ONLY on loopback (never expose 0.0.0.0 in production).
-    # In production (Hetzner / Coolify), remove `ports` so ArcadeDB is reachable
-    # exclusively over the private `kulgo-internal` Docker network.
+    # Local development / host-only admin bind on loopback (127.0.0.1).
+    # In production (Hetzner / Coolify / reverse-proxy host), remove `ports`
+    # completely so ArcadeDB is reachable exclusively over `kulgo-internal`.
     ports:
       - "127.0.0.1:2480:2480"
     environment:
       JAVA_OPTS: >-
-        -Darcadedb.server.rootPassword=${ARCADEDB_PASSWORD:-kulgo-dev-password-change-me}
+        -Darcadedb.server.rootPassword=${ARCADEDB_PASSWORD:?ARCADEDB_PASSWORD must be set (min 12 chars, no weak defaults)}
         -Darcadedb.server.mode=production
         -Darcadedb.server.plugins=
     volumes:
@@ -35,13 +35,19 @@ services:
         condition: service_healthy
     environment:
       NODE_ENV: production
-      PORT: 4000
-      WEB_ORIGIN: ${WEB_ORIGIN:-http://localhost:8080}
-      SESSION_SECRET: ${SESSION_SECRET:-kulgo-dev-session-secret-change-in-prod}
+      PORT: ${PORT:-4000}
+      WEB_ORIGIN: ${WEB_ORIGIN:?WEB_ORIGIN must be set (e.g. https://app.kulgo.example)}
+      SESSION_SECRET: ${SESSION_SECRET:?SESSION_SECRET must be set (min 32 random chars)}
       ARCADEDB_URL: http://arcadedb:2480
       ARCADEDB_DATABASE: ${ARCADEDB_DATABASE:-kulgo}
       ARCADEDB_USER: ${ARCADEDB_USER:-root}
-      ARCADEDB_PASSWORD: ${ARCADEDB_PASSWORD:-kulgo-dev-password-change-me}
+      ARCADEDB_PASSWORD: ${ARCADEDB_PASSWORD:?ARCADEDB_PASSWORD must be set}
+      RATE_LIMIT_WINDOW_MS: ${RATE_LIMIT_WINDOW_MS:-60000}
+      RATE_LIMIT_AUTH_MAX: ${RATE_LIMIT_AUTH_MAX:-20}
+      RATE_LIMIT_IMPORT_MAX: ${RATE_LIMIT_IMPORT_MAX:-10}
+      MAX_JSON_BODY_BYTES: ${MAX_JSON_BODY_BYTES:-1048576}
+      MAX_IMPORT_BODY_BYTES: ${MAX_IMPORT_BODY_BYTES:-5242880}
+    # Bound to loopback for host health checks; `web` proxies `/api/*` over `kulgo-internal`.
     ports:
       - "127.0.0.1:4000:4000"
     networks:
@@ -54,7 +60,8 @@ services:
     container_name: kulgo-web
     restart: unless-stopped
     depends_on:
-      - api
+      api:
+        condition: service_healthy
     ports:
       - "${WEB_PORT:-8080}:80"
     networks:

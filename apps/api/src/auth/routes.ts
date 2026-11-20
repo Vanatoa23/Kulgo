@@ -2,6 +2,7 @@ import {
   AddOrgMemberInputSchema,
   AddOrgMemberResponseSchema,
   AuthMeResponseSchema,
+  ListAuditEventsResponseSchema,
   ListOrgMembersResponseSchema,
   LoginInputSchema,
   RegisterInputSchema,
@@ -10,6 +11,7 @@ import {
   UpdateOrganizationProfileResponseSchema,
 } from "@kulgo/shared";
 import { Hono } from "hono";
+import { z } from "zod";
 import type { AppConfig } from "../config.js";
 import {
   createRequireAuth,
@@ -215,6 +217,25 @@ export function createAuthRoutes({
       return c.json({ error: "Organization not found" }, 404);
     }
 
+    await authRepo.recordAuditEvent({
+      orgId: auth.organization.orgId,
+      actorUserId: auth.user.userId,
+      actorEmail: auth.user.email,
+      action: "ORG_PROFILE_UPDATED",
+      summary: `Updated organization ESG & directory profile (Scope 1: ${
+        updated.scope1Tco2e ?? "unset"
+      }, Scope 2: ${updated.scope2Tco2e ?? "unset"}, directory opt-in: ${
+        updated.openToNewBuyers ? "on" : "off"
+      })`,
+      metadata: {
+        scope1Tco2e: updated.scope1Tco2e,
+        scope2Tco2e: updated.scope2Tco2e,
+        esgBadgeCount: updated.esgBadges.length,
+        openToNewBuyers: updated.openToNewBuyers,
+        capabilityCount: updated.capabilities.length,
+      },
+    });
+
     const payload = UpdateOrganizationProfileResponseSchema.parse({
       organization: updated,
     });
@@ -229,7 +250,8 @@ export function createAuthRoutes({
   });
 
   routes.post("/members", requireAuth, requireOwner, async (c) => {
-    const orgId = c.get("auth").organization.orgId;
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
     let rawBody: unknown;
     try {
       rawBody = await c.req.json();
@@ -266,6 +288,20 @@ export function createAuthRoutes({
         passwordHash,
         role: parsed.data.role,
       });
+
+      await authRepo.recordAuditEvent({
+        orgId,
+        actorUserId: auth.user.userId,
+        actorEmail: auth.user.email,
+        action: "MEMBER_ADDED",
+        summary: `Added team member ${member.email} with role ${member.role}`,
+        metadata: {
+          targetUserId: member.userId,
+          targetEmail: member.email,
+          role: member.role,
+        },
+      });
+
       const payload = AddOrgMemberResponseSchema.parse({ member });
       return c.json(payload, 201);
     } catch (err) {
@@ -300,10 +336,51 @@ export function createAuthRoutes({
       return c.json({ error: "Member not found" }, 404);
     }
 
+    await authRepo.recordAuditEvent({
+      orgId,
+      actorUserId: auth.user.userId,
+      actorEmail: auth.user.email,
+      action: "MEMBER_REMOVED",
+      summary: `Removed team member ${target.email} (${target.role})`,
+      metadata: {
+        removedUserId: target.userId,
+        removedEmail: target.email,
+        role: target.role,
+      },
+    });
+
     const payload = RemoveOrgMemberResponseSchema.parse({
       ok: true,
       removedUserId: targetUserId,
     });
+    return c.json(payload, 200);
+  });
+
+  const AuditLogQuerySchema = z.object({
+    limit: z.coerce.number().int().min(1).max(100).default(50),
+  });
+
+  routes.get("/audit-log", requireAuth, requireOwner, async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    const rawLimit = c.req.query("limit");
+    const parsedQuery = AuditLogQuerySchema.safeParse({
+      limit: rawLimit !== undefined && rawLimit !== "" ? rawLimit : undefined,
+    });
+    if (!parsedQuery.success) {
+      return c.json(
+        {
+          error: "Invalid query parameters",
+          details: parsedQuery.error.flatten(),
+        },
+        400,
+      );
+    }
+
+    const events = await authRepo.listAuditEvents(
+      orgId,
+      parsedQuery.data.limit,
+    );
+    const payload = ListAuditEventsResponseSchema.parse({ events });
     return c.json(payload, 200);
   });
 

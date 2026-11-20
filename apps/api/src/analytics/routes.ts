@@ -56,7 +56,8 @@ export function createAnalyticsRoutes({
   });
 
   routes.get("/report", async (c) => {
-    const orgId = c.get("auth").organization.orgId;
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
     const rawProductId = c.req.query("productId");
     const rawInputId = c.req.query("inputId");
 
@@ -79,7 +80,24 @@ export function createAnalyticsRoutes({
         orgId,
         parsedQuery.data,
       );
-      return c.json(ExecutiveReportSchema.parse(report), 200);
+      const validated = ExecutiveReportSchema.parse(report);
+
+      await authRepo.recordAuditEvent({
+        orgId,
+        actorUserId: auth.user.userId,
+        actorEmail: auth.user.email,
+        action: "CSRD_REPORT_EXPORTED",
+        summary: `Exported CSRD & supply chain resilience executive report (resilience ${validated.analytics.resilienceScore}/100, ${validated.analytics.overallStatus})`,
+        metadata: {
+          productId: parsedQuery.data.productId ?? null,
+          inputId: parsedQuery.data.inputId ?? null,
+          resilienceScore: validated.analytics.resilienceScore,
+          overallStatus: validated.analytics.overallStatus,
+          totalTco2e: validated.analytics.esg.totalTco2e,
+        },
+      });
+
+      return c.json(validated, 200);
     } catch (err) {
       if (err instanceof AnalyticsValidationError) {
         return c.json({ error: err.message }, 400);

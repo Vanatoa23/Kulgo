@@ -944,4 +944,152 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       ).status,
     ).toBe(403);
   });
+
+  it("enforces two-org audit log isolation and zero Tier-2+ partner leakage in audit events", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, "audit-alpha@org-a.ee", "Audit Alpha OU");
+    const orgB = await registerOrg(app, "audit-beta@org-b.ee", "Audit Beta OU");
+
+    // Org A creates its own factory + Tier-1 supplier facility
+    const ownFacARes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Tallinn Assembly A",
+        kind: "FACTORY",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: true,
+      }),
+    });
+    expect(ownFacARes.status).toBe(201);
+    const { facility: ownFacA } = (await ownFacARes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const tier1FacARes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Nordic Tier-1 Supplier B",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 60.1699,
+        lng: 24.9384,
+        isOwnFacility: false,
+      }),
+    });
+    expect(tier1FacARes.status).toBe(201);
+    const { facility: tier1FacA } = (await tier1FacARes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: tier1FacA.facilityId,
+        toFacilityId: ownFacA.facilityId,
+        materialCategory: "Battery Cells",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+      }),
+    });
+
+    // Org A invites Org B to verify Tier-1 node
+    const inviteRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        targetFacilityId: tier1FacA.facilityId,
+        inviteeEmail: "audit-beta@org-b.ee",
+      }),
+    });
+    expect(inviteRes.status).toBe(201);
+    const { inviteToken } = (await inviteRes.json()) as { inviteToken: string };
+
+    // Org B accepts invite and maps a SECRET Tier-2 upstream supplier
+    const acceptRes = await app.request(`/api/v1/invites/${inviteToken}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({ openToNewBuyers: false }),
+    });
+    expect(acceptRes.status).toBe(200);
+
+    const secretTier2Name = "TOP_SECRET_TIER2_SMELTER_RU";
+    const orgBImportRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        facilities: [
+          {
+            name: "Helsinki Hub B",
+            kind: "FACTORY",
+            countryCode: "FI",
+            lat: 60.1699,
+            lng: 24.9384,
+            isOwnFacility: true,
+          },
+          {
+            name: secretTier2Name,
+            kind: "MINE",
+            countryCode: "RU",
+            lat: 55.7558,
+            lng: 37.6173,
+            isOwnFacility: false,
+          },
+        ],
+      }),
+    });
+    expect(orgBImportRes.status).toBe(200);
+
+    // Org B also updates its own org profile
+    await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({ scope1Tco2e: 888, scope2Tco2e: 444 }),
+    });
+
+    // Org A exports its CSRD report (triggers hidden Tier-2+ traversal server-side)
+    const reportARes = await app.request("/api/v1/analytics/report", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(reportARes.status).toBe(200);
+
+    // Fetch Org A's audit log
+    const auditARes = await app.request("/api/v1/auth/audit-log", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(auditARes.status).toBe(200);
+    const auditA = (await auditARes.json()) as {
+      events: Array<{ orgId: string; action: string }>;
+    };
+    expect(auditA.events.length).toBeGreaterThanOrEqual(2);
+    expect(auditA.events.every((e) => e.orgId === orgA.orgId)).toBe(true);
+    expect(auditA.events.some((e) => e.action === "CSRD_REPORT_EXPORTED")).toBe(
+      true,
+    );
+
+    const serializedA = JSON.stringify(auditA);
+    expect(serializedA).not.toContain(orgB.orgId);
+    expect(serializedA).not.toContain(secretTier2Name);
+    expect(serializedA).not.toContain("55.7558");
+    expect(serializedA).not.toContain("37.6173");
+    expect(serializedA).not.toContain(inviteToken);
+    expect(serializedA).not.toContain("888");
+
+    // Fetch Org B's audit log -> strictly scoped to Org B, zero Org A events
+    const auditBRes = await app.request("/api/v1/auth/audit-log", {
+      headers: { Cookie: orgB.cookie },
+    });
+    expect(auditBRes.status).toBe(200);
+    const auditB = (await auditBRes.json()) as {
+      events: Array<{ orgId: string; action: string }>;
+    };
+    expect(auditB.events.length).toBeGreaterThanOrEqual(3);
+    expect(auditB.events.every((e) => e.orgId === orgB.orgId)).toBe(true);
+    expect(JSON.stringify(auditB)).not.toContain(orgA.orgId);
+    expect(JSON.stringify(auditB)).not.toContain("CSRD_REPORT_EXPORTED");
+  });
 });

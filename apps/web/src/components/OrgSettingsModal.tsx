@@ -1,4 +1,6 @@
 import type {
+  AuditAction,
+  AuditEvent,
   Organization,
   OrgMember,
   UpdateOrganizationProfileInput,
@@ -11,6 +13,8 @@ import {
   Loader2,
   Lock,
   Plus,
+  RefreshCw,
+  ScrollText,
   Settings2,
   ShieldCheck,
   Trash2,
@@ -18,9 +22,10 @@ import {
   Users,
   X,
 } from "lucide-react";
-import { useEffect, useState, type FormEvent } from "react";
+import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   addOrgMember,
+  listAuditEvents,
   listOrgMembers,
   removeOrgMember,
   updateOrganizationProfile,
@@ -42,6 +47,28 @@ const PRESET_ESG_BADGES = [
   "CSRD Ready",
   "ISO 50001",
 ];
+
+const AUDIT_ACTION_BADGE_STYLES: Record<AuditAction, string> = {
+  ORG_PROFILE_UPDATED:
+    "bg-emerald-500/15 border-emerald-500/40 text-emerald-300",
+  MEMBER_ADDED: "bg-sky-500/15 border-sky-500/40 text-sky-300",
+  MEMBER_REMOVED: "bg-red-500/15 border-red-500/40 text-red-300",
+  BULK_IMPORT_EXECUTED:
+    "bg-indigo-500/15 border-indigo-500/40 text-indigo-300",
+  INVITE_CREATED: "bg-teal-500/15 border-teal-500/40 text-teal-300",
+  INVITE_ACCEPTED: "bg-emerald-500/15 border-emerald-500/40 text-emerald-300",
+  INVITE_REVOKED: "bg-amber-500/15 border-amber-500/40 text-amber-300",
+  CSRD_REPORT_EXPORTED:
+    "bg-violet-500/15 border-violet-500/40 text-violet-300",
+};
+
+function formatAuditTimestamp(iso: string): string {
+  const date = new Date(iso);
+  if (Number.isNaN(date.getTime())) {
+    return iso;
+  }
+  return date.toISOString().replace("T", " ").slice(0, 19) + " UTC";
+}
 
 function parseCommaList(raw: string): string[] {
   return Array.from(
@@ -85,6 +112,29 @@ export function OrgSettingsModal({
   const [addingMember, setAddingMember] = useState(false);
   const [removingUserId, setRemovingUserId] = useState<string | null>(null);
 
+  // Compliance Audit Log (M6 OWNER-only)
+  const [auditEvents, setAuditEvents] = useState<AuditEvent[]>([]);
+  const [loadingAuditLog, setLoadingAuditLog] = useState(false);
+  const [auditLogError, setAuditLogError] = useState<string | null>(null);
+
+  const refreshAuditLog = useCallback(async () => {
+    if (!isOwner) return;
+    setLoadingAuditLog(true);
+    setAuditLogError(null);
+    try {
+      const events = await listAuditEvents(50);
+      setAuditEvents(events);
+    } catch (err) {
+      setAuditLogError(
+        err instanceof Error
+          ? err.message
+          : "Failed to load compliance audit log.",
+      );
+    } finally {
+      setLoadingAuditLog(false);
+    }
+  }, [isOwner]);
+
   useEffect(() => {
     if (!open) return;
     setScope1Text(
@@ -104,6 +154,7 @@ export function OrgSettingsModal({
     setNewMemberEmail("");
     setNewMemberPassword("");
     setNewMemberRole("MEMBER");
+    setAuditLogError(null);
 
     let cancelled = false;
     setLoadingMembers(true);
@@ -128,13 +179,39 @@ export function OrgSettingsModal({
         }
       });
 
+    if (isOwner) {
+      setLoadingAuditLog(true);
+      listAuditEvents(50)
+        .then((events) => {
+          if (!cancelled) {
+            setAuditEvents(events);
+          }
+        })
+        .catch((err) => {
+          if (!cancelled) {
+            setAuditLogError(
+              err instanceof Error
+                ? err.message
+                : "Failed to load compliance audit log.",
+            );
+          }
+        })
+        .finally(() => {
+          if (!cancelled) {
+            setLoadingAuditLog(false);
+          }
+        });
+    } else {
+      setAuditEvents([]);
+    }
+
     return () => {
       cancelled = true;
     };
-    // Intentionally only re-initialize when the modal opens or orgId changes,
+    // Intentionally only re-initialize when the modal opens or orgId/role changes,
     // so saving settings (which updates `organization`) preserves `savedBanner`.
     // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [open, organization.orgId]);
+  }, [open, organization.orgId, isOwner]);
 
   if (!open) {
     return null;
@@ -198,6 +275,7 @@ export function OrgSettingsModal({
       const updated = await updateOrganizationProfile(payload);
       onUpdated(updated);
       setSavedBanner(true);
+      void refreshAuditLog();
     } catch (err) {
       setError(
         err instanceof Error
@@ -237,6 +315,7 @@ export function OrgSettingsModal({
       setNewMemberPassword("");
       setNewMemberRole("MEMBER");
       setMemberBanner(`Added ${created.email} as ${created.role}.`);
+      void refreshAuditLog();
     } catch (err) {
       setMembersError(
         err instanceof Error ? err.message : "Failed to add team member.",
@@ -255,6 +334,7 @@ export function OrgSettingsModal({
       await removeOrgMember(member.userId);
       setMembers((prev) => prev.filter((m) => m.userId !== member.userId));
       setMemberBanner(`Removed ${member.email} from ${organization.name}.`);
+      void refreshAuditLog();
     } catch (err) {
       setMembersError(
         err instanceof Error ? err.message : "Failed to remove team member.",
@@ -661,6 +741,89 @@ export function OrgSettingsModal({
               </form>
             )}
           </section>
+
+          {/* Compliance Audit Log (OWNER-only) */}
+          {isOwner && (
+            <section
+              aria-labelledby="org-audit-log-heading"
+              className="pt-5 border-t border-slate-800 space-y-3"
+            >
+              <div className="flex items-center justify-between gap-2">
+                <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                  <ScrollText className="h-3.5 w-3.5 text-violet-400" />
+                  <h3 id="org-audit-log-heading">Audit Log</h3>
+                </div>
+                <div className="flex items-center gap-2">
+                  <span className="text-[11px] text-slate-500 font-mono">
+                    {auditEvents.length} event
+                    {auditEvents.length === 1 ? "" : "s"}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => void refreshAuditLog()}
+                    disabled={loadingAuditLog}
+                    aria-label="Refresh audit log"
+                    className="inline-flex items-center gap-1 rounded-md border border-slate-800 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 px-2 py-1 text-[11px] text-slate-300 cursor-pointer"
+                  >
+                    <RefreshCw
+                      className={`h-3 w-3 ${loadingAuditLog ? "animate-spin" : ""}`}
+                    />
+                    <span>Refresh</span>
+                  </button>
+                </div>
+              </div>
+
+              {auditLogError && (
+                <div className="rounded-lg border border-red-500/40 bg-red-500/10 p-3 text-xs text-red-200">
+                  {auditLogError}
+                </div>
+              )}
+
+              {loadingAuditLog && auditEvents.length === 0 ? (
+                <div className="flex items-center gap-2 text-xs text-slate-400 py-3">
+                  <Loader2 className="h-3.5 w-3.5 animate-spin text-violet-400" />
+                  <span>Loading compliance audit log...</span>
+                </div>
+              ) : auditEvents.length === 0 ? (
+                <div className="rounded-xl border border-slate-800 bg-slate-900/40 p-3.5 text-xs text-slate-400">
+                  No security or CSRD compliance events recorded yet.
+                </div>
+              ) : (
+                <ul
+                  aria-label="Compliance audit events"
+                  className="divide-y divide-slate-800/80 rounded-xl border border-slate-800 bg-slate-900/40 max-h-64 overflow-y-auto"
+                >
+                  {auditEvents.map((ev) => (
+                    <li
+                      key={ev.eventId}
+                      className="px-3.5 py-2.5 text-xs space-y-1"
+                    >
+                      <div className="flex flex-wrap items-center justify-between gap-2">
+                        <div className="flex items-center gap-2 min-w-0">
+                          <span
+                            className={`font-mono text-[10px] px-2 py-0.5 rounded border shrink-0 ${
+                              AUDIT_ACTION_BADGE_STYLES[ev.action]
+                            }`}
+                          >
+                            {ev.action}
+                          </span>
+                          <span className="truncate font-medium text-slate-200">
+                            {ev.actorEmail}
+                          </span>
+                        </div>
+                        <span className="font-mono text-[10px] text-slate-500 shrink-0">
+                          {formatAuditTimestamp(ev.createdAt)}
+                        </span>
+                      </div>
+                      <p className="text-[11px] text-slate-400 leading-relaxed">
+                        {ev.summary}
+                      </p>
+                    </li>
+                  ))}
+                </ul>
+              )}
+            </section>
+          )}
 
           {/* Footer Close */}
           <div className="flex items-center justify-end pt-2 border-t border-slate-800">

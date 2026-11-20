@@ -9,6 +9,7 @@ import {
   ExecutiveReportSchema,
   FacilitySchema,
   HealthResponseSchema,
+  ListAuditEventsResponseSchema,
   ListInvitesResponseSchema,
   ListOrgMembersResponseSchema,
   ProductSchema,
@@ -25,6 +26,7 @@ import {
   type AddOrgMemberInput,
   type AlternativeCandidate,
   type AnalyticsSummary,
+  type AuditEvent,
   type AuthMeResponse,
   type BulkImportJsonRequest,
   type BulkImportSummary,
@@ -571,5 +573,18 @@ export async function removeOrgMember(
     (payload) => parseWithSchema(RemoveOrgMemberResponseSchema, payload),
   );
 }
+
+// --- Org-Scoped Compliance Audit Log (M6) ---
+
+export async function listAuditEvents(limit = 50): Promise<AuditEvent[]> {
+  const safeLimit = Math.max(1, Math.min(100, Math.floor(limit)));
+  const result = await apiRequest(
+    `/api/v1/auth/audit-log?limit=${safeLimit}`,
+    { method: "GET" },
+    (payload) => parseWithSchema(ListAuditEventsResponseSchema, payload),
+  );
+  return result.events;
+}
+
 
 

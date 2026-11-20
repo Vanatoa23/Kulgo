@@ -103,4 +103,24 @@ jobs:
           cache-from: type=gha,scope=kulgo-web
           cache-to: type=gha,mode=max,scope=kulgo-web
 
+  web-e2e:
+    name: Live Playwright Browser E2E
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.21.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Install Playwright Chromium
+        run: pnpm --filter @kulgo/web exec playwright install chromium --with-deps
+      - name: Run Playwright E2E Suite
+        run: pnpm --filter @kulgo/web test:e2e
+
+
 
