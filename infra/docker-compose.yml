@@ -18,7 +18,7 @@ services:
     networks:
       - kulgo-internal
     healthcheck:
-      test: ["CMD-SHELL", "curl -fsS http://127.0.0.1:2480/api/v1/ready || exit 1"]
+      test: ["CMD-SHELL", "bash -c 'exec 3<>/dev/tcp/127.0.0.1/2480'"]
       interval: 10s
       timeout: 5s
       retries: 10
