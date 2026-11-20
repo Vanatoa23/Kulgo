@@ -10,16 +10,20 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import {
   ApiError,
   createFacility,
+  getAnalyticsSummary,
   getMe,
   getNetwork,
   login,
   seedDemo,
+  simulateAnalytics,
   updateFacility,
 } from "../lib/api.js";
 import {
   RISK_COLORS,
   buildCorridorArcs,
   buildFacilityMarkers,
+  buildLogicalGraphModel,
+  buildRiskSignalPolygons,
   computeCorridorWidth,
   computeFacilitiesBounds,
   filterWorkspaceNetwork,
@@ -216,7 +220,7 @@ function makeSampleNetwork(): WorkspaceNetworkResponse {
     },
   ];
 
-  return { products, inputs, facilities, lanes };
+  return { products, inputs, facilities, lanes, riskSignals: [] };
 }
 
 describe("workspace-utils", () => {
@@ -515,5 +519,109 @@ describe("api client", () => {
       status: 500,
       message: "Unexpected API response format",
     });
+  });
+
+  it("builds LogicalGraphModel (Products -> SupplyInputs -> Facilities) with color-coded edges", () => {
+    const network = makeSampleNetwork();
+    const graph = buildLogicalGraphModel({
+      products: network.products,
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: network.lanes,
+      activeProductId: null,
+      activeInputId: null,
+      selectedFacilityId: FAC_RIGA_ID,
+      selectedLaneId: LANE_RED_ID,
+    });
+
+    expect(graph.nodes.filter((n) => n.kind === "product")).toHaveLength(2);
+    expect(graph.nodes.filter((n) => n.kind === "input")).toHaveLength(3);
+    expect(graph.nodes.filter((n) => n.kind === "facility")).toHaveLength(4);
+
+    const redEdge = graph.edges.find(
+      (e) => e.laneId === LANE_RED_ID && e.kind === "supply",
+    );
+    expect(redEdge?.color).toBe("#ef4444");
+    expect(redEdge?.animated).toBe(true);
+    expect(redEdge?.isSelected).toBe(true);
+
+    const rigaNode = graph.nodes.find((n) => n.entityId === FAC_RIGA_ID);
+    expect(rigaNode?.isSelected).toBe(true);
+  });
+
+  it("parses RiskSignal WKT polygons for Deck.gl PolygonLayer", () => {
+    const polygons = buildRiskSignalPolygons([
+      {
+        signalId: "sig-lv",
+        kind: "SANCTIONS",
+        severity: "RED",
+        title: "Latvia Sanctions",
+        description: "Test",
+        regionCode: "LV",
+        affectedCountryCodes: ["LV"],
+        polygonWkt:
+          "POLYGON ((20.9 55.6, 28.3 55.6, 28.3 58.1, 20.9 58.1, 20.9 55.6))",
+        active: true,
+      },
+    ]);
+    expect(polygons).toHaveLength(1);
+    expect(polygons[0]!.polygon).toHaveLength(5);
+    expect(polygons[0]!.fillColor[0]).toBe(239);
+  });
+
+  it("calls GET /api/v1/analytics/summary and POST /api/v1/analytics/simulate with strict Zod parsing", async () => {
+    const summaryPayload = {
+      resilienceScore: 68,
+      overallStatus: "YELLOW" as const,
+      verifiedCoveragePct: 50,
+      confidence: "ESTIMATED" as const,
+      hhiMetrics: [],
+      alerts: [],
+      esg: {
+        scope1Tco2e: 120,
+        scope2Tco2e: 180,
+        upstreamScope3Tco2e: 500,
+        transportScope3Tco2e: 25,
+        totalTco2e: 825,
+        confidence: "ESTIMATED" as const,
+        verifiedCoveragePct: 50,
+      },
+      riskSignals: [],
+      computedAt: "2026-11-20T12:00:00.000Z",
+    };
+
+    const summaryMock = mockFetchOnce(200, summaryPayload);
+    const summary = await getAnalyticsSummary({ productId: PRODUCT_X_ID });
+    expect(summary.resilienceScore).toBe(68);
+    expect(summaryMock).toHaveBeenCalledWith(
+      `/api/v1/analytics/summary?productId=${PRODUCT_X_ID}`,
+      expect.objectContaining({ method: "GET", credentials: "include" }),
+    );
+
+    const simPayload = {
+      baseline: summaryPayload,
+      simulated: { ...summaryPayload, resilienceScore: 84, overallStatus: "GREEN" as const },
+      deltas: {
+        resilienceScoreDelta: 16,
+        maxHhiDelta: -2000,
+        avgHhiDelta: -1000,
+        alertCountDelta: -1,
+        redAlertCountDelta: 0,
+        spofCountDelta: -1,
+        transportScope3Tco2eDelta: -10,
+        totalTco2eDelta: -10,
+      },
+      appliedChangesCount: 1,
+    };
+
+    const simMock = mockFetchOnce(200, simPayload);
+    const simRes = await simulateAnalytics({
+      laneChanges: [{ laneId: LANE_RED_ID, volumeSharePct: 0 }],
+    });
+    expect(simRes.deltas.resilienceScoreDelta).toBe(16);
+    expect(simMock).toHaveBeenCalledWith(
+      "/api/v1/analytics/simulate",
+      expect.objectContaining({ method: "POST", credentials: "include" }),
+    );
   });
 });

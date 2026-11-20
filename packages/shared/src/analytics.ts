@@ -1,5 +1,9 @@
 import { z } from "zod";
-import { RiskStatusSchema } from "./network.js";
+import {
+  RiskSignalSchema,
+  RiskStatusSchema,
+  TransportModeSchema,
+} from "./network.js";
 
 export const ConfidenceLevelSchema = z.enum([
   "NETWORK_VERIFIED",
@@ -81,10 +85,59 @@ export const AnalyticsSummarySchema = z
     hhiMetrics: z.array(HhiMetricSchema),
     alerts: z.array(AnonymizedRiskAlertSchema),
     esg: EsgSummarySchema,
+    riskSignals: z.array(RiskSignalSchema).default([]),
     computedAt: z.string().datetime(),
   })
   .strict();
 export type AnalyticsSummary = z.infer<typeof AnalyticsSummarySchema>;
+
+export const SimulatedLaneChangeSchema = z
+  .object({
+    laneId: z.string().uuid(),
+    volumeSharePct: z.number().finite().min(0).max(100).optional(),
+    transportMode: TransportModeSchema.optional(),
+    annualVolume: z.number().finite().nonnegative().nullable().optional(),
+    riskStatus: RiskStatusSchema.optional(),
+  })
+  .strict();
+export type SimulatedLaneChange = z.infer<typeof SimulatedLaneChangeSchema>;
+
+export const SimulateAnalyticsRequestSchema = z
+  .object({
+    productId: z.string().uuid().optional(),
+    inputId: z.string().uuid().optional(),
+    laneChanges: z.array(SimulatedLaneChangeSchema).min(1).max(100),
+  })
+  .strict();
+export type SimulateAnalyticsRequest = z.infer<
+  typeof SimulateAnalyticsRequestSchema
+>;
+
+export const AnalyticsDeltaSchema = z
+  .object({
+    resilienceScoreDelta: z.number(),
+    maxHhiDelta: z.number(),
+    avgHhiDelta: z.number(),
+    alertCountDelta: z.number().int(),
+    redAlertCountDelta: z.number().int(),
+    spofCountDelta: z.number().int(),
+    transportScope3Tco2eDelta: z.number(),
+    totalTco2eDelta: z.number(),
+  })
+  .strict();
+export type AnalyticsDelta = z.infer<typeof AnalyticsDeltaSchema>;
+
+export const SimulateAnalyticsResponseSchema = z
+  .object({
+    baseline: AnalyticsSummarySchema,
+    simulated: AnalyticsSummarySchema,
+    deltas: AnalyticsDeltaSchema,
+    appliedChangesCount: z.number().int().nonnegative(),
+  })
+  .strict();
+export type SimulateAnalyticsResponse = z.infer<
+  typeof SimulateAnalyticsResponseSchema
+>;
 
 export const HealthResponseSchema = z.object({
   status: z.enum(["ok", "degraded"]),

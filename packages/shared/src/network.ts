@@ -94,11 +94,36 @@ export const SupplyLaneSchema = z.object({
 });
 export type SupplyLane = z.infer<typeof SupplyLaneSchema>;
 
+export const RiskSignalKindSchema = z.enum([
+  "SANCTIONS",
+  "GEOPOLITICAL",
+  "MARITIME_CHOKEPOINT",
+  "PORT_CONGESTION",
+  "CLIMATE",
+]);
+export type RiskSignalKind = z.infer<typeof RiskSignalKindSchema>;
+
+export const RiskSignalSchema = z
+  .object({
+    signalId: z.string().min(1),
+    kind: RiskSignalKindSchema,
+    severity: RiskStatusSchema,
+    title: z.string().min(1).max(200),
+    description: z.string().max(1000).nullable().default(null),
+    regionCode: z.string().max(64).nullable().default(null),
+    affectedCountryCodes: z.array(z.string().length(2)).default([]),
+    polygonWkt: z.string().min(1),
+    active: z.boolean().default(true),
+  })
+  .strict();
+export type RiskSignal = z.infer<typeof RiskSignalSchema>;
+
 export const WorkspaceNetworkResponseSchema = z.object({
   products: z.array(ProductSchema),
   inputs: z.array(SupplyInputSchema),
   facilities: z.array(FacilitySchema),
   lanes: z.array(SupplyLaneSchema),
+  riskSignals: z.array(RiskSignalSchema).default([]),
 });
 export type WorkspaceNetworkResponse = z.infer<
   typeof WorkspaceNetworkResponseSchema

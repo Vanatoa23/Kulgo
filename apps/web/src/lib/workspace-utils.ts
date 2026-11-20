@@ -1,5 +1,7 @@
 import type {
   Facility,
+  Product,
+  RiskSignal,
   RiskStatus,
   SupplyInput,
   SupplyLane,
@@ -285,4 +287,301 @@ export function formatEur(amount: number | null | undefined): string {
     return `€${Math.round(amount / 1_000)}k`;
   }
   return `€${Math.round(amount).toLocaleString("en-US")}`;
+}
+
+export const RISK_HEX_COLORS: Record<RiskStatus, string> = {
+  GREEN: "#10b981",
+  YELLOW: "#f59e0b",
+  RED: "#ef4444",
+};
+
+export interface RiskSignalPolygonDatum {
+  signalId: string;
+  signal: RiskSignal;
+  polygon: [number, number][];
+  fillColor: [number, number, number, number];
+  lineColor: [number, number, number, number];
+}
+
+export function parseWktPolygonRing(wkt: string): [number, number][] {
+  const match = /POLYGON\s*\(\s*\(([^)]+)\)/i.exec(wkt.trim());
+  if (!match?.[1]) {
+    return [];
+  }
+  const coords: [number, number][] = [];
+  for (const pair of match[1].split(",")) {
+    const parts = pair.trim().split(/\s+/);
+    if (parts.length < 2) continue;
+    const lng = Number(parts[0]);
+    const lat = Number(parts[1]);
+    if (Number.isFinite(lng) && Number.isFinite(lat)) {
+      coords.push([lng, lat]);
+    }
+  }
+  return coords;
+}
+
+export function buildRiskSignalPolygons(
+  riskSignals: readonly RiskSignal[],
+): RiskSignalPolygonDatum[] {
+  const polygons: RiskSignalPolygonDatum[] = [];
+  for (const signal of riskSignals) {
+    if (!signal.active) continue;
+    const polygon = parseWktPolygonRing(signal.polygonWkt);
+    if (polygon.length < 3) continue;
+    const [r, g, b] = RISK_COLORS[signal.severity];
+    polygons.push({
+      signalId: signal.signalId,
+      signal,
+      polygon,
+      fillColor: [r, g, b, signal.severity === "RED" ? 48 : 38],
+      lineColor: [r, g, b, 210],
+    });
+  }
+  return polygons;
+}
+
+export interface LogicalGraphNodeModel {
+  id: string;
+  kind: "product" | "input" | "facility";
+  entityId: string;
+  position: { x: number; y: number };
+  label: string;
+  subtitle: string;
+  badge: string;
+  riskStatus: RiskStatus;
+  isOwnFacility?: boolean;
+  isSpof?: boolean;
+  isSelected: boolean;
+}
+
+export interface LogicalGraphEdgeModel {
+  id: string;
+  source: string;
+  target: string;
+  kind: "bom" | "supply" | "delivery";
+  laneId: string | null;
+  riskStatus: RiskStatus | null;
+  color: string;
+  label: string;
+  animated: boolean;
+  isSelected: boolean;
+}
+
+export interface LogicalGraphModel {
+  nodes: LogicalGraphNodeModel[];
+  edges: LogicalGraphEdgeModel[];
+}
+
+export function buildLogicalGraphModel(params: {
+  products: readonly Product[];
+  inputs: readonly SupplyInput[];
+  facilities: readonly Facility[];
+  lanes: readonly SupplyLane[];
+  activeProductId: string | null;
+  activeInputId: string | null;
+  selectedFacilityId: string | null;
+  selectedLaneId: string | null;
+}): LogicalGraphModel {
+  const {
+    products,
+    inputs,
+    facilities,
+    lanes,
+    activeProductId,
+    activeInputId,
+    selectedFacilityId,
+    selectedLaneId,
+  } = params;
+
+  const nodes: LogicalGraphNodeModel[] = [];
+  const edges: LogicalGraphEdgeModel[] = [];
+
+  const visibleProducts = activeProductId
+    ? products.filter((p) => p.productId === activeProductId)
+    : products;
+
+  const visibleInputs = activeInputId
+    ? inputs.filter((i) => i.inputId === activeInputId)
+    : inputs;
+
+  const visibleInputIds = new Set(visibleInputs.map((i) => i.inputId));
+  const visibleFacilityIds = new Set(facilities.map((f) => f.facilityId));
+
+  // Worst risk status per input & facility for status indicators
+  const riskRank: Record<RiskStatus, number> = { GREEN: 0, YELLOW: 1, RED: 2 };
+  const worstRisk = (a: RiskStatus, b: RiskStatus): RiskStatus =>
+    riskRank[b] > riskRank[a] ? b : a;
+
+  const inputRiskMap = new Map<string, RiskStatus>();
+  const inputSupplierCountMap = new Map<string, Set<string>>();
+  const facilityRiskMap = new Map<string, RiskStatus>();
+
+  for (const lane of lanes) {
+    if (lane.inputId) {
+      inputRiskMap.set(
+        lane.inputId,
+        worstRisk(inputRiskMap.get(lane.inputId) ?? "GREEN", lane.riskStatus),
+      );
+      const set = inputSupplierCountMap.get(lane.inputId) ?? new Set<string>();
+      set.add(lane.fromFacilityId);
+      inputSupplierCountMap.set(lane.inputId, set);
+    }
+    facilityRiskMap.set(
+      lane.fromFacilityId,
+      worstRisk(
+        facilityRiskMap.get(lane.fromFacilityId) ?? "GREEN",
+        lane.riskStatus,
+      ),
+    );
+    facilityRiskMap.set(
+      lane.toFacilityId,
+      worstRisk(
+        facilityRiskMap.get(lane.toFacilityId) ?? "GREEN",
+        lane.riskStatus,
+      ),
+    );
+  }
+
+  // Column 1: Products (x = 40)
+  const productGapY = 140;
+  visibleProducts.forEach((product, idx) => {
+    const linkedInputs = visibleInputs.filter(
+      (i) => i.productId === product.productId,
+    );
+    let prodRisk: RiskStatus = "GREEN";
+    for (const inp of linkedInputs) {
+      prodRisk = worstRisk(prodRisk, inputRiskMap.get(inp.inputId) ?? "GREEN");
+    }
+    nodes.push({
+      id: `product:${product.productId}`,
+      kind: "product",
+      entityId: product.productId,
+      position: { x: 40, y: 80 + idx * productGapY },
+      label: product.name,
+      subtitle: product.sku ?? `${linkedInputs.length} materials`,
+      badge: "PRODUCT",
+      riskStatus: prodRisk,
+      isSelected: activeProductId === product.productId,
+    });
+  });
+
+  // Column 2: SupplyInputs / Materials A-F (x = 360)
+  const inputGapY = 112;
+  visibleInputs.forEach((input, idx) => {
+    const suppliers = inputSupplierCountMap.get(input.inputId);
+    const isSpof = suppliers !== undefined && suppliers.size === 1;
+    nodes.push({
+      id: `input:${input.inputId}`,
+      kind: "input",
+      entityId: input.inputId,
+      position: { x: 360, y: 40 + idx * inputGapY },
+      label: input.name,
+      subtitle: input.category,
+      badge: isSpof ? "SPOF" : input.unit,
+      riskStatus: inputRiskMap.get(input.inputId) ?? "GREEN",
+      isSpof,
+      isSelected: activeInputId === input.inputId,
+    });
+
+    if (
+      input.productId &&
+      visibleProducts.some((p) => p.productId === input.productId)
+    ) {
+      edges.push({
+        id: `bom:${input.productId}->${input.inputId}`,
+        source: `product:${input.productId}`,
+        target: `input:${input.inputId}`,
+        kind: "bom",
+        laneId: null,
+        riskStatus: null,
+        color: "#475569",
+        label: "",
+        animated: false,
+        isSelected: false,
+      });
+    }
+  });
+
+  // Column 3: Supplier Facilities (x = 710), Column 4: Own Facilities (x = 1070)
+  const supplierFacilities = facilities.filter((f) => !f.isOwnFacility);
+  const ownFacilities = facilities.filter((f) => f.isOwnFacility);
+
+  const facilityGapY = 122;
+  supplierFacilities.forEach((facility, idx) => {
+    nodes.push({
+      id: `facility:${facility.facilityId}`,
+      kind: "facility",
+      entityId: facility.facilityId,
+      position: { x: 710, y: 40 + idx * facilityGapY },
+      label: facility.name,
+      subtitle: `${facility.countryCode} · ${facility.sector ?? facility.kind}`,
+      badge:
+        facility.locationPrecision === "SITE_VERIFIED"
+          ? "SITE_VERIFIED"
+          : "HQ_ESTIMATED",
+      riskStatus: facilityRiskMap.get(facility.facilityId) ?? "GREEN",
+      isOwnFacility: false,
+      isSelected: selectedFacilityId === facility.facilityId,
+    });
+  });
+
+  ownFacilities.forEach((facility, idx) => {
+    nodes.push({
+      id: `facility:${facility.facilityId}`,
+      kind: "facility",
+      entityId: facility.facilityId,
+      position: { x: 1070, y: 120 + idx * 140 },
+      label: facility.name,
+      subtitle: `${facility.countryCode} · Own ${facility.kind}`,
+      badge: "OWN HQ",
+      riskStatus: facilityRiskMap.get(facility.facilityId) ?? "GREEN",
+      isOwnFacility: true,
+      isSelected: selectedFacilityId === facility.facilityId,
+    });
+  });
+
+  // SupplyLane edges (Green / Yellow / Red)
+  for (const lane of lanes) {
+    if (
+      !visibleFacilityIds.has(lane.fromFacilityId) ||
+      !visibleFacilityIds.has(lane.toFacilityId)
+    ) {
+      continue;
+    }
+
+    const color = RISK_HEX_COLORS[lane.riskStatus];
+    const isSelected = selectedLaneId === lane.laneId;
+    const label = `${lane.volumeSharePct}% · ${lane.transportMode}`;
+
+    if (lane.inputId && visibleInputIds.has(lane.inputId)) {
+      edges.push({
+        id: `lane-in:${lane.laneId}`,
+        source: `input:${lane.inputId}`,
+        target: `facility:${lane.fromFacilityId}`,
+        kind: "supply",
+        laneId: lane.laneId,
+        riskStatus: lane.riskStatus,
+        color,
+        label,
+        animated: lane.riskStatus === "RED" || isSelected,
+        isSelected,
+      });
+    }
+
+    edges.push({
+      id: `lane-del:${lane.laneId}`,
+      source: `facility:${lane.fromFacilityId}`,
+      target: `facility:${lane.toFacilityId}`,
+      kind: "delivery",
+      laneId: lane.laneId,
+      riskStatus: lane.riskStatus,
+      color,
+      label: lane.inputId ? `${lane.transportMode}` : label,
+      animated: lane.riskStatus === "RED" || isSelected,
+      isSelected,
+    });
+  }
+
+  return { nodes, edges };
 }

@@ -3,6 +3,16 @@ import { Hono } from "hono";
 import { cors } from "hono/cors";
 import { secureHeaders } from "hono/secure-headers";
 import {
+  OrgScopedAnalyticsRepository,
+  type AnalyticsRepository,
+} from "./analytics/repository.js";
+import {
+  ArcadeDbRiskSignalRepository,
+  InMemoryRiskSignalRepository,
+  type RiskSignalRepository,
+} from "./analytics/risk-signals.js";
+import { createAnalyticsRoutes } from "./analytics/routes.js";
+import {
   ArcadeDbAuthRepository,
   InMemoryAuthRepository,
   type AuthRepository,
@@ -22,6 +32,8 @@ export interface AppDependencies {
   db: ArcadeDbClient;
   authRepo?: AuthRepository;
   workspaceRepo?: WorkspaceRepository;
+  riskSignalRepo?: RiskSignalRepository;
+  analyticsRepo?: AnalyticsRepository;
 }
 
 export function createApp({
@@ -29,6 +41,12 @@ export function createApp({
   db,
   authRepo = new ArcadeDbAuthRepository(db),
   workspaceRepo = new ArcadeDbWorkspaceRepository(db),
+  riskSignalRepo = new ArcadeDbRiskSignalRepository(db),
+  analyticsRepo = new OrgScopedAnalyticsRepository({
+    authRepo,
+    workspaceRepo,
+    riskSignalRepo,
+  }),
 }: AppDependencies): Hono {
   const app = new Hono();
 
@@ -62,7 +80,11 @@ export function createApp({
   app.route("/api/v1/auth", createAuthRoutes({ authRepo, config }));
   app.route(
     "/api/v1/workspace",
-    createWorkspaceRoutes({ authRepo, workspaceRepo }),
+    createWorkspaceRoutes({ authRepo, workspaceRepo, riskSignalRepo }),
+  );
+  app.route(
+    "/api/v1/analytics",
+    createAnalyticsRoutes({ authRepo, analyticsRepo }),
   );
 
   app.notFound((c) => c.json({ error: "Not Found" }, 404));
@@ -77,7 +99,8 @@ export function createApp({
 
 /**
  * Creates an isolated Hono app backed by InMemoryAuthRepository,
- * InMemoryWorkspaceRepository, and a healthy mock ArcadeDbClient
+ * InMemoryWorkspaceRepository, InMemoryRiskSignalRepository,
+ * OrgScopedAnalyticsRepository, and a healthy mock ArcadeDbClient
  * for deterministic zero-Docker unit, privacy, and opaque-box E2E tests.
  */
 export function createTestApp(overrides: Partial<AppConfig> = {}): Hono {
@@ -98,10 +121,21 @@ export function createTestApp(overrides: Partial<AppConfig> = {}): Hono {
     },
   };
 
+  const authRepo = new InMemoryAuthRepository();
+  const workspaceRepo = new InMemoryWorkspaceRepository();
+  const riskSignalRepo = new InMemoryRiskSignalRepository();
+  const analyticsRepo = new OrgScopedAnalyticsRepository({
+    authRepo,
+    workspaceRepo,
+    riskSignalRepo,
+  });
+
   return createApp({
     config,
     db: mockDb,
-    authRepo: new InMemoryAuthRepository(),
-    workspaceRepo: new InMemoryWorkspaceRepository(),
+    authRepo,
+    workspaceRepo,
+    riskSignalRepo,
+    analyticsRepo,
   });
 }

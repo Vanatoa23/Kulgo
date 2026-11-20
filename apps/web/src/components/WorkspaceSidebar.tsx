@@ -4,6 +4,7 @@ import {
   RiskStatusSchema,
   TransportModeSchema,
   VolumeUnitSchema,
+  type AnalyticsSummary,
   type CreateFacilityInput,
   type CreateProductInput,
   type CreateSupplyInputInput,
@@ -22,6 +23,7 @@ import {
 } from "@kulgo/shared";
 import {
   AlertTriangle,
+  BarChart3,
   CheckCircle2,
   Crosshair,
   GitBranch,
@@ -38,9 +40,15 @@ import {
   formatEur,
   type WorkspaceSummaryStats,
 } from "../lib/workspace-utils.js";
+import { AnalyticsPanel } from "./AnalyticsPanel.js";
 import type { MapInteractionMode } from "./FilterBar.js";
 
-export type SidebarTab = "overview" | "facility" | "lane" | "catalog";
+export type SidebarTab =
+  | "analytics"
+  | "overview"
+  | "facility"
+  | "lane"
+  | "catalog";
 
 export interface WorkspaceSidebarProps {
   activeTab: SidebarTab;
@@ -50,6 +58,8 @@ export interface WorkspaceSidebarProps {
   facilities: readonly Facility[];
   visibleLanes: readonly SupplyLane[];
   stats: WorkspaceSummaryStats;
+  analytics: AnalyticsSummary | null;
+  loadingAnalytics: boolean;
   selectedFacilityId: string | null;
   selectedLaneId: string | null;
   pickedCoords: { lat: number; lng: number } | null;
@@ -58,6 +68,7 @@ export interface WorkspaceSidebarProps {
   busy: boolean;
   onSelectFacility: (facilityId: string | null) => void;
   onSelectLane: (laneId: string | null) => void;
+  onOpenSimulator: () => void;
   onStartPickNewFacility: () => void;
   onStartRefineFacilityOnMap: (facilityId: string) => void;
   onCreateFacility: (input: CreateFacilityInput) => Promise<void>;
@@ -92,6 +103,8 @@ export function WorkspaceSidebar({
   facilities,
   visibleLanes,
   stats,
+  analytics,
+  loadingAnalytics,
   selectedFacilityId,
   selectedLaneId,
   pickedCoords,
@@ -100,6 +113,7 @@ export function WorkspaceSidebar({
   busy,
   onSelectFacility,
   onSelectLane,
+  onOpenSimulator,
   onStartPickNewFacility,
   onStartRefineFacilityOnMap,
   onCreateFacility,
@@ -401,10 +415,11 @@ export function WorkspaceSidebar({
       {/* Sidebar Tabs */}
       <nav
         aria-label="Workspace editor tabs"
-        className="grid grid-cols-4 border-b border-slate-800 bg-slate-900/60 p-1 gap-1 shrink-0"
+        className="grid grid-cols-5 border-b border-slate-800 bg-slate-900/60 p-1 gap-1 shrink-0"
       >
         {(
           [
+            { id: "analytics", label: "ESG/Risk", icon: BarChart3 },
             { id: "overview", label: "Refine", icon: ShieldAlert },
             { id: "facility", label: "Facility", icon: MapPin },
             { id: "lane", label: "Lane", icon: GitBranch },
@@ -417,7 +432,7 @@ export function WorkspaceSidebar({
               key={id}
               type="button"
               onClick={() => onChangeTab(id)}
-              className={`flex items-center justify-center gap-1.5 rounded-lg py-2 text-xs font-medium transition-colors cursor-pointer ${
+              className={`flex flex-col items-center justify-center gap-0.5 rounded-lg py-1.5 text-[11px] font-medium transition-colors cursor-pointer ${
                 active
                   ? "bg-slate-800 text-white shadow-sm"
                   : "text-slate-400 hover:text-slate-200"
@@ -432,6 +447,16 @@ export function WorkspaceSidebar({
 
       {/* Scrollable Body */}
       <div className="flex-1 overflow-y-auto p-4 space-y-5">
+        {activeTab === "analytics" && (
+          <AnalyticsPanel
+            analytics={analytics}
+            loading={loadingAnalytics}
+            facilities={facilities}
+            onSelectFacility={(facilityId) => onSelectFacility(facilityId)}
+            onOpenSimulator={onOpenSimulator}
+          />
+        )}
+
         {activeTab === "overview" && (
           <>
             {/* Risk & Spend Summary Strip */}
