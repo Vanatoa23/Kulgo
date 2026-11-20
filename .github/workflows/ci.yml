@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  verify:
+    name: Typecheck, Build & Tests
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.21.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+      - name: Typecheck
+        run: pnpm typecheck
+      - name: Build
+        run: pnpm build
+      - name: Unit & API Tests
+        run: pnpm test
+      - name: Privacy Boundary Tests
+        run: pnpm test:privacy
+
+  arcadedb-schema:
+    name: ArcadeDB Schema Bootstrap Verification
+    runs-on: ubuntu-latest
+    services:
+      arcadedb:
+        image: arcadedata/arcadedb:26.11.1
+        ports:
+          - 2480:2480
+        env:
+          JAVA_OPTS: "-Darcadedb.server.rootPassword=ci-test-password -Darcadedb.server.plugins="
+    steps:
+      - uses: actions/checkout@v4
+      - uses: pnpm/action-setup@v4
+        with:
+          version: 12.21.0
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: pnpm
+      - run: pnpm install --frozen-lockfile
+      - name: Wait for ArcadeDB readiness
+        run: |
+          for i in $(seq 1 30); do
+            if curl -fsS http://127.0.0.1:2480/api/v1/ready; then
+              echo "ArcadeDB is ready"
+              exit 0
+            fi
+            sleep 1
+          done
+          echo "ArcadeDB did not become ready in time"
+          exit 1
+      - name: Bootstrap ArcadeDB Schema (Idempotency Check)
+        env:
+          ARCADEDB_URL: http://127.0.0.1:2480
+          ARCADEDB_DATABASE: kulgo_ci
+          ARCADEDB_USER: root
+          ARCADEDB_PASSWORD: ci-test-password
+        run: |
+          pnpm db:bootstrap
+          pnpm db:bootstrap
