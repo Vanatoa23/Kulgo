@@ -103,3 +103,116 @@ export const WorkspaceNetworkResponseSchema = z.object({
 export type WorkspaceNetworkResponse = z.infer<
   typeof WorkspaceNetworkResponseSchema
 >;
+
+// --- M1 CRUD & Refinement Input Schemas ---
+
+const CountryCodeInputSchema = z
+  .string()
+  .trim()
+  .length(2)
+  .transform((value) => value.toUpperCase())
+  .refine(
+    (value) => /^[A-Z]{2}$/.test(value),
+    "countryCode must be a 2-letter ISO code",
+  );
+
+export const CreateProductInputSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  sku: z.string().trim().max(64).nullable().optional(),
+  description: z.string().trim().max(500).nullable().optional(),
+});
+export type CreateProductInput = z.infer<typeof CreateProductInputSchema>;
+
+export const UpdateProductInputSchema = CreateProductInputSchema.partial();
+export type UpdateProductInput = z.infer<typeof UpdateProductInputSchema>;
+
+export const CreateSupplyInputInputSchema = z.object({
+  productId: z.string().uuid().nullable().optional(),
+  name: z.string().trim().min(1).max(160),
+  category: z.string().trim().min(1).max(80),
+  unit: VolumeUnitSchema.default("TONNES"),
+});
+export type CreateSupplyInputInput = z.infer<
+  typeof CreateSupplyInputInputSchema
+>;
+
+export const UpdateSupplyInputInputSchema = z.object({
+  productId: z.string().uuid().nullable().optional(),
+  name: z.string().trim().min(1).max(160).optional(),
+  category: z.string().trim().min(1).max(80).optional(),
+  unit: VolumeUnitSchema.optional(),
+});
+export type UpdateSupplyInputInput = z.infer<
+  typeof UpdateSupplyInputInputSchema
+>;
+
+export const CreateFacilityInputSchema = z.object({
+  name: z.string().trim().min(1).max(160),
+  kind: FacilityKindSchema.default("FACTORY"),
+  locationPrecision: LocationPrecisionSchema.default("HQ_ESTIMATED"),
+  countryCode: CountryCodeInputSchema,
+  regionCode: z.string().trim().max(32).nullable().optional(),
+  lat: z.number().finite().min(-90).max(90),
+  lng: z.number().finite().min(-180).max(180),
+  isOwnFacility: z.boolean().default(false),
+  sector: z.string().trim().max(100).nullable().optional(),
+  esgBadges: z.array(z.string().trim().min(1).max(64)).optional(),
+  estimatedScope12Tco2e: z.number().finite().nonnegative().nullable().optional(),
+});
+export type CreateFacilityInput = z.infer<typeof CreateFacilityInputSchema>;
+
+export const UpdateFacilityInputSchema = z.object({
+  name: z.string().trim().min(1).max(160).optional(),
+  kind: FacilityKindSchema.optional(),
+  locationPrecision: LocationPrecisionSchema.optional(),
+  countryCode: CountryCodeInputSchema.optional(),
+  regionCode: z.string().trim().max(32).nullable().optional(),
+  lat: z.number().finite().min(-90).max(90).optional(),
+  lng: z.number().finite().min(-180).max(180).optional(),
+  isOwnFacility: z.boolean().optional(),
+  sector: z.string().trim().max(100).nullable().optional(),
+  esgBadges: z.array(z.string().trim().min(1).max(64)).optional(),
+  estimatedScope12Tco2e: z.number().finite().nonnegative().nullable().optional(),
+});
+export type UpdateFacilityInput = z.infer<typeof UpdateFacilityInputSchema>;
+
+export const CreateSupplyLaneInputSchema = z.object({
+  fromFacilityId: z.string().uuid(),
+  toFacilityId: z.string().uuid(),
+  inputId: z.string().uuid().nullable().optional(),
+  materialCategory: z.string().trim().min(1).max(80),
+  transportMode: TransportModeSchema.default("ROAD"),
+  volumeSharePct: z.number().finite().min(0).max(100).default(100),
+  annualVolume: z.number().finite().nonnegative().nullable().optional(),
+  volumeUnit: VolumeUnitSchema.default("TONNES"),
+  annualSpendEur: z.number().finite().nonnegative().nullable().optional(),
+  contractEndDate: z.string().date().nullable().optional(),
+  contractTerms: z.string().trim().max(240).nullable().optional(),
+  leadTimeDays: z.number().int().nonnegative().nullable().optional(),
+  distanceKm: z.number().finite().nonnegative().nullable().optional(),
+  estimatedLaneCo2e: z.number().finite().nonnegative().nullable().optional(),
+  riskStatus: RiskStatusSchema.default("GREEN"),
+  riskReason: z.string().trim().max(300).nullable().optional(),
+});
+export type CreateSupplyLaneInput = z.infer<typeof CreateSupplyLaneInputSchema>;
+
+export const UpdateSupplyLaneInputSchema = z.object({
+  fromFacilityId: z.string().uuid().optional(),
+  toFacilityId: z.string().uuid().optional(),
+  inputId: z.string().uuid().nullable().optional(),
+  materialCategory: z.string().trim().min(1).max(80).optional(),
+  transportMode: TransportModeSchema.optional(),
+  volumeSharePct: z.number().finite().min(0).max(100).optional(),
+  annualVolume: z.number().finite().nonnegative().nullable().optional(),
+  volumeUnit: VolumeUnitSchema.optional(),
+  annualSpendEur: z.number().finite().nonnegative().nullable().optional(),
+  contractEndDate: z.string().date().nullable().optional(),
+  contractTerms: z.string().trim().max(240).nullable().optional(),
+  leadTimeDays: z.number().int().nonnegative().nullable().optional(),
+  distanceKm: z.number().finite().nonnegative().nullable().optional(),
+  estimatedLaneCo2e: z.number().finite().nonnegative().nullable().optional(),
+  riskStatus: RiskStatusSchema.optional(),
+  riskReason: z.string().trim().max(300).nullable().optional(),
+});
+export type UpdateSupplyLaneInput = z.infer<typeof UpdateSupplyLaneInputSchema>;
+

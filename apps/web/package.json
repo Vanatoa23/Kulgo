@@ -11,8 +11,12 @@
     "test": "vitest run --passWithNoTests"
   },
   "dependencies": {
+    "@deck.gl/core": "^9.4.1",
+    "@deck.gl/layers": "^9.4.1",
+    "@deck.gl/mapbox": "^9.4.1",
     "@kulgo/shared": "workspace:*",
     "lucide-react": "^0.475.0",
+    "maplibre-gl": "^6.19.0",
     "react": "^19.0.0",
     "react-dom": "^19.0.0"
   },
