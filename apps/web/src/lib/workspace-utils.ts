@@ -220,6 +220,10 @@ export function buildFacilityMarkers(
       fillColor = [16, 185, 129, 240]; // Emerald own HQ
       lineColor = [236, 253, 245, 255];
       radiusPixels = isSelected ? 12 : 10;
+    } else if (facility.isPartnerVerified) {
+      fillColor = [20, 184, 166, 240]; // Teal Network-Verified partner
+      lineColor = [167, 243, 208, 255];
+      radiusPixels = isSelected ? 11 : 9;
     } else if (facility.locationPrecision === "SITE_VERIFIED") {
       fillColor = [6, 182, 212, 230]; // Cyan verified site
       lineColor = [207, 250, 254, 255];
@@ -237,7 +241,9 @@ export function buildFacilityMarkers(
       fillColor,
       lineColor,
       radiusPixels,
-      label: facility.name,
+      label: facility.isPartnerVerified
+        ? `✓ ${facility.name}`
+        : facility.name,
     };
   });
 }
@@ -351,6 +357,7 @@ export interface LogicalGraphNodeModel {
   badge: string;
   riskStatus: RiskStatus;
   isOwnFacility?: boolean;
+  isPartnerVerified?: boolean;
   isSpof?: boolean;
   isSelected: boolean;
 }
@@ -516,12 +523,14 @@ export function buildLogicalGraphModel(params: {
       position: { x: 710, y: 40 + idx * facilityGapY },
       label: facility.name,
       subtitle: `${facility.countryCode} · ${facility.sector ?? facility.kind}`,
-      badge:
-        facility.locationPrecision === "SITE_VERIFIED"
+      badge: facility.isPartnerVerified
+        ? "NETWORK-VERIFIED"
+        : facility.locationPrecision === "SITE_VERIFIED"
           ? "SITE_VERIFIED"
           : "HQ_ESTIMATED",
       riskStatus: facilityRiskMap.get(facility.facilityId) ?? "GREEN",
       isOwnFacility: false,
+      isPartnerVerified: facility.isPartnerVerified,
       isSelected: selectedFacilityId === facility.facilityId,
     });
   });
@@ -584,4 +593,27 @@ export function buildLogicalGraphModel(params: {
   }
 
   return { nodes, edges };
+}
+
+/**
+ * Extracts a partner invite token from a URL query string (e.g. `?invite=abc`).
+ */
+export function extractInviteTokenFromSearch(search: string): string | null {
+  const params = new URLSearchParams(search);
+  const raw = params.get("invite")?.trim();
+  return raw && raw.length > 0 ? raw : null;
+}
+
+/**
+ * Splits a comma-separated capability string into deduplicated non-empty items.
+ */
+export function parseCapabilitiesInput(raw: string): string[] {
+  return Array.from(
+    new Set(
+      raw
+        .split(",")
+        .map((part) => part.trim())
+        .filter((part) => part.length > 0),
+    ),
+  );
 }

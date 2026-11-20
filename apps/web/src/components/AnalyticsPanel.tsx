@@ -3,6 +3,7 @@ import {
   AlertOctagon,
   AlertTriangle,
   BarChart3,
+  Building2,
   CheckCircle2,
   Leaf,
   Loader2,
@@ -16,6 +17,7 @@ export interface AnalyticsPanelProps {
   facilities: readonly Facility[];
   onSelectFacility: (facilityId: string) => void;
   onOpenSimulator: () => void;
+  onOpenDirectory: (capability?: string) => void;
 }
 
 function formatTco2e(value: number): string {
@@ -31,6 +33,7 @@ export function AnalyticsPanel({
   facilities,
   onSelectFacility,
   onOpenSimulator,
+  onOpenDirectory,
 }: AnalyticsPanelProps) {
   if (loading && !analytics) {
     return (
@@ -183,14 +186,24 @@ export function AnalyticsPanel({
 
       {/* SPOF, Contract Expiry & Corridor Risk Alerts */}
       <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5 space-y-2.5">
-        <div className="flex items-center justify-between">
+        <div className="flex items-center justify-between gap-2">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
             <ShieldAlert className="h-3.5 w-3.5 text-amber-400" />
             Risk &amp; Expiry Alerts
           </h3>
-          <span className="text-[11px] font-mono text-slate-300 bg-slate-800 px-2 py-0.5 rounded-full">
-            {analytics.alerts.length}
-          </span>
+          <div className="flex items-center gap-1.5">
+            <button
+              type="button"
+              onClick={() => onOpenDirectory()}
+              className="inline-flex items-center gap-1 rounded-md border border-teal-500/35 bg-teal-500/10 hover:bg-teal-500/20 px-2 py-0.5 text-[10px] font-medium text-teal-200 transition-colors cursor-pointer"
+            >
+              <Building2 className="h-3 w-3" />
+              <span>Alternatives</span>
+            </button>
+            <span className="text-[11px] font-mono text-slate-300 bg-slate-800 px-2 py-0.5 rounded-full">
+              {analytics.alerts.length}
+            </span>
+          </div>
         </div>
 
         {analytics.alerts.length === 0 ? (
@@ -235,15 +248,26 @@ export function AnalyticsPanel({
                   <p className="text-[10px] text-slate-400 leading-snug">
                     {alert.recommendedAction}
                   </p>
-                  {primaryFacilityId && (
+                  <div className="flex flex-wrap items-center gap-3 pt-0.5">
+                    {primaryFacilityId && (
+                      <button
+                        type="button"
+                        onClick={() => onSelectFacility(primaryFacilityId)}
+                        className="text-[10px] font-medium text-emerald-300 hover:text-emerald-200 underline underline-offset-2 cursor-pointer"
+                      >
+                        Inspect {primaryFacility?.name ?? "Tier-1 facility"} →
+                      </button>
+                    )}
                     <button
                       type="button"
-                      onClick={() => onSelectFacility(primaryFacilityId)}
-                      className="text-[10px] font-medium text-emerald-300 hover:text-emerald-200 underline underline-offset-2 cursor-pointer"
+                      onClick={() =>
+                        onOpenDirectory(primaryFacility?.sector ?? undefined)
+                      }
+                      className="text-[10px] font-medium text-teal-300 hover:text-teal-200 underline underline-offset-2 cursor-pointer"
                     >
-                      Inspect {primaryFacility?.name ?? "Tier-1 facility"} →
+                      Find Alternative Suppliers →
                     </button>
-                  )}
+                  </div>
                 </div>
               );
             })}

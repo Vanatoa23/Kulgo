@@ -46,6 +46,7 @@ function KulgoGraphNode({ data }: NodeProps<KulgoFlowNode>) {
   const isProduct = data.kind === "product";
   const isInput = data.kind === "input";
   const isOwn = Boolean(data.isOwnFacility);
+  const isVerifiedPartner = Boolean(data.isPartnerVerified);
 
   const borderClass = data.isSelected
     ? "border-white ring-2 ring-emerald-400/70"
@@ -53,13 +54,15 @@ function KulgoGraphNode({ data }: NodeProps<KulgoFlowNode>) {
       ? "border-red-500/60"
       : data.riskStatus === "YELLOW"
         ? "border-amber-500/50"
-        : isOwn
-          ? "border-emerald-500/60"
-          : isProduct
-            ? "border-indigo-500/50"
-            : isInput
-              ? "border-sky-500/45"
-              : "border-slate-700";
+        : isVerifiedPartner
+          ? "border-teal-400/70"
+          : isOwn
+            ? "border-emerald-500/60"
+            : isProduct
+              ? "border-indigo-500/50"
+              : isInput
+                ? "border-sky-500/45"
+                : "border-slate-700";
 
   const iconBgClass = isProduct
     ? "bg-indigo-500/15 text-indigo-300"
@@ -67,15 +70,19 @@ function KulgoGraphNode({ data }: NodeProps<KulgoFlowNode>) {
       ? "bg-sky-500/15 text-sky-300"
       : isOwn
         ? "bg-emerald-500/15 text-emerald-300"
-        : "bg-cyan-500/15 text-cyan-300";
+        : isVerifiedPartner
+          ? "bg-teal-500/20 text-teal-300"
+          : "bg-cyan-500/15 text-cyan-300";
 
   const badgeClass = data.isSpof
     ? "bg-amber-500/20 text-amber-300 border-amber-500/40"
-    : isOwn
-      ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
-      : data.badge === "HQ_ESTIMATED"
-        ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
-        : "bg-slate-800 text-slate-300 border-slate-700";
+    : isVerifiedPartner
+      ? "bg-teal-500/20 text-teal-200 border-teal-400/50"
+      : isOwn
+        ? "bg-emerald-500/20 text-emerald-300 border-emerald-500/40"
+        : data.badge === "HQ_ESTIMATED"
+          ? "bg-amber-500/15 text-amber-300 border-amber-500/35"
+          : "bg-slate-800 text-slate-300 border-slate-700";
 
   const riskDotClass =
     data.riskStatus === "RED"
@@ -131,7 +138,7 @@ function KulgoGraphNode({ data }: NodeProps<KulgoFlowNode>) {
         <span
           className={`text-[10px] font-medium px-1.5 py-0.5 rounded border ${badgeClass}`}
         >
-          {data.badge}
+          {isVerifiedPartner ? "✓ Network-Verified" : data.badge}
         </span>
       </div>
 

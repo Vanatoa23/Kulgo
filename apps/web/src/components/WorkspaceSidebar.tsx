@@ -6,11 +6,14 @@ import {
   VolumeUnitSchema,
   type AnalyticsSummary,
   type CreateFacilityInput,
+  type CreateInviteInput,
+  type CreateInviteResponse,
   type CreateProductInput,
   type CreateSupplyInputInput,
   type CreateSupplyLaneInput,
   type Facility,
   type FacilityKind,
+  type Invitation,
   type LocationPrecision,
   type Product,
   type RiskStatus,
@@ -24,16 +27,21 @@ import {
 import {
   AlertTriangle,
   BarChart3,
+  Check,
   CheckCircle2,
+  Copy,
   Crosshair,
   GitBranch,
   Layers,
   Loader2,
+  Mail,
   MapPin,
   Package,
   Plus,
   ShieldAlert,
+  ShieldCheck,
   Trash2,
+  XCircle,
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import {
@@ -57,6 +65,7 @@ export interface WorkspaceSidebarProps {
   inputs: readonly SupplyInput[];
   facilities: readonly Facility[];
   visibleLanes: readonly SupplyLane[];
+  invitations: readonly Invitation[];
   stats: WorkspaceSummaryStats;
   analytics: AnalyticsSummary | null;
   loadingAnalytics: boolean;
@@ -69,6 +78,7 @@ export interface WorkspaceSidebarProps {
   onSelectFacility: (facilityId: string | null) => void;
   onSelectLane: (laneId: string | null) => void;
   onOpenSimulator: () => void;
+  onOpenDirectory: (capability?: string) => void;
   onStartPickNewFacility: () => void;
   onStartRefineFacilityOnMap: (facilityId: string) => void;
   onCreateFacility: (input: CreateFacilityInput) => Promise<void>;
@@ -87,6 +97,10 @@ export interface WorkspaceSidebarProps {
   onDeleteProduct: (productId: string) => Promise<void>;
   onCreateSupplyInput: (input: CreateSupplyInputInput) => Promise<void>;
   onDeleteSupplyInput: (inputId: string) => Promise<void>;
+  onCreateInvite: (
+    input: CreateInviteInput,
+  ) => Promise<CreateInviteResponse | null>;
+  onRevokeInvite: (inviteId: string) => Promise<void>;
 }
 
 const FACILITY_KINDS = FacilityKindSchema.options;
@@ -102,6 +116,7 @@ export function WorkspaceSidebar({
   inputs,
   facilities,
   visibleLanes,
+  invitations,
   stats,
   analytics,
   loadingAnalytics,
@@ -114,6 +129,7 @@ export function WorkspaceSidebar({
   onSelectFacility,
   onSelectLane,
   onOpenSimulator,
+  onOpenDirectory,
   onStartPickNewFacility,
   onStartRefineFacilityOnMap,
   onCreateFacility,
@@ -126,6 +142,8 @@ export function WorkspaceSidebar({
   onDeleteProduct,
   onCreateSupplyInput,
   onDeleteSupplyInput,
+  onCreateInvite,
+  onRevokeInvite,
 }: WorkspaceSidebarProps) {
   const selectedFacility =
     facilities.find((f) => f.facilityId === selectedFacilityId) ?? null;
@@ -165,6 +183,20 @@ export function WorkspaceSidebar({
       setRefineLng(String(pickedCoords.lng));
     }
   }, [pickedCoords, refineTargetId, activeTab]);
+
+  // --- Partner Invite State ---
+  const [inviteEmail, setInviteEmail] = useState("");
+  const [generatedInvite, setGeneratedInvite] =
+    useState<CreateInviteResponse | null>(null);
+  const [copiedLink, setCopiedLink] = useState(false);
+  const [inviteFormError, setInviteFormError] = useState<string | null>(null);
+
+  useEffect(() => {
+    setInviteEmail("");
+    setGeneratedInvite(null);
+    setCopiedLink(false);
+    setInviteFormError(null);
+  }, [selectedFacilityId]);
 
   // --- Facility Form State ---
   const [facName, setFacName] = useState("");
@@ -454,6 +486,7 @@ export function WorkspaceSidebar({
             facilities={facilities}
             onSelectFacility={(facilityId) => onSelectFacility(facilityId)}
             onOpenSimulator={onOpenSimulator}
+            onOpenDirectory={onOpenDirectory}
           />
         )}
 
@@ -901,6 +934,188 @@ export function WorkspaceSidebar({
                 )}
               </div>
             </form>
+
+            {/* Partner Invite & Verification Workflow (Tier-1 Supplier Nodes) */}
+            {selectedFacility && !selectedFacility.isOwnFacility && (
+              <div className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5 space-y-3">
+                <div className="flex items-center justify-between gap-2">
+                  <h3 className="text-xs font-semibold uppercase tracking-wider text-teal-300 flex items-center gap-1.5">
+                    <ShieldCheck className="h-3.5 w-3.5" />
+                    Partner Verification
+                  </h3>
+                  {selectedFacility.isPartnerVerified ? (
+                    <span className="inline-flex items-center gap-1 rounded-full bg-teal-500/20 border border-teal-400/40 px-2 py-0.5 text-[10px] font-semibold text-teal-200">
+                      <CheckCircle2 className="h-3 w-3" />
+                      Network-Verified
+                    </span>
+                  ) : (
+                    <span className="text-[10px] font-medium px-2 py-0.5 rounded-full bg-slate-800 text-slate-400 border border-slate-700">
+                      Unverified
+                    </span>
+                  )}
+                </div>
+
+                {selectedFacility.isPartnerVerified ? (
+                  <p className="text-[11px] text-teal-100/90 leading-snug rounded-lg border border-teal-500/25 bg-teal-500/10 p-2.5">
+                    This Tier-1 supplier is linked via{" "}
+                    <code className="font-mono text-[10px]">
+                      VERIFIED_PARTNER_LINK
+                    </code>
+                    . Hidden Tier-2+ Scope 3 emissions and anonymized sanctions /
+                    chokepoint alerts roll up automatically without exposing any
+                    upstream identities.
+                  </p>
+                ) : (
+                  <p className="text-[11px] text-slate-400 leading-snug">
+                    Invite this Tier-1 supplier to join Kulgo, verify exact site
+                    coordinates, and unlock anonymized Tier-2+ risk &amp; Scope
+                    3 roll-ups.
+                  </p>
+                )}
+
+                <form
+                  onSubmit={async (e) => {
+                    e.preventDefault();
+                    setInviteFormError(null);
+                    const trimmed = inviteEmail.trim();
+                    if (!trimmed) {
+                      setInviteFormError("Enter the supplier contact email.");
+                      return;
+                    }
+                    const created = await onCreateInvite({
+                      targetFacilityId: selectedFacility.facilityId,
+                      inviteeEmail: trimmed,
+                    });
+                    if (created) {
+                      setGeneratedInvite(created);
+                      setInviteEmail("");
+                      setCopiedLink(false);
+                    }
+                  }}
+                  className="space-y-2"
+                >
+                  <div className="flex items-center gap-2">
+                    <div className="relative flex-1">
+                      <Mail className="h-3.5 w-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                      <input
+                        type="email"
+                        required
+                        value={inviteEmail}
+                        onChange={(e) => setInviteEmail(e.target.value)}
+                        placeholder="supplier@partner-company.eu"
+                        className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-2.5 py-1.5 text-xs text-slate-100 focus:border-teal-500 focus:outline-none"
+                      />
+                    </div>
+                    <button
+                      type="submit"
+                      disabled={busy}
+                      className="inline-flex items-center gap-1 rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-60 text-slate-950 font-semibold text-xs px-3 py-1.5 transition-colors cursor-pointer shrink-0"
+                    >
+                      <span>Send Invite</span>
+                    </button>
+                  </div>
+                  {inviteFormError && (
+                    <p className="text-[11px] text-red-300">{inviteFormError}</p>
+                  )}
+                </form>
+
+                {generatedInvite && (
+                  <div className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 p-2.5 space-y-2 text-xs">
+                    <div className="flex items-center justify-between gap-2">
+                      <span className="font-semibold text-emerald-200">
+                        One-Time Invite Link Ready
+                      </span>
+                      <button
+                        type="button"
+                        onClick={async () => {
+                          try {
+                            await navigator.clipboard.writeText(
+                              generatedInvite.inviteLink,
+                            );
+                            setCopiedLink(true);
+                          } catch {
+                            setCopiedLink(false);
+                          }
+                        }}
+                        className="inline-flex items-center gap-1 rounded-md border border-emerald-500/40 bg-emerald-500/20 hover:bg-emerald-500/30 px-2 py-0.5 text-[10px] font-medium text-emerald-100 cursor-pointer"
+                      >
+                        {copiedLink ? (
+                          <>
+                            <Check className="h-3 w-3" />
+                            <span>Copied</span>
+                          </>
+                        ) : (
+                          <>
+                            <Copy className="h-3 w-3" />
+                            <span>Copy Invite Link</span>
+                          </>
+                        )}
+                      </button>
+                    </div>
+                    <input
+                      type="text"
+                      readOnly
+                      value={generatedInvite.inviteLink}
+                      className="w-full rounded border border-slate-800 bg-slate-950 px-2 py-1 text-[10px] font-mono text-slate-300"
+                    />
+                  </div>
+                )}
+
+                {/* Sent invitations for this facility */}
+                {invitations.filter(
+                  (inv) => inv.targetFacilityId === selectedFacility.facilityId,
+                ).length > 0 && (
+                  <div className="space-y-1.5 pt-2 border-t border-slate-800/80">
+                    <p className="text-[10px] uppercase tracking-wider text-slate-500 font-semibold">
+                      Sent Invitations
+                    </p>
+                    {invitations
+                      .filter(
+                        (inv) =>
+                          inv.targetFacilityId === selectedFacility.facilityId,
+                      )
+                      .map((inv) => {
+                        const statusStyle =
+                          inv.status === "ACCEPTED"
+                            ? "bg-teal-500/20 text-teal-200 border-teal-500/40"
+                            : inv.status === "PENDING"
+                              ? "bg-amber-500/15 text-amber-200 border-amber-500/35"
+                              : "bg-slate-800 text-slate-400 border-slate-700";
+
+                        return (
+                          <div
+                            key={inv.inviteId}
+                            className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/70 px-2.5 py-2 text-[11px]"
+                          >
+                            <div className="min-w-0">
+                              <p className="text-slate-200 truncate font-medium">
+                                {inv.inviteeEmail}
+                              </p>
+                              <span
+                                className={`inline-block mt-1 text-[9px] font-semibold uppercase px-1.5 py-0.5 rounded border ${statusStyle}`}
+                              >
+                                {inv.status}
+                              </span>
+                            </div>
+                            {inv.status === "PENDING" && (
+                              <button
+                                type="button"
+                                disabled={busy}
+                                onClick={() => onRevokeInvite(inv.inviteId)}
+                                title="Revoke pending invitation"
+                                className="inline-flex items-center gap-1 rounded-md border border-red-500/30 bg-red-500/10 hover:bg-red-500/20 text-red-300 px-2 py-1 text-[10px] font-medium transition-colors cursor-pointer shrink-0"
+                              >
+                                <XCircle className="h-3 w-3" />
+                                <span>Revoke</span>
+                              </button>
+                            )}
+                          </div>
+                        );
+                      })}
+                  </div>
+                )}
+              </div>
+            )}
           </section>
         )}
 

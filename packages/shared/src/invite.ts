@@ -28,14 +28,66 @@ export type CreateInviteInput = z.infer<typeof CreateInviteInputSchema>;
 
 export const AcceptInviteInputSchema = z.object({
   openToNewBuyers: z.boolean().default(true),
-  capabilities: z.array(z.string().min(1).max(100)).default([]),
+  capabilities: z.array(z.string().trim().min(1).max(100)).default([]),
   refinedSite: z
     .object({
       kind: z.enum(["HQ", "FACTORY", "WAREHOUSE", "PORT", "HUB"]),
-      lat: z.number().min(-90).max(90),
-      lng: z.number().min(-180).max(180),
-      countryCode: z.string().length(2),
+      lat: z.number().finite().min(-90).max(90),
+      lng: z.number().finite().min(-180).max(180),
+      countryCode: z
+        .string()
+        .trim()
+        .length(2)
+        .transform((value) => value.toUpperCase())
+        .refine(
+          (value) => /^[A-Z]{2}$/.test(value),
+          "countryCode must be a 2-letter ISO code",
+        ),
     })
     .optional(),
 });
 export type AcceptInviteInput = z.infer<typeof AcceptInviteInputSchema>;
+
+export const CreateInviteResponseSchema = z
+  .object({
+    invitation: InvitationSchema,
+    inviteToken: z.string().min(1),
+    inviteLink: z.string().min(1),
+  })
+  .strict();
+export type CreateInviteResponse = z.infer<typeof CreateInviteResponseSchema>;
+
+export const ListInvitesResponseSchema = z
+  .object({
+    invitations: z.array(InvitationSchema),
+  })
+  .strict();
+export type ListInvitesResponse = z.infer<typeof ListInvitesResponseSchema>;
+
+export const AcceptInviteResponseSchema = z
+  .object({
+    invitation: InvitationSchema,
+    verifiedPartnerLink: z
+      .object({
+        inviteId: z.string().uuid(),
+        linkedAt: z.string().datetime(),
+      })
+      .strict(),
+    organization: z
+      .object({
+        orgId: z.string().uuid(),
+        openToNewBuyers: z.boolean(),
+        capabilities: z.array(z.string()),
+      })
+      .strict(),
+  })
+  .strict();
+export type AcceptInviteResponse = z.infer<typeof AcceptInviteResponseSchema>;
+
+export const RevokeInviteResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    invitation: InvitationSchema,
+  })
+  .strict();
+export type RevokeInviteResponse = z.infer<typeof RevokeInviteResponseSchema>;

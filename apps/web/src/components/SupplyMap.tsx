@@ -506,6 +506,11 @@ export function SupplyMap({
                   {hover.datum.facility.countryCode}
                 </span>
               </div>
+              {hover.datum.facility.isPartnerVerified && (
+                <div className="inline-flex items-center gap-1 rounded-full bg-teal-500/20 border border-teal-400/40 px-2 py-0.5 text-[10px] font-semibold text-teal-200">
+                  <span>✓ Network-Verified Partner</span>
+                </div>
+              )}
               <div className="flex items-center gap-1.5 text-[11px]">
                 <span className="text-slate-400">{hover.datum.facility.kind}</span>
                 <span className="text-slate-600">·</span>
@@ -550,10 +555,14 @@ export function SupplyMap({
             Red Risk
           </span>
         </div>
-        <div className="flex items-center gap-3 pt-1 border-t border-slate-800/80">
+        <div className="flex flex-wrap items-center gap-3 pt-1 border-t border-slate-800/80">
           <span className="inline-flex items-center gap-1.5">
             <span className="h-2.5 w-2.5 rounded-full bg-emerald-500 ring-1 ring-emerald-200" />
             Own HQ
+          </span>
+          <span className="inline-flex items-center gap-1.5">
+            <span className="h-2.5 w-2.5 rounded-full bg-teal-400 ring-1 ring-emerald-200" />
+            Network-Verified
           </span>
           <span className="inline-flex items-center gap-1.5">
             <span className="h-2.5 w-2.5 rounded-full bg-cyan-500 ring-1 ring-cyan-200" />
