@@ -1,5 +1,6 @@
 import {
   AcceptInviteResponseSchema,
+  AddOrgMemberResponseSchema,
   AnalyticsSummarySchema,
   AuthMeResponseSchema,
   BulkImportSummarySchema,
@@ -9,7 +10,9 @@ import {
   FacilitySchema,
   HealthResponseSchema,
   ListInvitesResponseSchema,
+  ListOrgMembersResponseSchema,
   ProductSchema,
+  RemoveOrgMemberResponseSchema,
   RevokeInviteResponseSchema,
   SimulateAnalyticsResponseSchema,
   SupplyInputSchema,
@@ -19,6 +22,7 @@ import {
   WorkspaceNetworkResponseSchema,
   type AcceptInviteInput,
   type AcceptInviteResponse,
+  type AddOrgMemberInput,
   type AlternativeCandidate,
   type AnalyticsSummary,
   type AuthMeResponse,
@@ -36,8 +40,10 @@ import {
   type Invitation,
   type LoginInput,
   type Organization,
+  type OrgMember,
   type Product,
   type RegisterInput,
+  type RemoveOrgMemberResponse,
   type RevokeInviteResponse,
   type SimulateAnalyticsRequest,
   type SimulateAnalyticsResponse,
@@ -533,4 +539,37 @@ export async function getExecutiveReport(
     parseWithSchema(ExecutiveReportSchema, res),
   );
 }
+
+// --- Org Team Members & RBAC (M5) ---
+
+export async function listOrgMembers(): Promise<OrgMember[]> {
+  const result = await apiRequest(
+    "/api/v1/auth/members",
+    { method: "GET" },
+    (payload) => parseWithSchema(ListOrgMembersResponseSchema, payload),
+  );
+  return result.members;
+}
+
+export async function addOrgMember(
+  input: AddOrgMemberInput,
+): Promise<OrgMember> {
+  const result = await apiRequest(
+    "/api/v1/auth/members",
+    { method: "POST", body: input },
+    (payload) => parseWithSchema(AddOrgMemberResponseSchema, payload),
+  );
+  return result.member;
+}
+
+export async function removeOrgMember(
+  userId: string,
+): Promise<RemoveOrgMemberResponse> {
+  return apiRequest(
+    `/api/v1/auth/members/${encodeURIComponent(userId)}`,
+    { method: "DELETE" },
+    (payload) => parseWithSchema(RemoveOrgMemberResponseSchema, payload),
+  );
+}
+
 

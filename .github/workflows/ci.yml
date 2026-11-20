@@ -78,3 +78,29 @@ jobs:
           ARCADEDB_PASSWORD: ci-test-password
         run: pnpm --filter @kulgo/api test:integration
 
+  docker-build:
+    name: Docker Production Image Build Verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+      - name: Build @kulgo/api production Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/api/Dockerfile
+          push: false
+          tags: kulgo-api:ci
+          cache-from: type=gha,scope=kulgo-api
+          cache-to: type=gha,mode=max,scope=kulgo-api
+      - name: Build @kulgo/web production Docker image
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          file: apps/web/Dockerfile
+          push: false
+          tags: kulgo-web:ci
+          cache-from: type=gha,scope=kulgo-web
+          cache-to: type=gha,mode=max,scope=kulgo-web
+
+

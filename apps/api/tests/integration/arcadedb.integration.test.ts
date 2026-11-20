@@ -450,4 +450,79 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
       expect(combinedPayloads).not.toContain(secret);
     }
   });
+
+  it("verifies Org Team Members CRUD, RBAC enforcement, and session revocation on live ArcadeDB", async () => {
+    const regRes = await app.request("/api/v1/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: `team-owner-${runId}@kulgo-ci.ee`,
+        password: "LiveArcadeDbPassword2026!",
+        organizationName: `Team Live Org ${runId}`,
+        countryCode: "EE",
+        sector: "Electronics",
+      }),
+    });
+    expect(regRes.status).toBe(201);
+    const ownerCookie = extractCookie(regRes);
+    const { user: owner } = AuthMeResponseSchema.parse(await regRes.json());
+
+    // Cannot remove the last OWNER
+    const lastOwnerRes = await app.request(
+      `/api/v1/auth/members/${owner.userId}`,
+      {
+        method: "DELETE",
+        headers: { Cookie: ownerCookie },
+      },
+    );
+    expect(lastOwnerRes.status).toBe(400);
+
+    // OWNER adds a MEMBER
+    const memberEmail = `team-member-${runId}@kulgo-ci.ee`;
+    const addRes = await app.request("/api/v1/auth/members", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: ownerCookie },
+      body: JSON.stringify({
+        email: memberEmail,
+        password: "LiveMemberPassword2026!",
+        role: "MEMBER",
+      }),
+    });
+    expect(addRes.status).toBe(201);
+    const { member } = (await addRes.json()) as {
+      member: { userId: string; role: string };
+    };
+    expect(member.role).toBe("MEMBER");
+
+    // MEMBER logs in -> forbidden from PATCH /auth/organization (403)
+    const loginRes = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: memberEmail,
+        password: "LiveMemberPassword2026!",
+      }),
+    });
+    expect(loginRes.status).toBe(200);
+    const memberCookie = extractCookie(loginRes);
+
+    const forbiddenOrgPatch = await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: memberCookie },
+      body: JSON.stringify({ scope1Tco2e: 123 }),
+    });
+    expect(forbiddenOrgPatch.status).toBe(403);
+
+    // OWNER deletes MEMBER -> MEMBER session immediately revoked (401)
+    const delRes = await app.request(`/api/v1/auth/members/${member.userId}`, {
+      method: "DELETE",
+      headers: { Cookie: ownerCookie },
+    });
+    expect(delRes.status).toBe(200);
+
+    const meAfterDelete = await app.request("/api/v1/auth/me", {
+      headers: { Cookie: memberCookie },
+    });
+    expect(meAfterDelete.status).toBe(401);
+  });
 });

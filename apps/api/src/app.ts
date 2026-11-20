@@ -33,6 +33,12 @@ import {
 } from "./invites/repository.js";
 import { createInviteRoutes } from "./invites/routes.js";
 import {
+  createBodySizeLimitMiddleware,
+  createRateLimiter,
+  createRequestLogger,
+  type RequestLogEntry,
+} from "./middleware/security.js";
+import {
   ArcadeDbWorkspaceRepository,
   InMemoryWorkspaceRepository,
   type WorkspaceRepository,
@@ -48,6 +54,7 @@ export interface AppDependencies {
   inviteRepo?: InvitationRepository;
   directoryRepo?: DirectoryRepository;
   analyticsRepo?: AnalyticsRepository;
+  onRequestLog?: (entry: RequestLogEntry) => void;
 }
 
 export function createApp({
@@ -75,9 +82,17 @@ export function createApp({
       inviteRepo,
     }),
   }),
+  onRequestLog,
 }: AppDependencies): Hono {
   const app = new Hono();
 
+  app.use(
+    "*",
+    createRequestLogger({
+      enabled: config.NODE_ENV !== "test",
+      onLog: onRequestLog,
+    }),
+  );
   app.use("*", secureHeaders());
   app.use(
     "/api/*",
@@ -86,6 +101,39 @@ export function createApp({
       credentials: true,
       allowMethods: ["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
       allowHeaders: ["Content-Type"],
+    }),
+  );
+  app.use(
+    "/api/*",
+    createBodySizeLimitMiddleware({
+      maxJsonBytes: config.MAX_JSON_BODY_BYTES,
+      maxImportBytes: config.MAX_IMPORT_BODY_BYTES,
+    }),
+  );
+
+  // Lightweight in-memory rate limits on auth & bulk import endpoints
+  app.use(
+    "/api/v1/auth/login",
+    createRateLimiter({
+      bucket: "auth:login",
+      maxRequests: config.RATE_LIMIT_AUTH_MAX,
+      windowMs: config.RATE_LIMIT_WINDOW_MS,
+    }),
+  );
+  app.use(
+    "/api/v1/auth/register",
+    createRateLimiter({
+      bucket: "auth:register",
+      maxRequests: config.RATE_LIMIT_AUTH_MAX,
+      windowMs: config.RATE_LIMIT_WINDOW_MS,
+    }),
+  );
+  app.use(
+    "/api/v1/workspace/import",
+    createRateLimiter({
+      bucket: "workspace:import",
+      maxRequests: config.RATE_LIMIT_IMPORT_MAX,
+      windowMs: config.RATE_LIMIT_WINDOW_MS,
     }),
   );
 
@@ -133,13 +181,20 @@ export function createApp({
   return app;
 }
 
+export interface CreateTestAppOptions {
+  onRequestLog?: (entry: RequestLogEntry) => void;
+}
+
 /**
  * Creates an isolated Hono app backed by InMemory repositories,
  * OrgScopedAnalyticsRepository with partner hidden summary resolution,
  * KulgoDirectoryRepository, and a healthy mock ArcadeDbClient
  * for deterministic zero-Docker unit, privacy, and opaque-box E2E tests.
  */
-export function createTestApp(overrides: Partial<AppConfig> = {}): Hono {
+export function createTestApp(
+  overrides: Partial<AppConfig> = {},
+  options: CreateTestAppOptions = {},
+): Hono {
   const config: AppConfig = {
     ...loadConfig({ NODE_ENV: "test" }),
     ...overrides,
@@ -189,5 +244,6 @@ export function createTestApp(overrides: Partial<AppConfig> = {}): Hono {
     inviteRepo,
     directoryRepo,
     analyticsRepo,
+    onRequestLog: options.onRequestLog,
   });
 }

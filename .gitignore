@@ -20,3 +20,8 @@ Thumbs.db
 # Coverage & local data
 coverage/
 .arcadedb-data/
+
+# Playwright artifacts
+test-results/
+playwright-report/
+

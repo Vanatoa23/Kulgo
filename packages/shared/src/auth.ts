@@ -70,3 +70,42 @@ export type UpdateOrganizationProfileResponse = z.infer<
   typeof UpdateOrganizationProfileResponseSchema
 >;
 
+export const OrgMemberSchema = UserSchema.strict();
+export type OrgMember = z.infer<typeof OrgMemberSchema>;
+
+export const ListOrgMembersResponseSchema = z
+  .object({
+    members: z.array(OrgMemberSchema),
+  })
+  .strict();
+export type ListOrgMembersResponse = z.infer<
+  typeof ListOrgMembersResponseSchema
+>;
+
+export const AddOrgMemberInputSchema = z
+  .object({
+    email: z.string().email(),
+    password: z.string().min(10).max(128),
+    role: UserRoleSchema.default("MEMBER"),
+  })
+  .strict();
+export type AddOrgMemberInput = z.infer<typeof AddOrgMemberInputSchema>;
+
+export const AddOrgMemberResponseSchema = z
+  .object({
+    member: OrgMemberSchema,
+  })
+  .strict();
+export type AddOrgMemberResponse = z.infer<typeof AddOrgMemberResponseSchema>;
+
+export const RemoveOrgMemberResponseSchema = z
+  .object({
+    ok: z.literal(true),
+    removedUserId: z.string().uuid(),
+  })
+  .strict();
+export type RemoveOrgMemberResponse = z.infer<
+  typeof RemoveOrgMemberResponseSchema
+>;
+
+

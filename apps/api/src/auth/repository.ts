@@ -5,6 +5,7 @@ import {
   type Organization,
   type UpdateOrganizationProfileInput,
   type User,
+  type UserRole,
 } from "@kulgo/shared";
 import type { ArcadeDbClient } from "../db/client.js";
 
@@ -29,6 +30,13 @@ export interface CreateOrgAndOwnerInput {
   sector: string;
 }
 
+export interface CreateOrgMemberInput {
+  orgId: string;
+  email: string;
+  passwordHash: string;
+  role: UserRole;
+}
+
 export interface CreateSessionInput {
   userId: string;
   orgId: string;
@@ -51,6 +59,9 @@ export interface UpdateOrganizationDirectoryInput {
 export interface AuthRepository {
   findUserByEmail(email: string): Promise<StoredUser | null>;
   findUserById(userId: string): Promise<User | null>;
+  listOrgMembers(orgId: string): Promise<User[]>;
+  createOrgMember(input: CreateOrgMemberInput): Promise<User>;
+  deleteOrgMember(orgId: string, userId: string): Promise<boolean>;
   findOrganizationById(orgId: string): Promise<Organization | null>;
   updateOrganizationProfile(
     orgId: string,
@@ -159,6 +170,83 @@ export class ArcadeDbAuthRepository implements AuthRepository {
     );
     const row = rows[0];
     return row ? mapUserRow(row) : null;
+  }
+
+  async listOrgMembers(orgId: string): Promise<User[]> {
+    const rows = await this.db.query<Record<string, unknown>>(
+      "sql",
+      "SELECT userId, orgId, email, role, createdAt FROM User WHERE orgId = :orgId ORDER BY createdAt ASC",
+      { orgId },
+    );
+    return rows.map(mapUserRow);
+  }
+
+  async createOrgMember(input: CreateOrgMemberInput): Promise<User> {
+    const email = normalizeEmail(input.email);
+    const existing = await this.findUserByEmail(email);
+    if (existing) {
+      throw new DuplicateEmailError();
+    }
+
+    const user = UserSchema.parse({
+      userId: randomUUID(),
+      orgId: input.orgId,
+      email,
+      role: input.role,
+      createdAt: new Date().toISOString(),
+    });
+
+    try {
+      await this.db.command(
+        "sql",
+        `CREATE VERTEX User SET
+          userId = :userId,
+          orgId = :orgId,
+          email = :email,
+          passwordHash = :passwordHash,
+          role = :role,
+          createdAt = :createdAt`,
+        {
+          userId: user.userId,
+          orgId: user.orgId,
+          email: user.email,
+          passwordHash: input.passwordHash,
+          role: user.role,
+          createdAt: user.createdAt,
+        },
+      );
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err);
+      if (/duplicated|unique/i.test(message)) {
+        throw new DuplicateEmailError();
+      }
+      throw err;
+    }
+
+    return user;
+  }
+
+  async deleteOrgMember(orgId: string, userId: string): Promise<boolean> {
+    const rows = await this.db.query<Record<string, unknown>>(
+      "sql",
+      "SELECT userId FROM User WHERE userId = :userId AND orgId = :orgId LIMIT 1",
+      { userId, orgId },
+    );
+    if (rows.length === 0) {
+      return false;
+    }
+
+    await this.db.command(
+      "sql",
+      "DELETE VERTEX FROM Session WHERE userId = :userId AND orgId = :orgId",
+      { userId, orgId },
+    );
+    await this.db.command(
+      "sql",
+      "DELETE VERTEX FROM User WHERE userId = :userId AND orgId = :orgId",
+      { userId, orgId },
+    );
+    return true;
   }
 
   async findOrganizationById(orgId: string): Promise<Organization | null> {
@@ -426,6 +514,56 @@ export class InMemoryAuthRepository implements AuthRepository {
       role: stored.role,
       createdAt: stored.createdAt,
     });
+  }
+
+  async listOrgMembers(orgId: string): Promise<User[]> {
+    return Array.from(this.users.values())
+      .filter((u) => u.orgId === orgId)
+      .sort((a, b) => a.createdAt.localeCompare(b.createdAt))
+      .map((stored) =>
+        UserSchema.parse({
+          userId: stored.userId,
+          orgId: stored.orgId,
+          email: stored.email,
+          role: stored.role,
+          createdAt: stored.createdAt,
+        }),
+      );
+  }
+
+  async createOrgMember(input: CreateOrgMemberInput): Promise<User> {
+    const email = normalizeEmail(input.email);
+    if (this.emailToUserId.has(email)) {
+      throw new DuplicateEmailError();
+    }
+
+    const user = UserSchema.parse({
+      userId: randomUUID(),
+      orgId: input.orgId,
+      email,
+      role: input.role,
+      createdAt: new Date().toISOString(),
+    });
+
+    this.users.set(user.userId, { ...user, passwordHash: input.passwordHash });
+    this.emailToUserId.set(email, user.userId);
+    return { ...user };
+  }
+
+  async deleteOrgMember(orgId: string, userId: string): Promise<boolean> {
+    const stored = this.users.get(userId);
+    if (!stored || stored.orgId !== orgId) {
+      return false;
+    }
+
+    this.users.delete(userId);
+    this.emailToUserId.delete(stored.email);
+    for (const [tokenHash, session] of this.sessions.entries()) {
+      if (session.userId === userId && session.orgId === orgId) {
+        this.sessions.delete(tokenHash);
+      }
+    }
+    return true;
   }
 
   async findOrganizationById(orgId: string): Promise<Organization | null> {
