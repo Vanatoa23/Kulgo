@@ -108,4 +108,48 @@ export type RemoveOrgMemberResponse = z.infer<
   typeof RemoveOrgMemberResponseSchema
 >;
 
+export const AuditActionSchema = z.enum([
+  "ORG_PROFILE_UPDATED",
+  "MEMBER_ADDED",
+  "MEMBER_REMOVED",
+  "BULK_IMPORT_EXECUTED",
+  "INVITE_CREATED",
+  "INVITE_ACCEPTED",
+  "INVITE_REVOKED",
+  "CSRD_REPORT_EXPORTED",
+]);
+export type AuditAction = z.infer<typeof AuditActionSchema>;
+
+export const AuditMetadataValueSchema = z.union([
+  z.string().max(240),
+  z.number().finite(),
+  z.boolean(),
+  z.null(),
+]);
+export type AuditMetadataValue = z.infer<typeof AuditMetadataValueSchema>;
+
+export const AuditEventSchema = z
+  .object({
+    eventId: z.string().uuid(),
+    orgId: z.string().uuid(),
+    actorUserId: z.string().uuid(),
+    actorEmail: z.string().email(),
+    action: AuditActionSchema,
+    summary: z.string().min(1).max(500),
+    metadata: z.record(z.string().min(1).max(64), AuditMetadataValueSchema).default({}),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
+export type AuditEvent = z.infer<typeof AuditEventSchema>;
+
+export const ListAuditEventsResponseSchema = z
+  .object({
+    events: z.array(AuditEventSchema),
+  })
+  .strict();
+export type ListAuditEventsResponse = z.infer<
+  typeof ListAuditEventsResponseSchema
+>;
+
+
 

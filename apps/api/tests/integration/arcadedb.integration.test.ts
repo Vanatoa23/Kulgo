@@ -513,6 +513,12 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
     });
     expect(forbiddenOrgPatch.status).toBe(403);
 
+    // MEMBER is forbidden from reading Audit Log (403)
+    const forbiddenAuditRes = await app.request("/api/v1/auth/audit-log", {
+      headers: { Cookie: memberCookie },
+    });
+    expect(forbiddenAuditRes.status).toBe(403);
+
     // OWNER deletes MEMBER -> MEMBER session immediately revoked (401)
     const delRes = await app.request(`/api/v1/auth/members/${member.userId}`, {
       method: "DELETE",
@@ -524,5 +530,19 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
       headers: { Cookie: memberCookie },
     });
     expect(meAfterDelete.status).toBe(401);
+
+    // OWNER queries persisted AuditEvent vertices from ArcadeDB (newest-first, ?limit=)
+    const auditRes = await app.request("/api/v1/auth/audit-log?limit=10", {
+      headers: { Cookie: ownerCookie },
+    });
+    expect(auditRes.status).toBe(200);
+    const auditBody = (await auditRes.json()) as {
+      events: Array<{ orgId: string; action: string; actorEmail: string }>;
+    };
+    expect(auditBody.events.length).toBeGreaterThanOrEqual(2);
+    expect(auditBody.events[0]!.action).toBe("MEMBER_REMOVED");
+    expect(auditBody.events.some((e) => e.action === "MEMBER_ADDED")).toBe(true);
+    expect(auditBody.events.every((e) => e.orgId === owner.orgId)).toBe(true);
+    expect(JSON.stringify(auditBody)).not.toContain("LiveMemberPassword2026!");
   });
 });

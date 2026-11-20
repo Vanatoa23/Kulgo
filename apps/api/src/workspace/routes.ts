@@ -95,8 +95,28 @@ export function createWorkspaceRoutes({
 
   // --- Bulk Import (JSON or CSV) ---
   routes.post("/import", async (c) => {
-    const orgId = c.get("auth").organization.orgId;
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
     const contentType = (c.req.header("content-type") ?? "").toLowerCase();
+
+    const recordBulkImportAudit = async (
+      format: "csv" | "json",
+      summary: { createdFacilities: number; createdLanes: number; errors: unknown[] },
+    ) => {
+      await authRepo.recordAuditEvent({
+        orgId,
+        actorUserId: auth.user.userId,
+        actorEmail: auth.user.email,
+        action: "BULK_IMPORT_EXECUTED",
+        summary: `Executed ${format.toUpperCase()} bulk import (${summary.createdFacilities} facilities, ${summary.createdLanes} lanes, ${summary.errors.length} errors)`,
+        metadata: {
+          format,
+          createdFacilities: summary.createdFacilities,
+          createdLanes: summary.createdLanes,
+          errorCount: summary.errors.length,
+        },
+      });
+    };
 
     try {
       if (
@@ -113,6 +133,7 @@ export function createWorkspaceRoutes({
           lanes: parsedCsv.lanes,
           initialErrors: parsedCsv.errors,
         });
+        await recordBulkImportAudit("csv", summary);
         return c.json(summary, 200);
       }
 
@@ -138,6 +159,7 @@ export function createWorkspaceRoutes({
           lanes: parsedCsv.lanes,
           initialErrors: parsedCsv.errors,
         });
+        await recordBulkImportAudit("csv", summary);
         return c.json(summary, 200);
       }
 
@@ -164,6 +186,7 @@ export function createWorkspaceRoutes({
         facilities,
         lanes,
       });
+      await recordBulkImportAudit("json", summary);
       return c.json(summary, 200);
     } catch (err) {
       if (err instanceof WorkspaceValidationError) {
