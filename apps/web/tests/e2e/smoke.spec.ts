@@ -168,5 +168,62 @@ test.describe("Kulgo Browser E2E Smoke Suite", () => {
       orgDialog.getByRole("heading", { name: "Audit Log" }),
     ).toHaveCount(0);
   });
+
+  test("displays matched live RiskSignals in Alerts panel, supports acknowledge, and saves alert channel preferences", async ({
+    page,
+  }) => {
+    const unique = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const email = `alerts-e2e-${unique}@kulgo.ee`;
+
+    await page.goto("/");
+    await page.getByRole("tab", { name: "Create Workspace" }).click();
+    await page.locator("#auth-email").fill(email);
+    await page.locator("#auth-password").fill("AlertsE2ePassword2026!");
+    await page.locator("#auth-org-name").fill("Baltic Alerts E2E OÜ");
+    await page.locator("#auth-country").fill("EE");
+    await page.locator("#auth-sector").fill("Electronics");
+    await page
+      .getByRole("button", { name: "Create Private Workspace" })
+      .click();
+
+    await expect(page.getByText("Baltic Alerts E2E OÜ")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    // Seed demo network so Latvia sanctions corridor & Asia->EU lanes match active RiskSignals
+    await page
+      .getByRole("button", { name: "Load Estonia Product X Demo" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Product X", exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
+
+    // Open Alerts tab
+    await page.getByRole("button", { name: "Alerts" }).click();
+    const latviaCard = page.getByTestId("alert-card-sig-latvia-sanctions-01");
+    await expect(latviaCard).toBeVisible({ timeout: 10_000 });
+    await expect(latviaCard.getByText("Unacknowledged")).toBeVisible();
+
+    // Acknowledge the live disruption signal
+    await latviaCard.getByRole("button", { name: "Acknowledge" }).click();
+    await expect(latviaCard.getByText("✓ Acknowledged")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Configure Alert Notification Channels in OrgSettingsModal
+    await page.getByRole("button", { name: "Channels" }).click();
+    const orgDialog = page.getByRole("dialog", {
+      name: /Org ESG, Directory & Team Settings/i,
+    });
+    await expect(orgDialog).toBeVisible();
+    await orgDialog
+      .getByPlaceholder("ops@company.eu, risk@company.eu")
+      .fill("ops@baltic-e2e.eu");
+    await orgDialog.getByRole("button", { name: "Save Alert Channels" }).click();
+    await expect(
+      orgDialog.getByText("Alert notification channels saved."),
+    ).toBeVisible({ timeout: 10_000 });
+  });
 });
+
 

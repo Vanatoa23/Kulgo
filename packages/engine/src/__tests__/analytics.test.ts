@@ -1,8 +1,9 @@
-import type {
-  Facility,
-  RiskSignal,
-  SupplyInput,
-  SupplyLane,
+import {
+  RiskSignalSchema,
+  type Facility,
+  type RiskSignal,
+  type SupplyInput,
+  type SupplyLane,
 } from "@kulgo/shared";
 import { describe, expect, it } from "vitest";
 import {
@@ -23,7 +24,7 @@ const LANE_RIGA_ID = "55555555-5555-4555-8555-555555555551";
 const LANE_TAMPERE_ID = "55555555-5555-4555-8555-555555555552";
 const LANE_HAMBURG_ID = "55555555-5555-4555-8555-555555555553";
 
-const LATVIA_SIGNAL: RiskSignal = {
+const LATVIA_SIGNAL: RiskSignal = RiskSignalSchema.parse({
   signalId: "sig-latvia-sanctions-01",
   kind: "SANCTIONS",
   severity: "RED",
@@ -34,7 +35,7 @@ const LATVIA_SIGNAL: RiskSignal = {
   polygonWkt:
     "POLYGON ((20.9 55.6, 28.3 55.6, 28.3 58.1, 20.9 58.1, 20.9 55.6))",
   active: true,
-};
+});
 
 const FACILITIES: Facility[] = [
   {

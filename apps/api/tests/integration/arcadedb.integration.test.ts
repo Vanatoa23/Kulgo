@@ -545,4 +545,58 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
     expect(auditBody.events.every((e) => e.orgId === owner.orgId)).toBe(true);
     expect(JSON.stringify(auditBody)).not.toContain("LiveMemberPassword2026!");
   });
+
+  it("verifies live ArcadeDB persistence for /api/v1/alerts preferences, acks, and RiskSignal feed", async () => {
+    const email = `alerts-live-${runId}@kulgo-ci.ee`;
+    const regRes = await app.request("/api/v1/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password: "LiveAlertsPassword2026!",
+        organizationName: `Alerts Live Org ${runId}`,
+        countryCode: "EE",
+        sector: "Electronics",
+      }),
+    });
+    expect(regRes.status).toBe(201);
+    const cookie = extractCookie(regRes);
+
+    const prefRes = await app.request("/api/v1/alerts/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        instantRedEmailEnabled: true,
+        dailyAmberDigestEnabled: true,
+        emailRecipients: ["ops@kulgo-ci.ee"],
+      }),
+    });
+    expect(prefRes.status).toBe(200);
+
+    const ackRes = await app.request(
+      "/api/v1/alerts/sig-latvia-sanctions-01/ack",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ status: "ACKNOWLEDGED", note: "Live DB test" }),
+      },
+    );
+    expect(ackRes.status).toBe(200);
+
+    const feedRes = await app.request("/api/v1/alerts/feed", {
+      headers: { Cookie: cookie },
+    });
+    expect(feedRes.status).toBe(200);
+    const feed = (await feedRes.json()) as {
+      acknowledgements: Array<{ signalId: string; status: string }>;
+    };
+    expect(
+      feed.acknowledgements.some(
+        (a) =>
+          a.signalId === "sig-latvia-sanctions-01" &&
+          a.status === "ACKNOWLEDGED",
+      ),
+    ).toBe(true);
+  });
 });
+

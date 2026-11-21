@@ -1512,3 +1512,119 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
   });
 });
 
+describe("Privacy Boundary Contract (Live Disruption Monitoring & Alerts)", () => {
+  it("enforces 401 auth and two-org isolation on /api/v1/alerts/* and strips all Tier-2+ identity from live partner alerts", async () => {
+    const app = createTestApp();
+
+    // 1. Unauthenticated access rejected
+    expect((await app.request("/api/v1/alerts/feed")).status).toBe(401);
+    expect((await app.request("/api/v1/alerts/preferences")).status).toBe(401);
+
+    const orgA = await registerOrg(app, "alerts-a@privacy.eu", "Org A Buyer");
+    const orgB = await registerOrg(
+      app,
+      "alerts-b@privacy.eu",
+      "Org B Tier1 Partner",
+    );
+
+    // 2. Org A sets preferences & acks; Org B must never see them
+    await app.request("/api/v1/alerts/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        emailRecipients: ["secret-ops@orga.eu"],
+        webhookSecret: "orga-super-secret-signing-key-999",
+      }),
+    });
+    await app.request("/api/v1/alerts/sig-latvia-sanctions-01/ack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({ status: "MUTED", note: "Org A internal note" }),
+    });
+
+    const orgBPrefsRes = await app.request("/api/v1/alerts/preferences", {
+      headers: { Cookie: orgB.cookie },
+    });
+    const orgBPrefsText = await orgBPrefsRes.text();
+    expect(orgBPrefsText).not.toContain("secret-ops@orga.eu");
+    expect(orgBPrefsText).not.toContain("orga-super-secret-signing-key-999");
+
+    // 3. Link Org A -> Org B and give Org B a secret Tier-2 facility in LV (matches sig-latvia-sanctions-01)
+    const facARes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Tier-1 Partner Node",
+        kind: "FACTORY",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: false,
+      }),
+    });
+    expect(facARes.status).toBe(201);
+    const facA = (
+      (await facARes.json()) as { facility: { facilityId: string } }
+    ).facility;
+
+    const invRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        targetFacilityId: facA.facilityId,
+        inviteeEmail: "alerts-b@privacy.eu",
+      }),
+    });
+    expect(invRes.status).toBe(201);
+    const inv = (await invRes.json()) as { inviteToken: string };
+
+    const acceptRes = await app.request(
+      `/api/v1/invites/${inv.inviteToken}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(acceptRes.status).toBe(200);
+
+    const secretTier2Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Secret Riga Chemical Plant LLC",
+        kind: "FACTORY",
+        countryCode: "LV",
+        lat: 56.9496,
+        lng: 24.1052,
+        isOwnFacility: false,
+      }),
+    });
+    expect(secretTier2Res.status).toBe(201);
+    const secretTier2 = (
+      (await secretTier2Res.json()) as { facility: { facilityId: string } }
+    ).facility;
+
+    // 4. Org A fetches live alert feed: receives anonymized LV partner alert with ZERO Tier-2+ leakage
+    const feedRes = await app.request("/api/v1/alerts/feed", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(feedRes.status).toBe(200);
+    const feedText = await feedRes.text();
+    const feed = JSON.parse(feedText) as {
+      partnerRegionAlerts: Array<{ signalId: string; countryCode: string | null }>;
+    };
+
+    expect(
+      feed.partnerRegionAlerts.some(
+        (a) => a.signalId === "sig-latvia-sanctions-01" && a.countryCode === "LV",
+      ),
+    ).toBe(true);
+    expect(feedText).not.toContain("Secret Riga Chemical Plant LLC");
+    expect(feedText).not.toContain(secretTier2.facilityId);
+    expect(feedText).not.toContain(orgB.orgId);
+    expect(feedText).not.toContain("56.9496");
+    expect(feedText).not.toContain("24.1052");
+  });
+});
+
