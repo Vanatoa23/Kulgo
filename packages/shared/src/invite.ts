@@ -31,6 +31,7 @@ export type CreateInviteInput = z.infer<typeof CreateInviteInputSchema>;
 export const AcceptInviteInputSchema = z.object({
   openToNewBuyers: z.boolean().optional(),
   capabilities: z.array(z.string().trim().min(1).max(80)).max(20).optional(),
+  fulfilledByFacilityId: z.string().uuid().optional(),
   refinedSite: z
     .object({
       kind: z.enum(["HQ", "FACTORY", "WAREHOUSE", "PORT", "HUB"]),

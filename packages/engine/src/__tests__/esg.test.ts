@@ -125,4 +125,52 @@ describe("ESG & transport emission engine", () => {
     expect(summary.totalTco2e).toBe(1175.5);
     expect(Number.isFinite(summary.totalTco2e)).toBe(true);
   });
+
+  it("attributes Scope 3 Category 1 emissions using Product/Volume PCF first, then privacy-safe Economic Emission Intensity fallback, without attributing 100% of a supplier's total emissions", () => {
+    const summary = computeEsgSummary({
+      ownScope1Tco2e: 100,
+      ownScope2Tco2e: 50,
+      suppliers: [
+        {
+          // Supplier 1: Both PCF and Economic Intensity present -> must prefer Product/Volume PCF (150 tonnes * 1.8 tCO2e/t = 270 tCO2e, NOT 10,000 total)
+          isPartnerVerified: true,
+          sector: "Metals",
+          reportedScope12Tco2e: 4000,
+          hiddenUpstreamScope3Tco2e: 6000,
+          purchasedVolume: 150,
+          productEmissionFactorTco2ePerUnit: 1.8,
+          buyerActiveSpendEur: 500_000,
+          supplierEmissionIntensityTco2ePerEur: 0.001, // would be 500 tCO2e if economic fallback used
+        },
+        {
+          // Supplier 2: No PCF, falls back to server-side Economic Attribution Factor via emission intensity:
+          // Supplier total = 5000 tCO2e, supplier total revenue = 10M EUR -> intensity = 0.0005 tCO2e/EUR.
+          // Buyer spend = 1,000,000 EUR (10% of supplier revenue) -> attributed = 500 tCO2e (NOT 5000 tCO2e).
+          isPartnerVerified: true,
+          sector: "Electronics",
+          reportedScope12Tco2e: 2000,
+          hiddenUpstreamScope3Tco2e: 3000,
+          buyerActiveSpendEur: 1_000_000,
+          supplierEmissionIntensityTco2ePerEur: 0.0005,
+        },
+        {
+          // Supplier 3: Explicit allocation ratio (20% of 1000 tCO2e = 200 tCO2e)
+          isPartnerVerified: true,
+          sector: "Chemicals",
+          reportedScope12Tco2e: 600,
+          hiddenUpstreamScope3Tco2e: 400,
+          economicAttributionRatio: 0.2,
+        },
+      ],
+      laneTransportCo2eTonnes: [30],
+    });
+
+    // Attributed upstream Scope 3 = 270 (PCF) + 500 (Economic intensity) + 200 (20% ratio) = 970 tCO2e
+    // (Instead of 10,000 + 5,000 + 1,000 = 16,000 tCO2e unattributed total!)
+    expect(summary.upstreamScope3Tco2e).toBe(970);
+    expect(summary.transportScope3Tco2e).toBe(30);
+    expect(summary.totalTco2e).toBe(100 + 50 + 970 + 30);
+    expect(summary.confidence).toBe("NETWORK_VERIFIED");
+  });
 });
+

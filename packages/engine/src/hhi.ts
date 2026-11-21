@@ -1,19 +1,83 @@
-import type { HhiMetric } from "@kulgo/shared";
+import type { HhiMetric, HhiWeightingBasis } from "@kulgo/shared";
 
 export interface ShareEntry {
   key: string;
   weight: number;
 }
 
+export interface HhiCoverageOptions {
+  coveredLanesCount?: number;
+  totalActiveLanesCount?: number;
+  weightingBasis?: HhiWeightingBasis;
+}
+
+function buildCoverageFields(
+  options?: HhiCoverageOptions,
+): Pick<
+  HhiMetric,
+  | "coveredLanesCount"
+  | "totalActiveLanesCount"
+  | "coveragePct"
+  | "weightingBasis"
+> {
+  if (!options) return {};
+  const result: Pick<
+    HhiMetric,
+    | "coveredLanesCount"
+    | "totalActiveLanesCount"
+    | "coveragePct"
+    | "weightingBasis"
+  > = {};
+
+  if (
+    options.coveredLanesCount !== undefined &&
+    Number.isFinite(options.coveredLanesCount) &&
+    options.coveredLanesCount >= 0
+  ) {
+    result.coveredLanesCount = Math.round(options.coveredLanesCount);
+  }
+  if (
+    options.totalActiveLanesCount !== undefined &&
+    Number.isFinite(options.totalActiveLanesCount) &&
+    options.totalActiveLanesCount >= 0
+  ) {
+    result.totalActiveLanesCount = Math.round(options.totalActiveLanesCount);
+  }
+  if (
+    result.coveredLanesCount !== undefined &&
+    result.totalActiveLanesCount !== undefined
+  ) {
+    result.coveragePct =
+      result.totalActiveLanesCount > 0
+        ? Math.min(
+            100,
+            Math.max(
+              0,
+              Math.round(
+                (result.coveredLanesCount / result.totalActiveLanesCount) * 100,
+              ),
+            ),
+          )
+        : 0;
+  }
+  if (options.weightingBasis) {
+    result.weightingBasis = options.weightingBasis;
+  }
+  return result;
+}
+
 /**
  * Computes the Herfindahl-Hirschman Index (HHI) for a set of positive weights.
  * Raw HHI ranges from 0 to 10,000 (10,000 = 100% single source).
+ * Supports partial-coverage metadata ("Based on X of Y active lanes").
  */
 export function computeHhi(
   dimension: HhiMetric["dimension"],
   label: string,
   entries: ShareEntry[],
+  coverageOptions?: HhiCoverageOptions,
 ): HhiMetric {
+  const coverageFields = buildCoverageFields(coverageOptions);
   const aggregated = new Map<string, number>();
   for (const entry of entries) {
     if (!Number.isFinite(entry.weight) || entry.weight <= 0) continue;
@@ -29,6 +93,7 @@ export function computeHhi(
       normalizedScore: 0,
       concentrationLevel: "LOW",
       isSinglePointOfFailure: false,
+      ...coverageFields,
     };
   }
 
@@ -58,5 +123,7 @@ export function computeHhi(
     normalizedScore,
     concentrationLevel,
     isSinglePointOfFailure,
+    ...coverageFields,
   };
 }
+

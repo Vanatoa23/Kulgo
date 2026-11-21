@@ -12,6 +12,13 @@ export const ConfidenceLevelSchema = z.enum([
 ]);
 export type ConfidenceLevel = z.infer<typeof ConfidenceLevelSchema>;
 
+export const HhiWeightingBasisSchema = z.enum([
+  "VOLUME",
+  "SPEND_EUR",
+  "VOLUME_SHARE_PCT",
+]);
+export type HhiWeightingBasis = z.infer<typeof HhiWeightingBasisSchema>;
+
 export const HhiMetricSchema = z
   .object({
     dimension: z.enum(["SUPPLIER", "COUNTRY", "PORT", "MATERIAL"]),
@@ -20,6 +27,10 @@ export const HhiMetricSchema = z
     normalizedScore: z.number().min(0).max(100),
     concentrationLevel: z.enum(["LOW", "MODERATE", "HIGH", "SINGLE_SOURCE"]),
     isSinglePointOfFailure: z.boolean(),
+    coveredLanesCount: z.number().int().nonnegative().optional(),
+    totalActiveLanesCount: z.number().int().nonnegative().optional(),
+    coveragePct: z.number().min(0).max(100).optional(),
+    weightingBasis: HhiWeightingBasisSchema.optional(),
   })
   .strict();
 export type HhiMetric = z.infer<typeof HhiMetricSchema>;

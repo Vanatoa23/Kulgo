@@ -11,3 +11,20 @@
 
 ## ADR-003: EU / Estonia-First Deployment Readiness
 * **Decision:** Keep all services 100% Dockerized with zero US-cloud vendor lock-in, targeting EU-owned providers (e.g., Hetzner Cloud Helsinki + Coolify, or UpCloud Helsinki) for GDPR compliance and <10ms Nordic latency.
+
+## ADR-004: Decouple Physical Supply Topology (`SUPPLIES_LANE`) from Commercial Commitments (`Contract` + `ContractLine`)
+* **Decision:** Model `SUPPLIES_LANE` strictly as the physical/operational corridor (`fromFacilityId`, `toFacilityId`, `inputId`, `transportMode`, `leadTimeDays`, `distanceKm`, `riskStatus`), while commercial commitments live in `Contract` + `ContractLine` vertices/edges (`FRAMEWORK`, `SPOT`, or Level-1 `ESTIMATE`). `SupplyInput` owns the canonical `baseUnit`, `unitFamily`, optional unit conversion factors, and optional `totalAnnualDemand`.
+* **Rationale:** Real-world procurement involves staggered contracts, spot top-ups, holdover periods, and indexed/fixed pricing across the same physical route. Deriving commercial totals (`activeVolume`, `activeSpendEur`, `weightedAvgUnitPrice`, `volumeSharePct`, `renewalCliff`) on read for either **Current Run-Rate** (default map view) or **Selected Period Window T** (pro-rated by day overlap for EAL/VaR) prevents stale percentage splits, eliminates double-counting when formal `FRAMEWORK` contracts archive initial `ESTIMATE` entries, and enforces denominator hygiene (weighted average unit price sums strictly over active lines with both spend and compatible volume; multi-currency FX rates are passed explicitly into `@kulgo/engine`).
+
+## ADR-005: Partial-Coverage HHI Concentration with Explicit Dimension Denominators
+* **Decision:** Compute per-material HHI using derived `activeVolume` in the material's canonical `baseUnit` (falling back to `activeSpendEur` or badged share if volume is missing or units conflict), and compute org-wide Supplier & Country HHI using `activeSpendEur` (EUR as the common denominator across heterogeneous materials). Replace all-or-nothing fallback across active lanes with partial-coverage calculation plus an explicit coverage indicator (`coveredLanesCount`, `totalActiveLanesCount`, `coveragePct`, `weightingBasis`).
+* **Rationale:** A single unpriced or zero-volume lane in a 10-lane network must not degrade the other 9 priced lanes to unweighted percentages, nor should heterogeneous physical units (e.g., `UNITS` of PCBs + `TONNES` of steel) ever be summed across different materials for org-wide HHI.
+
+## ADR-006: GHG Protocol Scope 3 Category 1 Attribution (Zero 100%-Entity Over-Attribution)
+* **Decision:** Never attribute 100% of a Tier-1 supplier's corporate Scope 1/2/3 emissions to a buyer purchasing only a fraction of their output. Enforce a 3-tier attribution hierarchy in `@kulgo/engine`: (1) **Product/Volume-based PCF** (`purchasedVolume * productEmissionFactorTco2ePerUnit`), (2) **Economic Attribution Factor** (`supplierTotalTco2e * (buyerActiveSpendEur / supplierAnnualRevenueEur)`), computed server-side via emission intensity (`tCO2e / EUR`) so supplier revenue is never exposed, and (3) explicit allocation ratio or spend/volume-scaled sector baseline fallback.
+* **Rationale:** Prevents order-of-magnitude Scope 3 inflation when onboarding large verified Tier-1 suppliers while preserving strict multi-tenant financial confidentiality.
+
+## ADR-007: Cycle-Safe Partner Graph Traversal & Two-Sided Facility Reconciliation
+* **Decision:** Enforce per-path `visitedOrgIds` cycle detection and `MAX_TRAVERSAL_DEPTH` on all server-side `VERIFIED_PARTNER_LINK` traversals. When a partner link specifies `fulfilledByFacilityId`, scope upstream evaluation to the subgraph feeding that facility; when unspecified, apply a conservative org-wide upstream fallback until two-sided facility reconciliation is completed.
+* **Rationale:** Prevents infinite loops or double-counting in circular supply chains (`A -> B -> C -> A`), preserves shared-chokepoint detection in diamond topologies, and avoids false confidence before a partner binds which exact plant fulfills a buyer's material.
+

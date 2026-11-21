@@ -18,7 +18,7 @@ Instead of polling external APIs or news feeds once per customer facility (which
 3. **Match Many (3-Layer ArcadeDB Graph & Geospatial Matching):**
    - **Layer 1 (Facility Match):** Geospatial WKT polygon intersection (`Facility.locationWkt` vs. `RiskSignal.polygonWkt`) and `countryCode` / `regionCode` match.
    - **Layer 2 (Lane Corridor & Chokepoint Match):** Transport lanes are auto-tagged with canonical transit chokepoints (e.g., Asia → EU `SEA` lanes → `SUEZ_CANAL`, `RED_SEA`, `MALACCA_STRAIT`; Baltic `SEA` → `BALTIC_SEA`) so a single chokepoint `RiskSignal` immediately flags every affected lane.
-   - **Layer 3 (Hidden Tier-2+ Partner Match):** Server-side traversal across `VERIFIED_PARTNER_LINK` edges intersects active `RiskSignal` vertices with hidden upstream facilities/lanes and surfaces **strictly anonymized regional alerts** to Org A (zero Tier-2+ names, IDs, or coordinates).
+   - **Layer 3 (Hidden Tier-2+ Partner Match):** Server-side cycle-safe traversal (per-path `visitedOrgIds` + `MAX_TRAVERSAL_DEPTH`) across `VERIFIED_PARTNER_LINK` edges intersects active `RiskSignal` vertices with hidden upstream facilities/lanes (scoped to the partner's fulfilling facility subgraph when two-sided `fulfilledByFacilityId` reconciliation is bound, or applying a conservative org-wide upstream fallback when unbound) and surfaces **strictly anonymized regional alerts** to Org A (zero Tier-2+ names, IDs, or coordinates).
 
 ---
 

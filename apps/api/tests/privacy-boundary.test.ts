@@ -1273,6 +1273,243 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       ),
     ).toBe(false);
   });
+
+  it("enforces cycle-safe traversal (Org A -> Org B -> Org C -> Org A loop terminates without infinite recursion or double-counting) and supports two-sided facility reconciliation vs conservative fallback", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, "loop-a@buyer.ee", "Loop Buyer A AS");
+    const orgB = await registerOrg(app, "loop-b@tier1.fi", "Loop Partner B Oy");
+    const orgC = await registerOrg(app, "loop-c@tier2.se", "Loop Partner C AB");
+
+    const createFac = async (
+      cookie: string,
+      payload: Record<string, unknown>,
+    ) => {
+      const res = await app.request("/api/v1/workspace/facilities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(payload),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { facility: { facilityId: string } }).facility
+        .facilityId;
+    };
+
+    // Org A has own HQ + Tier-1 node for Org B
+    const aOwnId = await createFac(orgA.cookie, {
+      name: "Org A Tallinn Plant",
+      kind: "FACTORY",
+      countryCode: "EE",
+      lat: 59.437,
+      lng: 24.7536,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 100,
+    });
+    const aTier1BId = await createFac(orgA.cookie, {
+      name: "Partner B Node",
+      kind: "FACTORY",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: aTier1BId,
+        toFacilityId: aOwnId,
+        materialCategory: "Modules",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+      }),
+    });
+
+    // Org B has TWO own plants: Plant North (clean, fed by Org C) and Plant South (fed by a sanctioned RU supplier)
+    const bOwnNorthId = await createFac(orgB.cookie, {
+      name: "Partner B Plant North (Clean)",
+      kind: "FACTORY",
+      countryCode: "FI",
+      lat: 61.4978,
+      lng: 23.761,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 80,
+    });
+    const bOwnSouthId = await createFac(orgB.cookie, {
+      name: "Partner B Plant South (Sanctioned Feed)",
+      kind: "FACTORY",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 120,
+    });
+    const bTier1CId = await createFac(orgB.cookie, {
+      name: "Partner C Node in B",
+      kind: "FACTORY",
+      countryCode: "SE",
+      lat: 59.3293,
+      lng: 18.0686,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    const bSanctionedSupId = await createFac(orgB.cookie, {
+      name: "Secret RU Supplier for Plant South",
+      kind: "EXTRACTION",
+      countryCode: "RU",
+      lat: 55.7558,
+      lng: 37.6173,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: 300,
+    });
+
+    // Lane feeding Plant North from Org C (GREEN)
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        fromFacilityId: bTier1CId,
+        toFacilityId: bOwnNorthId,
+        materialCategory: "Clean Subcomponents",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+        riskStatus: "GREEN",
+      }),
+    });
+    // Lane feeding Plant South from RU (RED sanction)
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        fromFacilityId: bSanctionedSupId,
+        toFacilityId: bOwnSouthId,
+        materialCategory: "Sanctioned Ore",
+        transportMode: "RAIL",
+        volumeSharePct: 100,
+        riskStatus: "RED",
+        riskReason: "Sanctions exposure on Plant South feedstock",
+      }),
+    });
+
+    // Org C has own plant + Tier-1 node pointing BACK to Org A (creating an A -> B -> C -> A supply loop!)
+    const cOwnId = await createFac(orgC.cookie, {
+      name: "Org C Stockholm Plant",
+      kind: "FACTORY",
+      countryCode: "SE",
+      lat: 59.3293,
+      lng: 18.0686,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 50,
+    });
+    const cTier1AId = await createFac(orgC.cookie, {
+      name: "Org A Node in C",
+      kind: "FACTORY",
+      countryCode: "EE",
+      lat: 59.437,
+      lng: 24.7536,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgC.cookie },
+      body: JSON.stringify({
+        fromFacilityId: cTier1AId,
+        toFacilityId: cOwnId,
+        materialCategory: "Recycled Enclosures",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+      }),
+    });
+
+    // Link B -> C and C -> A (closing the loop once A -> B is linked)
+    const invBC = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        targetFacilityId: bTier1CId,
+        inviteeEmail: "loop-c@tier2.se",
+      }),
+    });
+    const { inviteToken: tokenBC } = (await invBC.json()) as {
+      inviteToken: string;
+    };
+    await app.request(`/api/v1/invites/${tokenBC}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgC.cookie },
+      body: JSON.stringify({}),
+    });
+
+    const invCA = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgC.cookie },
+      body: JSON.stringify({
+        targetFacilityId: cTier1AId,
+        inviteeEmail: "loop-a@buyer.ee",
+      }),
+    });
+    const { inviteToken: tokenCA } = (await invCA.json()) as {
+      inviteToken: string;
+    };
+    await app.request(`/api/v1/invites/${tokenCA}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({}),
+    });
+
+    // Now test two-sided facility reconciliation on A -> B:
+    // Reject invalid fulfilledByFacilityId not owned by Org B
+    const invAB1 = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        targetFacilityId: aTier1BId,
+        inviteeEmail: "loop-b@tier1.fi",
+      }),
+    });
+    const { inviteToken: tokenAB1 } = (await invAB1.json()) as {
+      inviteToken: string;
+    };
+    const badReconcileRes = await app.request(
+      `/api/v1/invites/${tokenAB1}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+        body: JSON.stringify({
+          // bTier1CId is NOT an own facility of Org B -> must reject with 400
+          fulfilledByFacilityId: bTier1CId,
+        }),
+      },
+    );
+    expect(badReconcileRes.status).toBe(400);
+
+    // Org B accepts and explicitly binds fulfilledByFacilityId = bOwnNorthId (Plant North, which is clean & fed only by Org C)
+    const goodReconcileRes = await app.request(
+      `/api/v1/invites/${tokenAB1}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+        body: JSON.stringify({
+          fulfilledByFacilityId: bOwnNorthId,
+        }),
+      },
+    );
+    expect(goodReconcileRes.status).toBe(200);
+
+    // Evaluate Org A's analytics:
+    // 1. Cycle A -> B -> C -> A terminates cleanly without infinite recursion or double-counting Org A's 100 tCO2e.
+    // 2. Because Org B bound fulfilledByFacilityId = bOwnNorthId, Plant South's sanctioned RU lane is NOT part of Plant North's subgraph,
+    //    and Org A's upstream Scope 3 equals Plant North (80) + Org C (50) = 130 tCO2e.
+    const summaryARes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(summaryARes.status).toBe(200);
+    const summaryA = AnalyticsSummarySchema.parse(await summaryARes.json());
+    expect(
+      summaryA.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
+    ).toBe(false);
+    expect(summaryA.esg.upstreamScope3Tco2e).toBe(130);
+  });
 });
 
 describe("Privacy Boundary Contract (Live Disruption Monitoring & Alerts)", () => {

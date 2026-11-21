@@ -177,6 +177,28 @@ export function AnalyticsPanel({
                       style={{ width: `${metric.normalizedScore}%` }}
                     />
                   </div>
+                  {metric.coveredLanesCount !== undefined &&
+                    metric.totalActiveLanesCount !== undefined && (
+                      <div className="flex items-center justify-between text-[10px] text-slate-400">
+                        <span>
+                          Based on {metric.coveredLanesCount} of{" "}
+                          {metric.totalActiveLanesCount} active lane
+                          {metric.totalActiveLanesCount === 1 ? "" : "s"}
+                          {metric.coveragePct !== undefined
+                            ? ` (${metric.coveragePct}% coverage)`
+                            : ""}
+                        </span>
+                        {metric.weightingBasis && (
+                          <span className="font-mono text-[9px] uppercase text-slate-500">
+                            {metric.weightingBasis === "SPEND_EUR"
+                              ? "~Spend EUR"
+                              : metric.weightingBasis === "VOLUME"
+                                ? "Volume"
+                                : "Share %"}
+                          </span>
+                        )}
+                      </div>
+                    )}
                 </div>
               );
             })}

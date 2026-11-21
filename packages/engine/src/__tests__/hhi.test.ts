@@ -65,4 +65,27 @@ describe("computeHhi", () => {
     expect(allInvalid.concentrationLevel).toBe("LOW");
     expect(allInvalid.isSinglePointOfFailure).toBe(false);
   });
+
+  it("attaches partial-coverage metadata (Based on X of Y active lanes) when coverageOptions are provided", () => {
+    const partial = computeHhi(
+      "SUPPLIER",
+      "Overall Supplier Concentration",
+      [
+        { key: "sup-1", weight: 600_000 },
+        { key: "sup-2", weight: 400_000 },
+      ],
+      {
+        coveredLanesCount: 9,
+        totalActiveLanesCount: 10,
+        weightingBasis: "SPEND_EUR",
+      },
+    );
+
+    expect(partial.rawHhi).toBe(5200);
+    expect(partial.coveredLanesCount).toBe(9);
+    expect(partial.totalActiveLanesCount).toBe(10);
+    expect(partial.coveragePct).toBe(90);
+    expect(partial.weightingBasis).toBe("SPEND_EUR");
+  });
 });
+

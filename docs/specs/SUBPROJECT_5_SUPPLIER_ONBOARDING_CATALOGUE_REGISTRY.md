@@ -13,13 +13,14 @@ When an organization onboards (or adds suppliers in the Network Hub — Sub-Proj
 1. **Path A — "Add New" Quick Form:**
    - **Required:** `Supplier Name` (Level 0 minimum).
    - **Optional:** `Registry Code` (e.g., Estonian *registrikood*, VAT/LEI), `Country`, `Email`, `Product / Material Category`, `Location`, `Volume`, `Spend`.
+   - **Commercial Layer Integration:** If optional `Volume` or `Spend` is entered during quick onboarding, Kulgo creates the physical `SUPPLIES_LANE` plus an initial Level-1 `ESTIMATE` contract (`Contract` + `ContractLine`), which is automatically replaced/archived when the buyer later adds their first formal `FRAMEWORK` contract (preventing double-counting per Sub-Project 2 Section 2).
 2. **Path B — Structured Excel (`.xlsx`) / CSV Upload:**
-   - Downloadable template with clear required (`supplier_name`) and optional columns (`registry_code`, `country_code`, `email`, `material_category`, `annual_volume`, `annual_spend_eur`, `warehouse_split`).
+   - Downloadable template with clear required (`supplier_name`) and optional columns (`registry_code`, `country_code`, `email`, `material_category`, `base_unit`, `annual_volume`, `annual_spend_eur`, `currency`, `contract_type`, `contract_end_date`, `warehouse_split`).
    - Validates rows with clear inline error feedback (extending existing `apps/api/src/workspace/import-export.ts`).
 
 ---
 
-## 2. Business Registry Enrichment & Automated Outreach
+## 2. Business Registry Enrichment, Automated Outreach & Two-Sided Facility Reconciliation
 
 1. **Public Business Registry Lookup:**
    - When a supplier is added with a `supplierName` (and optional `registryCode` / `countryCode`), Kulgo runs a background enrichment lookup against regional public business registries (starting with **Estonia e-Business Register / Äriregister**, plus EU BRIS / OpenCorporates / Nordic registries researched in Phase 0) to resolve:
@@ -27,7 +28,8 @@ When an organization onboards (or adds suppliers in the Network Hub — Sub-Proj
 2. **Fully Automatic Background Outreach (with Anti-Spam Guardrails):**
    - Whenever a supplier is added and a valid contact email is provided or resolved from a registry, Kulgo **automatically** dispatches a clean, boilerplate invitation email in the background asking the supplier to:
      1. Confirm the supply relationship (upgrading the buyer's node to **Network-Verified**).
-     2. Join Kulgo for free disruption monitoring and **opt-in buyer visibility** by uploading their Product Catalogue.
+     2. Reconcile which specific production/distribution facility (`fulfilledByFacilityId`) fulfills the buyer's material (**Two-Sided Facility Reconciliation** per [`PRIVACY_CONTRACT.md`](../PRIVACY_CONTRACT.md); before reconciliation, Kulgo applies a conservative org-wide upstream fallback).
+     3. Join Kulgo for free disruption monitoring and **opt-in buyer visibility** by uploading their Product Catalogue.
    - **Mandatory Guardrails:**
      - Strict deduplication: never email the same supplier twice for the same buyer org.
      - Global suppression / 1-click unsubscribe list (GDPR & anti-spam compliance).
@@ -43,9 +45,10 @@ To power accurate alternative matching without brittle exact-string lookups:
   - Suppliers who opt in (`openToNewBuyers = true`) can upload or edit their **Product Catalogue** (via form or Excel/CSV).
   - Each catalogue item includes:
     - **Standardized Category** (Kulgo standard material/product taxonomy mapped to HS/CN/UNSPSC codes, e.g., `Aluminum Extrusions`, `PCB Assembly`, `Lithium-Ion Cells`).
+    - **Canonical Unit & Optional PCF:** `baseUnit` / `unitFamily` (`MASS` | `COUNT` | `VOLUME`) and optional verified Product Carbon Footprint (`productEmissionFactorTco2ePerUnit` in `tCO2e / baseUnit` for GHG Protocol Scope 3 Category 1 attribution).
     - **Optional Free-Text & Specs:** Product title/SKU, specs/tags, typical lead time (days), minimum order quantity (MOQ), capacity band, and ESG/quality certifications.
 - **Matching Logic:**
-  - Matches buyer's supplier node material/product category against opted-in network suppliers' catalogues using **standardized category match** + optional semantic tag similarity.
+  - Matches buyer's supplier node material/product category against opted-in network suppliers' catalogues using **standardized category match** + compatible `unitFamily` + optional semantic tag similarity.
 
 ---
 
