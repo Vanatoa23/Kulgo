@@ -43,6 +43,83 @@ export interface SupplierEsgNode {
   sector: string | null;
   reportedScope12Tco2e: number | null;
   hiddenUpstreamScope3Tco2e: number | null;
+  /**
+   * Optional GHG Protocol Scope 3 Category 1 Product/Volume PCF inputs:
+   * `purchasedVolume * productEmissionFactorTco2ePerUnit`.
+   */
+  purchasedVolume?: number | null;
+  productEmissionFactorTco2ePerUnit?: number | null;
+  /**
+   * Optional Economic Attribution inputs:
+   * Either privacy-safe server-side `supplierEmissionIntensityTco2ePerEur`
+   * (`supplierTotalTco2e / supplierTotalRevenueEur`, so supplier revenue is never exposed)
+   * paired with `buyerActiveSpendEur`, or an explicit `economicAttributionRatio` in [0, 1].
+   */
+  buyerActiveSpendEur?: number | null;
+  supplierEmissionIntensityTco2ePerEur?: number | null;
+  economicAttributionRatio?: number | null;
+}
+
+/**
+ * Computes attributed Scope 3 Category 1 upstream emissions for a single Tier-1 supplier
+ * aligned with GHG Protocol Category 1:
+ * 1. Product / Volume-based PCF: `purchasedVolume * productEmissionFactorTco2ePerUnit`
+ * 2. Server-side Economic Emission Intensity: `buyerActiveSpendEur * supplierEmissionIntensityTco2ePerEur`
+ *    (capped at 100% of `rawSupplierTotalTco2e` if positive total is provided so a buyer never exceeds 100%)
+ * 3. Explicit `economicAttributionRatio` in (0, 1]: `rawSupplierTotalTco2e * clamp(ratio, 0, 1)`
+ * 4. Legacy/unscaled fallback when attribution inputs are not yet provided.
+ */
+export function computeSupplierScope3Attribution(
+  supplier: SupplierEsgNode,
+  rawSupplierTotalTco2e: number,
+): number {
+  const safeRawTotal = finiteNonNegativeOrZero(rawSupplierTotalTco2e);
+
+  // 1. Product / Volume-based PCF (preferred)
+  if (
+    supplier.purchasedVolume !== null &&
+    supplier.purchasedVolume !== undefined &&
+    finitePositive(supplier.purchasedVolume) &&
+    supplier.productEmissionFactorTco2ePerUnit !== null &&
+    supplier.productEmissionFactorTco2ePerUnit !== undefined &&
+    finitePositive(supplier.productEmissionFactorTco2ePerUnit)
+  ) {
+    const pcfTco2e =
+      supplier.purchasedVolume * supplier.productEmissionFactorTco2ePerUnit;
+    return Number.isFinite(pcfTco2e) && pcfTco2e >= 0 ? pcfTco2e : 0;
+  }
+
+  // 2. Privacy-safe server-side Economic Attribution via Emission Intensity (tCO2e / EUR)
+  if (
+    supplier.buyerActiveSpendEur !== null &&
+    supplier.buyerActiveSpendEur !== undefined &&
+    finitePositive(supplier.buyerActiveSpendEur) &&
+    supplier.supplierEmissionIntensityTco2ePerEur !== null &&
+    supplier.supplierEmissionIntensityTco2ePerEur !== undefined &&
+    finitePositive(supplier.supplierEmissionIntensityTco2ePerEur)
+  ) {
+    const attributed =
+      supplier.buyerActiveSpendEur *
+      supplier.supplierEmissionIntensityTco2ePerEur;
+    if (!Number.isFinite(attributed) || attributed <= 0) {
+      return 0;
+    }
+    return safeRawTotal > 0 ? Math.min(safeRawTotal, attributed) : attributed;
+  }
+
+  // 3. Explicit economic / volume allocation ratio in [0, 1]
+  if (
+    supplier.economicAttributionRatio !== null &&
+    supplier.economicAttributionRatio !== undefined &&
+    Number.isFinite(supplier.economicAttributionRatio) &&
+    supplier.economicAttributionRatio >= 0
+  ) {
+    const clampedRatio = Math.min(1, Math.max(0, supplier.economicAttributionRatio));
+    return safeRawTotal * clampedRatio;
+  }
+
+  // 4. Default fallback when no attribution parameters are supplied
+  return safeRawTotal;
 }
 
 export interface EsgRollupInput {
@@ -67,16 +144,22 @@ export function computeEsgSummary(input: EsgRollupInput): EsgSummary {
 
     if (supplier.isPartnerVerified) {
       verifiedCount += 1;
-      const reported =
+      const rawVerifiedTotal =
         (reportedScope12 ?? 0) +
         finiteNonNegativeOrZero(supplier.hiddenUpstreamScope3Tco2e);
-      upstreamScope3Tco2e += reported;
+      upstreamScope3Tco2e += computeSupplierScope3Attribution(
+        supplier,
+        rawVerifiedTotal,
+      );
     } else {
       const fallback =
         reportedScope12 ??
         SECTOR_BASELINE_SCOPE12_TCO2E[supplier.sector ?? "Manufacturing"] ??
         SECTOR_BASELINE_SCOPE12_TCO2E.Manufacturing!;
-      upstreamScope3Tco2e += finiteNonNegativeOrZero(fallback);
+      upstreamScope3Tco2e += computeSupplierScope3Attribution(
+        supplier,
+        finiteNonNegativeOrZero(fallback),
+      );
     }
   }
 
@@ -110,3 +193,4 @@ export function computeEsgSummary(input: EsgRollupInput): EsgSummary {
     verifiedCoveragePct,
   };
 }
+

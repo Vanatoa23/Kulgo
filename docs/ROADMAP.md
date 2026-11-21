@@ -47,32 +47,32 @@ flowchart TD
 
 #### Wave 1 — UX Foundation + Parallel Phase 0 Research
 1. **[Sub-Project 4: UX Redesign, 4-Page Navigation Shell & Strategy-Game Supply Map](./specs/SUBPROJECT_4_UX_REDESIGN_AND_STRATEGY_MAP.md)** — [GitHub Issue #28](https://github.com/Vanatoa23/Kulgo/issues/28)
-   - *Why first:* Establishes the 4-page layout (`Hub`, `Map`, `Dashboard`, `Settings`), Dark Tactical Command-Center theme, `SUPPLIER / OWN / CLIENT` roles, 30/70 multi-warehouse splits, and animated strategy-game map HUD so all subsequent engines plug into the final UI cleanly without rework.
+   - *Why first:* Establishes the 4-page layout (`Hub`, `Map`, `Dashboard`, `Settings`), Dark Tactical Command-Center theme, `SUPPLIER / OWN / CLIENT` roles, 30/70 multi-warehouse splits, **Current Run-Rate vs. Period Window `T`** time toggle, and animated strategy-game map HUD so all subsequent engines plug into the final UI cleanly without rework.
 2. **Parallel Phase 0 Research Deliverables** *(stored under `docs/research/`)*:
-   - `docs/research/FINANCIAL_RISK_METHODOLOGY.md` (Sub-Project 2)
-   - `docs/research/ESG_FACTOR_MATRIX_AND_COMPLIANCE.md` (Sub-Project 3)
+   - `docs/research/FINANCIAL_RISK_METHODOLOGY.md` (Sub-Project 2 — includes Contract derivation, pro-rata period overlap, renewal cliff -> TTS/TTR rules, and partial-coverage HHI)
+   - `docs/research/ESG_FACTOR_MATRIX_AND_COMPLIANCE.md` (Sub-Project 3 — includes GHG Protocol Category 1 PCF & economic intensity attribution)
    - `docs/research/LIVE_DISRUPTION_FEEDS_AND_ARCHITECTURE.md` (Sub-Project 1)
    - `docs/research/BUSINESS_REGISTRY_AND_CATALOGUE_TAXONOMY.md` (Sub-Project 5)
 
 #### Wave 2 — Core Quantitative Engines (Pure `@kulgo/engine` + Dashboard Tabs)
 3. **[Sub-Project 2: Financial Impact, Disruption Loss Modeling & Advanced Risk Scoring](./specs/SUBPROJECT_2_FINANCIAL_RISK.md)** — [GitHub Issue #8](https://github.com/Vanatoa23/Kulgo/issues/8)
-   - Progressive-disclosure Level 0 → Level 2 inputs, Low/Base/High EAL & VaR ranges for provisions, TTS vs. TTR outage gap, defect/faulty-unit buffer, expediting/switching costs, and carrying cost vs. EAL trade-off.
+   - Progressive-disclosure Level 0 → Level 2 inputs, **Contracts as the Commercial Layer** (`Contract` + `ContractLine` decoupled from physical `SUPPLIES_LANE`, canonical `SupplyInput` `baseUnit`/`unitFamily`, `HOLDOVER`/`AUTO_RENEW`/`AUTO_ARCHIVE` expiry behavior, `>30%` 90-day renewal cliffs feeding TTS vs. TTR, explicit pure FX table inputs, and partial-coverage HHI with Coverage %), Low/Base/High EAL & VaR ranges for provisions, defect/faulty-unit buffer, expediting/switching costs, and carrying cost vs. EAL trade-off.
 4. **[Sub-Project 3: Environmental-First ESG Engine (PCAF-Scored) & Multi-Region Compliance](./specs/SUBPROJECT_3_ESG_COMPLIANCE.md)** — [GitHub Issue #25](https://github.com/Vanatoa23/Kulgo/issues/25)
-   - Unified open-source Factor Matrix, PCAF 1–5 data quality scoring, GHG Protocol + ISSB (IFRS S1/S2) global backbone, auto-activated regional compliance packs (`EU`, `US`, `UK`, `APAC`, `AFRICA`), auditor CSV/JSON ledger, Board/Bank-ready PDF report, and optional lightweight S & G fast-follow.
+   - Unified open-source Factor Matrix, PCAF 1–5 data quality scoring, **GHG Protocol Scope 3 Category 1 attribution** (Product/Volume PCF preferred, privacy-safe server-side economic emission-intensity fallback — never attributing 100% of a supplier's total emissions to a partial buyer), GHG Protocol + ISSB (IFRS S1/S2) global backbone, auto-activated regional compliance packs (`EU`, `US`, `UK`, `APAC`, `AFRICA`), auditor CSV/JSON ledger, Board/Bank-ready PDF report, and optional lightweight S & G fast-follow.
 
 #### Wave 3 — External Intelligence & B2B Network Flywheel
 *Shared prerequisite:* Transactional email provider (Resend / Postmark / AWS SES) with 1-click unsubscribe suppression list, rate limits, and scheduled background worker runner.
 
 5. **[Sub-Project 1: Live Disruption Monitoring, Semantic Risk Intelligence & Proactive Alerts](./specs/SUBPROJECT_1_LIVE_DISRUPTION_MONITORING.md)** — [GitHub Issue #26](https://github.com/Vanatoa23/Kulgo/issues/26)
-   - Event-centric **"Pull Once, Match Many"** architecture: 3x daily sweeps (06:00, 12:00, 17:00 UTC), 5 disruption categories, deterministic structured parsers + lightweight semantic classifier, 3-layer ArcadeDB graph/chokepoint matching, instant `RED` email/webhook alerts + daily `AMBER` digest, feeding live risk multipliers into Sub-Project 2.
+   - Event-centric **"Pull Once, Match Many"** architecture: 3x daily sweeps (06:00, 12:00, 17:00 UTC), 5 disruption categories, deterministic structured parsers + lightweight semantic classifier, 3-layer ArcadeDB graph/chokepoint matching (with cycle-safe Tier-2+ traversal and conservative/two-sided facility reconciliation), instant `RED` email/webhook alerts + daily `AMBER` digest, feeding live risk multipliers into Sub-Project 2.
 6. **[Sub-Project 5: Supplier Onboarding, Business Registry Enrichment, Product Catalogues & "See Alternatives (x)"](./specs/SUBPROJECT_5_SUPPLIER_ONBOARDING_CATALOGUE_REGISTRY.md)** — [GitHub Issue #29](https://github.com/Vanatoa23/Kulgo/issues/29)
-   - 2-path onboarding ("Add New" + Excel/CSV), public business registry lookup (Estonia *Äriregister* + Nordic/EU registries) with automatic background outreach, hybrid standardized Product Catalogue taxonomy, and Node Inspector **`See alternatives (x)`** with 1-click What-If Simulator preview (now powered by Sub-Projects 2 & 3) and 1-click Request Intro.
+   - 2-path onboarding ("Add New" + Excel/CSV with optional quick `ESTIMATE` contract auto-creation), public business registry lookup (Estonia *Äriregister* + Nordic/EU registries) with automatic background outreach, two-sided facility reconciliation upon invite acceptance, hybrid standardized Product Catalogue taxonomy, and Node Inspector **`See alternatives (x)`** with 1-click What-If Simulator preview and 1-click Request Intro.
 
 ---
 
 ## Non-Negotiable Architectural & Privacy Guardrails
 
 Every Phase 2 PR must continue to satisfy:
-1. [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md): `@kulgo/engine` remains 100% pure and zero-I/O; `@kulgo/web` imports only from `@kulgo/shared`; ArcadeDB stays private inside `kulgo-internal`.
-2. [`docs/PRIVACY_CONTRACT.md`](./PRIVACY_CONTRACT.md): Zero leakage of hidden Tier-2+ partner identities, unit costs, margins, emails, or exact coordinates across analytics, financial models, ESG ledgers, live alerts, catalogues, or audit logs.
+1. [`docs/ARCHITECTURE.md`](./ARCHITECTURE.md): `@kulgo/engine` remains 100% pure and zero-I/O (FX rates, attribution intensities, and reference dates passed explicitly); `@kulgo/web` imports only from `@kulgo/shared`; ArcadeDB stays private inside `kulgo-internal`.
+2. [`docs/PRIVACY_CONTRACT.md`](./PRIVACY_CONTRACT.md): Zero leakage of hidden Tier-2+ partner identities, total revenues, unit costs, margins, emails, or exact coordinates across analytics, financial models, ESG ledgers, live alerts, catalogues, or audit logs; cycle-safe partner traversal (`visitedOrgIds` + max depth).
 3. All 4 CI gates remain green (`verify`, `arcadedb-schema`, `docker-build`, `web-e2e`).

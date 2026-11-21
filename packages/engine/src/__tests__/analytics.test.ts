@@ -486,4 +486,61 @@ describe("evaluateNetworkAnalytics & simulateNetworkAnalytics", () => {
       FAC_HAMBURG_ID,
     ]);
   });
+
+  it("computes partial-coverage org-wide HHI on activeSpendEur with explicit coveragePct and falls back to activeSpendEur on per-material unit conflict", () => {
+    // 3 active lanes: 2 have annualSpendEur (500k and 500k), 1 is missing annualSpendEur (null).
+    // Furthermore, on Material C (lanes 2 and 3), one lane is in TONNES and one is in UNITS (unit conflict!) -> Material C HHI must fall back to SPEND_EUR instead of summing incompatible units.
+    const partialAndConflictLanes: SupplyLane[] = [
+      {
+        ...LANES[0]!,
+        annualSpendEur: null,
+        annualVolume: 100,
+        volumeUnit: "TONNES",
+        volumeSharePct: 100,
+      },
+      {
+        ...LANES[1]!,
+        annualSpendEur: 500_000,
+        annualVolume: 60,
+        volumeUnit: "TONNES",
+        volumeSharePct: 60,
+      },
+      {
+        ...LANES[2]!,
+        annualSpendEur: 500_000,
+        annualVolume: 4000,
+        volumeUnit: "UNITS",
+        volumeSharePct: 40,
+      },
+    ];
+
+    const summary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: partialAndConflictLanes,
+      riskSignals: [],
+      asOfDate,
+    });
+
+    const supplierHhi = summary.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    // Partial coverage: 2 of 3 active lanes have spend (500k / 500k -> 50/50 -> HHI 5000, 67% coverage)
+    expect(supplierHhi.rawHhi).toBe(5000);
+    expect(supplierHhi.coveredLanesCount).toBe(2);
+    expect(supplierHhi.totalActiveLanesCount).toBe(3);
+    expect(supplierHhi.coveragePct).toBe(67);
+    expect(supplierHhi.weightingBasis).toBe("SPEND_EUR");
+
+    // Material C has conflicting units (60 TONNES vs 4000 UNITS), so it must NOT sum 60 + 4000;
+    // it falls back cleanly to SPEND_EUR (500k vs 500k -> HHI 5000).
+    const matCHhi = summary.hhiMetrics.find(
+      (m) => m.dimension === "MATERIAL" && m.label.includes("Material C"),
+    )!;
+    expect(matCHhi.rawHhi).toBe(5000);
+    expect(matCHhi.weightingBasis).toBe("SPEND_EUR");
+    expect(matCHhi.coveragePct).toBe(100);
+  });
 });
+

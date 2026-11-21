@@ -21,7 +21,7 @@ import { computeHhi, type ShareEntry } from "./hhi.js";
 /**
  * Strictly anonymized server-side aggregate derived from a verified partner's
  * hidden Tier-2+ network. Contains ZERO Tier-2+ facility IDs, org IDs,
- * company names, emails, or exact coordinates.
+ * company names, total revenues, emails, or exact coordinates.
  */
 export interface HiddenPartnerAggregate {
   hiddenUpstreamScope3Tco2e: number;
@@ -29,6 +29,13 @@ export interface HiddenPartnerAggregate {
   regionCode: string | null;
   hasSharedChokepoint?: boolean;
   chokepointRegionCode?: string | null;
+  /**
+   * Optional GHG Protocol Scope 3 Category 1 attribution inputs computed
+   * strictly server-side so partner total revenue is never exposed.
+   */
+  productEmissionFactorTco2ePerUnit?: number | null;
+  supplierEmissionIntensityTco2ePerEur?: number | null;
+  economicAttributionRatio?: number | null;
 }
 
 export interface NetworkAnalyticsInput {
@@ -62,7 +69,7 @@ function toAnnualTonnes(
   annualVolume: number | null,
   volumeUnit: VolumeUnit,
 ): number | null {
-  if (annualVolume === null || annualVolume <= 0) {
+  if (annualVolume === null || !Number.isFinite(annualVolume) || annualVolume <= 0) {
     return null;
   }
   if (volumeUnit === "TONNES") {
@@ -72,6 +79,53 @@ function toAnnualTonnes(
     return annualVolume / 1000;
   }
   return null;
+}
+
+type UnitFamily = "MASS" | "COUNT" | "VOLUME" | "CURRENCY";
+
+function getUnitFamily(unit: VolumeUnit): UnitFamily {
+  switch (unit) {
+    case "TONNES":
+    case "KG":
+      return "MASS";
+    case "UNITS":
+      return "COUNT";
+    case "LITERS":
+      return "VOLUME";
+    case "EUR_VALUE":
+      return "CURRENCY";
+  }
+}
+
+/**
+ * Normalizes a lane's `annualVolume` to a canonical unit within its `unitFamily`
+ * (`MASS` -> `TONNES`, `COUNT` -> `UNITS`, `VOLUME` -> `LITERS`, `CURRENCY` -> `EUR_VALUE`).
+ * Never silently mixes incompatible unit families.
+ */
+function normalizeVolumeInFamily(
+  annualVolume: number | null,
+  volumeUnit: VolumeUnit,
+  targetFamily: UnitFamily,
+): number | null {
+  if (annualVolume === null || !Number.isFinite(annualVolume) || annualVolume <= 0) {
+    return null;
+  }
+  if (getUnitFamily(volumeUnit) !== targetFamily) {
+    return null;
+  }
+  if (targetFamily === "MASS") {
+    return toAnnualTonnes(annualVolume, volumeUnit);
+  }
+  return annualVolume;
+}
+
+function hasPositiveSpend(lane: SupplyLane): lane is SupplyLane & { annualSpendEur: number } {
+  return (
+    lane.annualSpendEur !== null &&
+    lane.annualSpendEur !== undefined &&
+    Number.isFinite(lane.annualSpendEur) &&
+    lane.annualSpendEur > 0
+  );
 }
 
 function computeEffectiveLaneCo2e(
@@ -135,10 +189,10 @@ function daysUntilContractEnd(contractEndDate: string, asOfDate: Date): number {
 }
 
 /**
- * Pure, deterministic analytics engine for Kulgo M2.
- * Computes HHI concentration (supplier, country, per-material), SPOF alerts,
- * contract-expiry warnings, RiskSignal polygon & corridor alerts, and
- * Scope 1/2/3 ESG roll-ups, validated against strict Zod DTOs.
+ * Pure, deterministic analytics engine for Kulgo.
+ * Computes HHI concentration (supplier, country, per-material with partial-coverage indicators),
+ * SPOF alerts, contract-expiry warnings, RiskSignal polygon & corridor alerts, and
+ * GHG Protocol Category 1-attributed Scope 1/2/3 ESG roll-ups, validated against strict Zod DTOs.
  */
 export function evaluateNetworkAnalytics(
   input: NetworkAnalyticsInput,
@@ -157,58 +211,19 @@ export function evaluateNetworkAnalytics(
   const activeLanes = input.lanes.filter((lane) => lane.volumeSharePct > 0);
   const activeSignals = input.riskSignals.filter((signal) => signal.active);
 
-  // --- 1. HHI Concentration Metrics ---
+  // --- 1. HHI Concentration Metrics (Aligned with Partial-Coverage & Dimension Denominators) ---
   const hhiMetrics: HhiMetric[] = [];
 
   if (activeLanes.length > 0) {
-    const allHaveSpend = activeLanes.every(
-      (lane) =>
-        lane.annualSpendEur !== null &&
-        Number.isFinite(lane.annualSpendEur) &&
-        lane.annualSpendEur > 0,
-    );
-    const allHaveNormalizedVolume =
-      !allHaveSpend &&
-      activeLanes.every((lane) => {
-        const tonnes = toAnnualTonnes(lane.annualVolume, lane.volumeUnit);
-        return tonnes !== null && Number.isFinite(tonnes) && tonnes > 0;
-      });
-    const allHaveRawPositiveVolume =
-      !allHaveSpend &&
-      !allHaveNormalizedVolume &&
-      activeLanes.every(
-        (lane) =>
-          lane.annualVolume !== null &&
-          Number.isFinite(lane.annualVolume) &&
-          lane.annualVolume > 0,
-      );
+    const totalActiveLanesCount = activeLanes.length;
 
-    const supplierEntries: ShareEntry[] = [];
-    const countryEntries: ShareEntry[] = [];
+    // Group active lanes by material first
     const lanesByMaterialKey = new Map<
       string,
-      { label: string; lanes: SupplyLane[] }
+      { label: string; canonicalUnit: VolumeUnit | null; lanes: SupplyLane[] }
     >();
 
     for (const lane of activeLanes) {
-      let weight: number;
-      if (allHaveSpend) {
-        weight = lane.annualSpendEur!;
-      } else if (allHaveNormalizedVolume) {
-        weight = toAnnualTonnes(lane.annualVolume, lane.volumeUnit)!;
-      } else if (allHaveRawPositiveVolume) {
-        weight = lane.annualVolume!;
-      } else {
-        weight = lane.volumeSharePct;
-      }
-
-      supplierEntries.push({ key: lane.fromFacilityId, weight });
-
-      const fromFacility = facilitiesById.get(lane.fromFacilityId);
-      if (fromFacility) {
-        countryEntries.push({ key: fromFacility.countryCode, weight });
-      }
-
       const linkedInput = lane.inputId
         ? inputsById.get(lane.inputId)
         : undefined;
@@ -219,27 +234,199 @@ export function evaluateNetworkAnalytics(
 
       const group = lanesByMaterialKey.get(materialKey) ?? {
         label: materialLabel,
+        canonicalUnit: linkedInput?.unit ?? null,
         lanes: [],
       };
       group.lanes.push(lane);
       lanesByMaterialKey.set(materialKey, group);
     }
 
+    // 1a. Org-wide Supplier & Country HHI:
+    // Prefer derived `activeSpendEur` (`EUR` as common denominator across heterogeneous materials)
+    // using partial-coverage calculation when >= 2 active lanes (or 100% of a 1-lane network) have spend.
+    // Otherwise fall back to normalized mass volume (`TONNES`/`KG`) if all active lanes share mass units,
+    // or declared `volumeSharePct`.
+    const spendCoveredLanes = activeLanes.filter(hasPositiveSpend);
+    const usePartialOrFullSpend =
+      spendCoveredLanes.length === totalActiveLanesCount ||
+      spendCoveredLanes.length >= 2;
+
+    const allHaveNormalizedMass =
+      !usePartialOrFullSpend &&
+      activeLanes.every((lane) => {
+        const tonnes = toAnnualTonnes(lane.annualVolume, lane.volumeUnit);
+        return tonnes !== null && Number.isFinite(tonnes) && tonnes > 0;
+      });
+
+    const singleUnitFamily = activeLanes[0]
+      ? getUnitFamily(activeLanes[0].volumeUnit)
+      : null;
+    const allHaveCompatibleVolume =
+      !usePartialOrFullSpend &&
+      !allHaveNormalizedMass &&
+      singleUnitFamily !== null &&
+      activeLanes.every((lane) => {
+        const norm = normalizeVolumeInFamily(
+          lane.annualVolume,
+          lane.volumeUnit,
+          singleUnitFamily,
+        );
+        return norm !== null && Number.isFinite(norm) && norm > 0;
+      });
+
+    const orgLanesToScore = usePartialOrFullSpend
+      ? spendCoveredLanes
+      : activeLanes;
+    const orgWeightingBasis = usePartialOrFullSpend
+      ? ("SPEND_EUR" as const)
+      : allHaveNormalizedMass || allHaveCompatibleVolume
+        ? ("VOLUME" as const)
+        : ("VOLUME_SHARE_PCT" as const);
+
+    const supplierEntries: ShareEntry[] = [];
+    const countryEntries: ShareEntry[] = [];
+
+    for (const lane of orgLanesToScore) {
+      let weight: number;
+      if (usePartialOrFullSpend) {
+        weight = lane.annualSpendEur!;
+      } else if (allHaveNormalizedMass) {
+        weight = toAnnualTonnes(lane.annualVolume, lane.volumeUnit)!;
+      } else if (allHaveCompatibleVolume && singleUnitFamily) {
+        weight = normalizeVolumeInFamily(
+          lane.annualVolume,
+          lane.volumeUnit,
+          singleUnitFamily,
+        )!;
+      } else {
+        weight = lane.volumeSharePct;
+      }
+
+      supplierEntries.push({ key: lane.fromFacilityId, weight });
+
+      const fromFacility = facilitiesById.get(lane.fromFacilityId);
+      if (fromFacility) {
+        countryEntries.push({ key: fromFacility.countryCode, weight });
+      }
+    }
+
     hhiMetrics.push(
-      computeHhi("SUPPLIER", "Overall Supplier Concentration", supplierEntries),
+      computeHhi(
+        "SUPPLIER",
+        "Overall Supplier Concentration",
+        supplierEntries,
+        {
+          coveredLanesCount: orgLanesToScore.length,
+          totalActiveLanesCount,
+          weightingBasis: orgWeightingBasis,
+        },
+      ),
     );
     if (countryEntries.length > 0) {
       hhiMetrics.push(
-        computeHhi("COUNTRY", "Geographic Country Concentration", countryEntries),
+        computeHhi(
+          "COUNTRY",
+          "Geographic Country Concentration",
+          countryEntries,
+          {
+            coveredLanesCount: orgLanesToScore.length,
+            totalActiveLanesCount,
+            weightingBasis: orgWeightingBasis,
+          },
+        ),
       );
     }
 
+    // 1b. Per-Material HHI:
+    // Uses derived `activeVolume` in the material's canonical `baseUnit` / `unitFamily`
+    // (never silently adding incompatible unit families), falling back to `activeSpendEur`
+    // if volume is missing or units conflict, and finally `volumeSharePct` at Level 0.
     for (const [, group] of lanesByMaterialKey) {
-      const entries: ShareEntry[] = group.lanes.map((lane) => ({
-        key: lane.fromFacilityId,
-        weight: lane.volumeSharePct,
-      }));
-      hhiMetrics.push(computeHhi("MATERIAL", group.label, entries));
+      const materialTotalLanes = group.lanes.length;
+      const firstVolumeLane = group.lanes.find(
+        (l) =>
+          l.annualVolume !== null &&
+          Number.isFinite(l.annualVolume) &&
+          l.annualVolume > 0,
+      );
+      const targetFamily: UnitFamily | null = group.canonicalUnit
+        ? getUnitFamily(group.canonicalUnit)
+        : firstVolumeLane
+          ? getUnitFamily(firstVolumeLane.volumeUnit)
+          : null;
+
+      // Check for conflicting volume unit families on this material
+      const hasUnitConflict =
+        targetFamily !== null &&
+        group.lanes.some(
+          (l) =>
+            l.annualVolume !== null &&
+            Number.isFinite(l.annualVolume) &&
+            l.annualVolume > 0 &&
+            getUnitFamily(l.volumeUnit) !== targetFamily,
+        );
+
+      const volumeCovered =
+        !hasUnitConflict && targetFamily !== null
+          ? group.lanes
+              .map((lane) => ({
+                lane,
+                normVol: normalizeVolumeInFamily(
+                  lane.annualVolume,
+                  lane.volumeUnit,
+                  targetFamily,
+                ),
+              }))
+              .filter(
+                (
+                  item,
+                ): item is { lane: SupplyLane; normVol: number } =>
+                  item.normVol !== null && item.normVol > 0,
+              )
+          : [];
+
+      const spendCovered = group.lanes.filter(hasPositiveSpend);
+
+      let entries: ShareEntry[];
+      let coveredCount: number;
+      let materialBasis: "VOLUME" | "SPEND_EUR" | "VOLUME_SHARE_PCT";
+
+      if (
+        volumeCovered.length === materialTotalLanes ||
+        (volumeCovered.length >= 2 && volumeCovered.length >= spendCovered.length)
+      ) {
+        entries = volumeCovered.map(({ lane, normVol }) => ({
+          key: lane.fromFacilityId,
+          weight: normVol,
+        }));
+        coveredCount = volumeCovered.length;
+        materialBasis = "VOLUME";
+      } else if (
+        spendCovered.length === materialTotalLanes ||
+        spendCovered.length >= 2
+      ) {
+        entries = spendCovered.map((lane) => ({
+          key: lane.fromFacilityId,
+          weight: lane.annualSpendEur,
+        }));
+        coveredCount = spendCovered.length;
+        materialBasis = "SPEND_EUR";
+      } else {
+        entries = group.lanes.map((lane) => ({
+          key: lane.fromFacilityId,
+          weight: lane.volumeSharePct,
+        }));
+        coveredCount = materialTotalLanes;
+        materialBasis = "VOLUME_SHARE_PCT";
+      }
+
+      hhiMetrics.push(
+        computeHhi("MATERIAL", group.label, entries, {
+          coveredLanesCount: coveredCount,
+          totalActiveLanesCount: materialTotalLanes,
+          weightingBasis: materialBasis,
+        }),
+      );
     }
   }
 
@@ -455,11 +642,31 @@ export function evaluateNetworkAnalytics(
     ownScope2Tco2e: scope2,
     suppliers: activeSupplierFacilities.map((facility) => {
       const hidden = input.partnerHiddenSummaries?.get(facility.facilityId);
+      const supplierLanes = activeLanes.filter(
+        (lane) => lane.fromFacilityId === facility.facilityId,
+      );
+      const buyerActiveSpendEur = supplierLanes.reduce(
+        (sum, lane) =>
+          sum + (hasPositiveSpend(lane) ? lane.annualSpendEur : 0),
+        0,
+      );
+      const purchasedVolumeTonnes = supplierLanes.reduce((sum, lane) => {
+        const tonnes = toAnnualTonnes(lane.annualVolume, lane.volumeUnit);
+        return sum + (tonnes ?? 0);
+      }, 0);
+
       return {
         isPartnerVerified: facility.isPartnerVerified,
         sector: facility.sector,
         reportedScope12Tco2e: facility.estimatedScope12Tco2e,
         hiddenUpstreamScope3Tco2e: hidden?.hiddenUpstreamScope3Tco2e ?? null,
+        purchasedVolume: purchasedVolumeTonnes > 0 ? purchasedVolumeTonnes : null,
+        productEmissionFactorTco2ePerUnit:
+          hidden?.productEmissionFactorTco2ePerUnit ?? null,
+        buyerActiveSpendEur: buyerActiveSpendEur > 0 ? buyerActiveSpendEur : null,
+        supplierEmissionIntensityTco2ePerEur:
+          hidden?.supplierEmissionIntensityTco2ePerEur ?? null,
+        economicAttributionRatio: hidden?.economicAttributionRatio ?? null,
       };
     }),
     laneTransportCo2eTonnes,

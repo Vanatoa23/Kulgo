@@ -64,16 +64,62 @@ function getActiveTier1FacilityIds(
 }
 
 /**
+ * Scopes a verified partner's network to the subgraph feeding `fulfilledByFacilityId`
+ * when two-sided facility reconciliation has been bound on `VERIFIED_PARTNER_LINK`.
+ *
+ * When `fulfilledByFacilityId` is omitted or does not match an own facility in
+ * `partnerNetwork`, falls back conservatively to the partner's full active upstream
+ * network per `docs/PRIVACY_CONTRACT.md`.
+ */
+function scopePartnerNetworkForReconciliation(
+  partnerNetwork: WorkspaceNetworkResponse,
+  fulfilledByFacilityId?: string | null,
+): WorkspaceNetworkResponse {
+  if (!fulfilledByFacilityId) {
+    return partnerNetwork;
+  }
+
+  const fulfillingOwnFacility = partnerNetwork.facilities.find(
+    (f) => f.facilityId === fulfilledByFacilityId && f.isOwnFacility,
+  );
+  if (!fulfillingOwnFacility) {
+    // Conservative fallback: evaluate entire active upstream network
+    return partnerNetwork;
+  }
+
+  const scopedLanes = partnerNetwork.lanes.filter(
+    (lane) => lane.toFacilityId === fulfillingOwnFacility.facilityId,
+  );
+  const feedingFacilityIds = new Set<string>([
+    fulfillingOwnFacility.facilityId,
+  ]);
+  for (const lane of scopedLanes) {
+    feedingFacilityIds.add(lane.fromFacilityId);
+  }
+
+  const scopedFacilities = partnerNetwork.facilities.filter((f) =>
+    feedingFacilityIds.has(f.facilityId),
+  );
+
+  return {
+    ...partnerNetwork,
+    facilities: scopedFacilities,
+    lanes: scopedLanes,
+  };
+}
+
+/**
  * Creates the server-side `resolvePartnerHiddenSummaries` function wired into
  * `OrgScopedAnalyticsRepository`.
  *
  * Traverses `VERIFIED_PARTNER_LINK` edges strictly server-side into verified
- * Tier-1 partners' upstream networks (Org B -> Org C -> Org D, ...) and returns
+ * Tier-1 partners' upstream networks (Org B -> Org C -> Org D, ...) with
+ * cycle-safe per-path `visitedOrgIds` and `MAX_TRAVERSAL_DEPTH`, returning
  * ONLY anonymized aggregate Scope 3 totals and coarse region-level risk flags
  * keyed strictly by Org A's Tier-1 `facilityId`.
  *
- * ZERO Tier-2+ facility IDs, org IDs, company names, emails, or coordinates
- * ever leave this resolver.
+ * ZERO Tier-2+ facility IDs, org IDs, company names, total revenues, emails,
+ * or coordinates ever leave this resolver.
  */
 export function createPartnerHiddenSummaryResolver(
   deps: PartnerHiddenSummaryResolverDeps,
@@ -125,10 +171,18 @@ export function createPartnerHiddenSummaryResolver(
       const nextVisited = new Set(visitedOrgIds);
       nextVisited.add(link.partnerOrgId);
 
-      const [partnerOrg, partnerNetwork] = await Promise.all([
+      const [partnerOrg, rawPartnerNetwork] = await Promise.all([
         authRepo.findOrganizationById(link.partnerOrgId),
         workspaceRepo.getNetwork(link.partnerOrgId),
       ]);
+      const partnerNetwork = scopePartnerNetworkForReconciliation(
+        rawPartnerNetwork,
+        link.fulfilledByFacilityId,
+      );
+      const isFacilityScoped =
+        Boolean(link.fulfilledByFacilityId) &&
+        partnerNetwork !== rawPartnerNetwork;
+
       const deeperHiddenSummaries = await resolveForOrg(
         link.partnerOrgId,
         riskSignals,
@@ -139,8 +193,12 @@ export function createPartnerHiddenSummaryResolver(
 
       const partnerSummary = evaluateNetworkAnalytics({
         organization: {
-          scope1Tco2e: partnerOrg?.scope1Tco2e ?? null,
-          scope2Tco2e: partnerOrg?.scope2Tco2e ?? null,
+          scope1Tco2e: isFacilityScoped
+            ? null
+            : (partnerOrg?.scope1Tco2e ?? null),
+          scope2Tco2e: isFacilityScoped
+            ? null
+            : (partnerOrg?.scope2Tco2e ?? null),
         },
         inputs: partnerNetwork.inputs,
         facilities: partnerNetwork.facilities,

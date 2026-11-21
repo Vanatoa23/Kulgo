@@ -45,6 +45,7 @@ export interface VerifiedPartnerLinkRecord {
   targetFacilityId: string;
   partnerOrgId: string;
   linkedAt: string;
+  fulfilledByFacilityId?: string | null;
 }
 
 export interface InvitationRepository {
@@ -327,6 +328,18 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
       throw new InviteValidationError("Accepting organization not found");
     }
 
+    if (input.fulfilledByFacilityId) {
+      const fulfillingFacility = await this.workspaceRepo.getFacilityById(
+        safeAcceptingOrgId,
+        input.fulfilledByFacilityId,
+      );
+      if (!fulfillingFacility || !fulfillingFacility.isOwnFacility) {
+        throw new InviteValidationError(
+          "fulfilledByFacilityId must belong to the accepting organization's own facilities",
+        );
+      }
+    }
+
     const linkedAt = new Date().toISOString();
 
     await this.db.command(
@@ -340,13 +353,14 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
       `CREATE EDGE VERIFIED_PARTNER_LINK
        FROM (SELECT FROM Facility WHERE facilityId = :targetFacilityId AND ownerOrgId = :fromOrgId)
        TO (SELECT FROM Organization WHERE orgId = :partnerOrgId)
-       SET inviteId = :inviteId, linkedAt = :linkedAt`,
+       SET inviteId = :inviteId, linkedAt = :linkedAt, fulfilledByFacilityId = :fulfilledByFacilityId`,
       {
         targetFacilityId: existing.targetFacilityId,
         fromOrgId: existing.fromOrgId,
         partnerOrgId: safeAcceptingOrgId,
         inviteId: existing.inviteId,
         linkedAt,
+        fulfilledByFacilityId: input.fulfilledByFacilityId ?? null,
       },
     );
 
@@ -446,7 +460,7 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
     const safeOrgId = assertOrgId(fromOrgId);
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      `SELECT inviteId, linkedAt,
+      `SELECT inviteId, linkedAt, fulfilledByFacilityId,
               out.facilityId AS targetFacilityId,
               out.ownerOrgId AS fromOrgId,
               in.orgId AS partnerOrgId
@@ -468,6 +482,11 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
         targetFacilityId: String(row.targetFacilityId),
         partnerOrgId: String(row.partnerOrgId),
         linkedAt: String(row.linkedAt ?? new Date().toISOString()),
+        fulfilledByFacilityId:
+          typeof row.fulfilledByFacilityId === "string" &&
+          row.fulfilledByFacilityId.length > 0
+            ? row.fulfilledByFacilityId
+            : null,
       }));
   }
 }
@@ -641,6 +660,18 @@ export class InMemoryInvitationRepository implements InvitationRepository {
       throw new InviteValidationError("Accepting organization not found");
     }
 
+    if (input.fulfilledByFacilityId) {
+      const fulfillingFacility = await this.workspaceRepo.getFacilityById(
+        safeAcceptingOrgId,
+        input.fulfilledByFacilityId,
+      );
+      if (!fulfillingFacility || !fulfillingFacility.isOwnFacility) {
+        throw new InviteValidationError(
+          "fulfilledByFacilityId must belong to the accepting organization's own facilities",
+        );
+      }
+    }
+
     const linkedAt = new Date().toISOString();
     const acceptedInvitation = InvitationSchema.parse({
       ...existing,
@@ -654,6 +685,7 @@ export class InMemoryInvitationRepository implements InvitationRepository {
       targetFacilityId: acceptedInvitation.targetFacilityId,
       partnerOrgId: safeAcceptingOrgId,
       linkedAt,
+      fulfilledByFacilityId: input.fulfilledByFacilityId ?? null,
     });
 
     await this.workspaceRepo.markFacilityPartnerVerified(
