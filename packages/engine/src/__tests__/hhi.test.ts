@@ -41,4 +41,28 @@ describe("computeHhi", () => {
     ]);
     expect(result.rawHhi).toBe(5000);
   });
+
+  it("ignores NaN, Infinity, and non-positive weights and clamps rawHhi within [0, 10000]", () => {
+    const mixed = computeHhi("SUPPLIER", "Mixed Invalid", [
+      { key: "sup-1", weight: NaN },
+      { key: "sup-2", weight: Infinity },
+      { key: "sup-3", weight: -Infinity },
+      { key: "sup-4", weight: -10 },
+      { key: "sup-5", weight: 50 },
+      { key: "sup-6", weight: 50 },
+    ]);
+    expect(mixed.rawHhi).toBe(5000);
+    expect(mixed.normalizedScore).toBe(50);
+    expect(mixed.isSinglePointOfFailure).toBe(false);
+
+    const allInvalid = computeHhi("SUPPLIER", "All Invalid", [
+      { key: "sup-1", weight: NaN },
+      { key: "sup-2", weight: Infinity },
+      { key: "sup-3", weight: 0 },
+    ]);
+    expect(allInvalid.rawHhi).toBe(0);
+    expect(allInvalid.normalizedScore).toBe(0);
+    expect(allInvalid.concentrationLevel).toBe("LOW");
+    expect(allInvalid.isSinglePointOfFailure).toBe(false);
+  });
 });

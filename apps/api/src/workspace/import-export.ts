@@ -16,6 +16,9 @@ import {
 
 const MAX_IMPORT_FACILITIES = 500;
 const MAX_IMPORT_LANES = 1000;
+export const MAX_CSV_ROWS = 1505;
+const FORMULA_PREFIX_RE = /^[=+\-@\t\r]/;
+const FINITE_NUMBER_RE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 
 /**
  * RFC-4180 compliant CSV parser supporting quoted fields, escaped quotes (""),
@@ -55,11 +58,17 @@ export function parseCsvRecords(csvText: string): string[][] {
       }
       row.push(field);
       rows.push(row);
+      if (rows.length > MAX_CSV_ROWS + 1) {
+        break;
+      }
       row = [];
       field = "";
     } else if (ch === "\n") {
       row.push(field);
       rows.push(row);
+      if (rows.length > MAX_CSV_ROWS + 1) {
+        break;
+      }
       row = [];
       field = "";
     } else {
@@ -75,11 +84,31 @@ export function parseCsvRecords(csvText: string): string[][] {
   return rows.filter((r) => r.some((cell) => cell.trim().length > 0));
 }
 
-function escapeCsvCell(value: unknown): string {
+function neutralizeCsvFormula(str: string): string {
+  if (!FORMULA_PREFIX_RE.test(str)) {
+    return str;
+  }
+  if (str.startsWith("-") && FINITE_NUMBER_RE.test(str.trim())) {
+    return str;
+  }
+  return `'${str}`;
+}
+
+function stripFormulaGuardOnImport(str: string): string {
+  if (str.length >= 2 && str.startsWith("'") && FORMULA_PREFIX_RE.test(str.slice(1))) {
+    return str.slice(1);
+  }
+  return str;
+}
+
+export function escapeCsvCell(value: unknown): string {
   if (value === null || value === undefined) {
     return "";
   }
-  const str = String(value);
+  const str =
+    typeof value === "number" || typeof value === "boolean"
+      ? String(value)
+      : neutralizeCsvFormula(String(value));
   if (/[",\r\n]/.test(str)) {
     return `"${str.replace(/"/g, '""')}"`;
   }
@@ -94,17 +123,22 @@ function parseOptionalNumber(raw: string | undefined): number | undefined {
   return num;
 }
 
-function parseOptionalBoolean(raw: string | undefined): boolean | undefined {
-  if (raw === undefined) return undefined;
+function parseOptionalBoolean(
+  raw: string | undefined,
+): { value: boolean | undefined; error?: string } {
+  if (raw === undefined) return { value: undefined };
   const normalized = raw.trim().toLowerCase();
-  if (normalized.length === 0) return undefined;
+  if (normalized.length === 0) return { value: undefined };
   if (normalized === "true" || normalized === "1" || normalized === "yes") {
-    return true;
+    return { value: true };
   }
   if (normalized === "false" || normalized === "0" || normalized === "no") {
-    return false;
+    return { value: false };
   }
-  return undefined;
+  return {
+    value: undefined,
+    error: `Invalid boolean value "${raw.trim()}". Expected true/false, yes/no, or 1/0.`,
+  };
 }
 
 function parseBadgeList(raw: string | undefined): string[] | undefined {
@@ -113,7 +147,7 @@ function parseBadgeList(raw: string | undefined): string[] | undefined {
   if (trimmed.length === 0) return undefined;
   return trimmed
     .split(/[|;]/)
-    .map((item) => item.trim())
+    .map((item) => stripFormulaGuardOnImport(item.trim()))
     .filter((item) => item.length > 0);
 }
 
@@ -144,6 +178,13 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
     };
   }
 
+  const dataRowCount = matrix.length - 1;
+  if (dataRowCount > MAX_CSV_ROWS) {
+    throw new WorkspaceValidationError(
+      `Row limit exceeded: maximum ${MAX_CSV_ROWS} CSV rows allowed`,
+    );
+  }
+
   const headers = matrix[0]!.map(normalizeHeaderKey);
   const facilities: Array<{ rowNumber: number; raw: Record<string, unknown> }> =
     [];
@@ -157,7 +198,7 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
     for (let col = 0; col < headers.length; col += 1) {
       const key = headers[col];
       if (key) {
-        record[key] = (cells[col] ?? "").trim();
+        record[key] = stripFormulaGuardOnImport((cells[col] ?? "").trim());
       }
     }
 
@@ -181,6 +222,17 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
           : "");
 
     if (inferredType === "FACILITY") {
+      const ownFlag = parseOptionalBoolean(record.isownfacility);
+      if (ownFlag.error) {
+        errors.push({
+          row: rowNumber,
+          entity: "FACILITY",
+          field: "isOwnFacility",
+          message: ownFlag.error,
+        });
+        continue;
+      }
+
       facilities.push({
         rowNumber,
         raw: {
@@ -194,7 +246,7 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
           regionCode: record.regioncode || null,
           lat: parseOptionalNumber(record.lat),
           lng: parseOptionalNumber(record.lng),
-          isOwnFacility: parseOptionalBoolean(record.isownfacility) ?? false,
+          isOwnFacility: ownFlag.value ?? false,
           sector: record.sector || null,
           esgBadges: parseBadgeList(record.esgbadges),
           estimatedScope12Tco2e:
@@ -242,6 +294,14 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
   return { facilities, lanes, errors };
 }
 
+function facilityDedupeKey(input: {
+  name: string;
+  kind: string;
+  countryCode: string;
+}): string {
+  return `${input.name.trim().toLowerCase()}|${input.kind.toUpperCase()}|${input.countryCode.trim().toUpperCase()}`;
+}
+
 export async function executeBulkImport(
   workspaceRepo: WorkspaceRepository,
   orgId: string,
@@ -265,12 +325,40 @@ export async function executeBulkImport(
   }
 
   // Load org's existing facilities strictly scoped to orgId so lanes can reference
-  // either newly imported facilities (by refKey or name) or existing org facilities.
+  // either newly imported facilities (by refKey, facilityId, or name) or existing org facilities.
   const existingFacilities = await workspaceRepo.listFacilities(orgId);
+  const existingByDedupeKey = new Map<string, string>();
   const refToFacilityId = new Map<string, string>();
+  const nameToFacilityIds = new Map<string, string[]>();
+
+  const registerFacilityRef = (
+    facilityId: string,
+    name: string,
+    refKey?: string,
+  ) => {
+    refToFacilityId.set(facilityId, facilityId);
+    const nameKey = name.trim().toLowerCase();
+    const list = nameToFacilityIds.get(nameKey) ?? [];
+    if (!list.includes(facilityId)) {
+      list.push(facilityId);
+      nameToFacilityIds.set(nameKey, list);
+    }
+    if (refKey) {
+      refToFacilityId.set(refKey.trim(), facilityId);
+      refToFacilityId.set(refKey.trim().toLowerCase(), facilityId);
+    }
+  };
+
   for (const fac of existingFacilities) {
-    refToFacilityId.set(fac.facilityId, fac.facilityId);
-    refToFacilityId.set(fac.name.trim().toLowerCase(), fac.facilityId);
+    registerFacilityRef(fac.facilityId, fac.name);
+    existingByDedupeKey.set(
+      facilityDedupeKey({
+        name: fac.name,
+        kind: fac.kind,
+        countryCode: fac.countryCode,
+      }),
+      fac.facilityId,
+    );
   }
 
   let createdFacilities = 0;
@@ -288,14 +376,21 @@ export async function executeBulkImport(
     }
 
     const { refKey, ...createInput } = parsed.data;
+    const dedupeKey = facilityDedupeKey(createInput);
+    const existingMatchId =
+      (refKey ? refToFacilityId.get(refKey.trim()) : undefined) ??
+      existingByDedupeKey.get(dedupeKey);
+
+    if (existingMatchId) {
+      registerFacilityRef(existingMatchId, createInput.name, refKey);
+      continue;
+    }
+
     try {
       const created = await workspaceRepo.createFacility(orgId, createInput);
       createdFacilities += 1;
-      refToFacilityId.set(created.facilityId, created.facilityId);
-      refToFacilityId.set(created.name.trim().toLowerCase(), created.facilityId);
-      if (refKey) {
-        refToFacilityId.set(refKey.trim().toLowerCase(), created.facilityId);
-      }
+      existingByDedupeKey.set(dedupeKey, created.facilityId);
+      registerFacilityRef(created.facilityId, created.name, refKey);
     } catch (err) {
       errors.push({
         row: item.rowNumber,
@@ -311,14 +406,21 @@ export async function executeBulkImport(
     ref: string | undefined,
   ): string | null => {
     if (explicitId) {
-      return refToFacilityId.get(explicitId) ?? null;
+      const direct = refToFacilityId.get(explicitId);
+      if (direct) return direct;
+      const lower = refToFacilityId.get(explicitId.toLowerCase());
+      if (lower) return lower;
     }
     if (ref) {
-      return (
-        refToFacilityId.get(ref.trim()) ??
-        refToFacilityId.get(ref.trim().toLowerCase()) ??
-        null
-      );
+      const trimmed = ref.trim();
+      const byRef =
+        refToFacilityId.get(trimmed) ??
+        refToFacilityId.get(trimmed.toLowerCase());
+      if (byRef) return byRef;
+      const byName = nameToFacilityIds.get(trimmed.toLowerCase());
+      if (byName && byName.length > 0) {
+        return byName[0]!;
+      }
     }
     return null;
   };
@@ -439,6 +541,8 @@ const EXPORT_CSV_HEADERS = [
   "estimatedScope12Tco2e",
   "fromFacility",
   "toFacility",
+  "fromFacilityId",
+  "toFacilityId",
   "materialCategory",
   "transportMode",
   "volumeSharePct",
@@ -448,6 +552,8 @@ const EXPORT_CSV_HEADERS = [
   "contractEndDate",
   "contractTerms",
   "leadTimeDays",
+  "distanceKm",
+  "estimatedLaneCo2e",
   "riskStatus",
   "riskReason",
 ] as const;
@@ -494,6 +600,10 @@ export function serializeNetworkToCsv(
         "",
         "",
         "",
+        "",
+        "",
+        "",
+        "",
       ]
         .map(escapeCsvCell)
         .join(","),
@@ -518,6 +628,8 @@ export function serializeNetworkToCsv(
         "",
         facilityNameById.get(lane.fromFacilityId) ?? lane.fromFacilityId,
         facilityNameById.get(lane.toFacilityId) ?? lane.toFacilityId,
+        lane.fromFacilityId,
+        lane.toFacilityId,
         lane.materialCategory,
         lane.transportMode,
         lane.volumeSharePct,
@@ -527,6 +639,8 @@ export function serializeNetworkToCsv(
         lane.contractEndDate ?? "",
         lane.contractTerms ?? "",
         lane.leadTimeDays ?? "",
+        lane.distanceKm ?? "",
+        lane.estimatedLaneCo2e ?? "",
         lane.riskStatus,
         lane.riskReason ?? "",
       ]

@@ -1,7 +1,17 @@
+import { AsyncLocalStorage } from "node:async_hooks";
 import type { Organization, User } from "@kulgo/shared";
 import { createMiddleware } from "hono/factory";
 import type { AuthRepository } from "./repository.js";
 import { getSessionTokenFromCookie, hashSessionToken } from "./session.js";
+
+const sessionSecretStorage = new AsyncLocalStorage<string>();
+
+export function withSessionSecret<T>(
+  sessionSecret: string,
+  fn: () => Promise<T>,
+): Promise<T> {
+  return sessionSecretStorage.run(sessionSecret, fn);
+}
 
 export interface AuthContext {
   user: User;
@@ -13,14 +23,19 @@ export interface AuthVariables {
   sessionTokenHash: string;
 }
 
-export function createRequireAuth(authRepo: AuthRepository) {
+export function createRequireAuth(
+  authRepo: AuthRepository,
+  sessionSecret?: string,
+) {
   return createMiddleware<{ Variables: AuthVariables }>(async (c, next) => {
     const token = getSessionTokenFromCookie(c);
     if (!token) {
       return c.json({ error: "Unauthorized" }, 401);
     }
 
-    const tokenHash = hashSessionToken(token);
+    const effectiveSecret =
+      sessionSecret ?? sessionSecretStorage.getStore();
+    const tokenHash = hashSessionToken(token, effectiveSecret);
     const session = await authRepo.findSessionByTokenHash(tokenHash);
     if (!session) {
       return c.json({ error: "Unauthorized" }, 401);

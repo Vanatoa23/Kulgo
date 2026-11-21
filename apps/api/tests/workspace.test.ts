@@ -362,6 +362,150 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     expect(filtered.facilities).toHaveLength(3); // FI, DE, Tallinn HQ
   });
 
+  it("preserves isOwnFacility when filtering network by a productId or inputId with zero lanes", async () => {
+    const app = createTestApp();
+    const { cookie } = await registerAndGetCookie(
+      app,
+      "filter-own@tallinn-mfg.ee",
+      "Estonia Filter Own OU",
+    );
+
+    await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+
+    const emptyProdRes = await app.request("/api/v1/workspace/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ name: "Empty Lane Product" }),
+    });
+    expect(emptyProdRes.status).toBe(201);
+    const { product: emptyProduct } = (await emptyProdRes.json()) as {
+      product: { productId: string };
+    };
+
+    const filteredRes = await app.request(
+      `/api/v1/workspace/network?productId=${emptyProduct.productId}`,
+      { headers: { Cookie: cookie } },
+    );
+    expect(filteredRes.status).toBe(200);
+    const filtered = WorkspaceNetworkResponseSchema.parse(
+      await filteredRes.json(),
+    );
+    expect(filtered.lanes).toHaveLength(0);
+    expect(filtered.facilities.some((f) => f.isOwnFacility)).toBe(true);
+    expect(filtered.facilities.every((f) => f.isOwnFacility)).toBe(true);
+  });
+
+  it("ArcadeDbWorkspaceRepository.updateLane preserves existing lane edge if insert fails and deleteFacility revokes pending invites & removes partner links", async () => {
+    const orgId = "11111111-1111-4111-8111-111111111111";
+    const facFromOld = "22222222-2222-4222-8222-222222222221";
+    const facFromNew = "22222222-2222-4222-8222-222222222222";
+    const facTo = "22222222-2222-4222-8222-222222222223";
+    const laneId = "33333333-3333-4333-8333-333333333331";
+
+    const commands: Array<{ statement: string; params: Record<string, unknown> }> = [];
+    const mockDb: ArcadeDbClient = {
+      async healthCheck() {
+        return { connected: true, latencyMs: 1 };
+      },
+      async ensureDatabase() {},
+      async query(_lang, statement, params = {}) {
+        if (statement.includes("FROM SUPPLIES_LANE") && statement.includes("@rid")) {
+          return [{ rid: "#10:0" }] as never;
+        }
+        if (statement.includes("FROM SUPPLIES_LANE")) {
+          return [
+            {
+              laneId,
+              ownerOrgId: orgId,
+              fromFacilityId: facFromOld,
+              toFacilityId: facTo,
+              inputId: null,
+              materialCategory: "Alloys",
+              transportMode: "ROAD",
+              volumeSharePct: 100,
+              annualVolume: 100,
+              volumeUnit: "TONNES",
+              annualSpendEur: null,
+              contractEndDate: null,
+              contractTerms: null,
+              leadTimeDays: null,
+              distanceKm: 100,
+              estimatedLaneCo2e: 9.6,
+              riskStatus: "GREEN",
+              riskReason: null,
+            },
+          ] as never;
+        }
+        if (statement.includes("FROM Facility")) {
+          const fid = params.facilityId as string;
+          return [
+            {
+              facilityId: fid,
+              ownerOrgId: orgId,
+              name: "Fac",
+              kind: "FACTORY",
+              locationPrecision: "SITE_VERIFIED",
+              countryCode: "EE",
+              regionCode: null,
+              lat: 59.437,
+              lng: 24.7536,
+              isOwnFacility: fid === facTo,
+              isPartnerVerified: false,
+              sector: null,
+              esgBadges: [],
+              estimatedScope12Tco2e: null,
+            },
+          ] as never;
+        }
+        return [];
+      },
+      async command(_lang, statement, params = {}) {
+        commands.push({ statement, params });
+        if (statement.includes("CREATE EDGE SUPPLIES_LANE")) {
+          throw new Error("Simulated transient ArcadeDB write failure");
+        }
+        return [];
+      },
+    };
+
+    const { ArcadeDbWorkspaceRepository } = await import(
+      "../src/workspace/repository.js"
+    );
+    const repo = new ArcadeDbWorkspaceRepository(mockDb);
+
+    await expect(
+      repo.updateLane(orgId, laneId, { fromFacilityId: facFromNew }),
+    ).rejects.toThrow("Simulated transient ArcadeDB write failure");
+
+    // Must never have deleted the old edge, and must have restored its laneId!
+    expect(commands.some((c) => c.statement.includes("DELETE EDGE"))).toBe(false);
+    const restoreCmd = commands[commands.length - 1];
+    expect(restoreCmd?.statement).toContain("UPDATE SUPPLIES_LANE SET laneId = :laneId");
+    expect(restoreCmd?.params.laneId).toBe(laneId);
+
+    // deleteFacility must revoke pending invitations and remove VERIFIED_PARTNER_LINK edges
+    commands.length = 0;
+    const deleted = await repo.deleteFacility(orgId, facFromOld);
+    expect(deleted).toBe(true);
+    expect(
+      commands.some(
+        (c) =>
+          c.statement.includes("UPDATE Invitation SET status = 'REVOKED'") &&
+          c.params.facilityId === facFromOld,
+      ),
+    ).toBe(true);
+    expect(
+      commands.some(
+        (c) =>
+          c.statement.includes("DELETE EDGE VERIFIED_PARTNER_LINK") &&
+          c.params.facilityId === facFromOld,
+      ),
+    ).toBe(true);
+  });
+
   it("rejects empty orgId directly on WorkspaceRepository", async () => {
     const repo = new InMemoryWorkspaceRepository();
     await expect(repo.listProducts("")).rejects.toThrow();

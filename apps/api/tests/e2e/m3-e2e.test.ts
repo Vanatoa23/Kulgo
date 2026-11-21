@@ -474,4 +474,289 @@ describe("Milestone 3 E2E — Partner Invitations, Hidden Tier-2+ Risk & Alterna
     );
     expect(badRes.status).toBe(400);
   });
+
+  it("enforces OWNER RBAC on invite endpoints, preserves directory profile on empty accept, blocks duplicate verification, cleans up on facility deletion, and rolls up partner Scope 1+2", async () => {
+    const app = createTestApp();
+    const buyer = await registerOrg(app, {
+      email: "owner-buyer@tallinn-m3.ee",
+      organizationName: "Tallinn Buyer M3 AS",
+      countryCode: "EE",
+    });
+    const partner = await registerOrg(app, {
+      email: "owner-partner@helsinki-m3.fi",
+      organizationName: "Helsinki Partner M3 Oy",
+      countryCode: "FI",
+    });
+
+    // Add MEMBER users to both buyer and partner
+    const addBuyerMemberRes = await app.request("/api/v1/auth/members", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        email: "member-buyer@tallinn-m3.ee",
+        password: "MemberPassword2026!",
+        role: "MEMBER",
+      }),
+    });
+    expect(addBuyerMemberRes.status).toBe(201);
+    const buyerMemberCookie = extractCookie(
+      await app.request("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "member-buyer@tallinn-m3.ee",
+          password: "MemberPassword2026!",
+        }),
+      }),
+    );
+
+    const addPartnerMemberRes = await app.request("/api/v1/auth/members", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: partner.cookie },
+      body: JSON.stringify({
+        email: "member-partner@helsinki-m3.fi",
+        password: "MemberPassword2026!",
+        role: "MEMBER",
+      }),
+    });
+    expect(addPartnerMemberRes.status).toBe(201);
+    const partnerMemberCookie = extractCookie(
+      await app.request("/api/v1/auth/login", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: "member-partner@helsinki-m3.fi",
+          password: "MemberPassword2026!",
+        }),
+      }),
+    );
+
+    // Partner pre-configures directory profile and primary Scope 1+2 emissions
+    await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: partner.cookie },
+      body: JSON.stringify({
+        scope1Tco2e: 180,
+        scope2Tco2e: 70,
+        openToNewBuyers: true,
+        capabilities: ["Anodized Aluminum", "Precision Milling"],
+      }),
+    });
+
+    // Buyer creates own HQ + two Tier-1 facilities (Fac 1 and Fac 2)
+    const createFac = async (payload: Record<string, unknown>) => {
+      const res = await app.request("/api/v1/workspace/facilities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+        body: JSON.stringify(payload),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { facility: { facilityId: string } }).facility
+        .facilityId;
+    };
+
+    const buyerHqId = await createFac({
+      name: "Tallinn Buyer HQ",
+      kind: "HQ",
+      countryCode: "EE",
+      lat: 59.437,
+      lng: 24.7536,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 100,
+    });
+    const tier1Fac1Id = await createFac({
+      name: "Helsinki Supplier Node 1",
+      kind: "FACTORY",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    const tier1Fac2Id = await createFac({
+      name: "Helsinki Supplier Node 2",
+      kind: "FACTORY",
+      countryCode: "FI",
+      lat: 60.2055,
+      lng: 24.6559,
+      isOwnFacility: false,
+    });
+
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        fromFacilityId: tier1Fac1Id,
+        toFacilityId: buyerHqId,
+        materialCategory: "Alloys",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+      }),
+    });
+
+    // 1. MEMBER cannot create, revoke, or accept invites (403 Forbidden)
+    expect(
+      (
+        await app.request("/api/v1/invites", {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: buyerMemberCookie,
+          },
+          body: JSON.stringify({
+            targetFacilityId: tier1Fac1Id,
+            inviteeEmail: "owner-partner@helsinki-m3.fi",
+          }),
+        })
+      ).status,
+    ).toBe(403);
+
+    // OWNER creates invite A (for tier1Fac1Id) and invite B (for tier1Fac2Id)
+    const invARes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        targetFacilityId: tier1Fac1Id,
+        inviteeEmail: "owner-partner@helsinki-m3.fi",
+      }),
+    });
+    expect(invARes.status).toBe(201);
+    const invA = CreateInviteResponseSchema.parse(await invARes.json());
+
+    // Also create a second pending invite for tier1Fac1Id before acceptance
+    const invADupRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        targetFacilityId: tier1Fac1Id,
+        inviteeEmail: "alt-partner@helsinki-m3.fi",
+      }),
+    });
+    expect(invADupRes.status).toBe(201);
+    const invADup = CreateInviteResponseSchema.parse(await invADupRes.json());
+
+    const invBRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        targetFacilityId: tier1Fac2Id,
+        inviteeEmail: "owner-partner@helsinki-m3.fi",
+      }),
+    });
+    expect(invBRes.status).toBe(201);
+    const invB = CreateInviteResponseSchema.parse(await invBRes.json());
+
+    // MEMBER cannot revoke invite (403)
+    expect(
+      (
+        await app.request(`/api/v1/invites/${invA.invitation.inviteId}`, {
+          method: "DELETE",
+          headers: { Cookie: buyerMemberCookie },
+        })
+      ).status,
+    ).toBe(403);
+
+    // Partner MEMBER cannot accept invite (403)
+    expect(
+      (
+        await app.request(`/api/v1/invites/${invA.inviteToken}/accept`, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            Cookie: partnerMemberCookie,
+          },
+          body: JSON.stringify({}),
+        })
+      ).status,
+    ).toBe(403);
+
+    // 2. Partner OWNER accepts invA with empty body -> preserves openToNewBuyers=true & capabilities
+    const acceptARes = await app.request(
+      `/api/v1/invites/${invA.inviteToken}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: partner.cookie },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(acceptARes.status).toBe(200);
+    const acceptedA = AcceptInviteResponseSchema.parse(await acceptARes.json());
+    expect(acceptedA.organization.openToNewBuyers).toBe(true);
+    expect(acceptedA.organization.capabilities).toEqual([
+      "Anodized Aluminum",
+      "Precision Milling",
+    ]);
+
+    // 3. Reject creating a new invite or accepting a stale pending invite for an already-verified facility (409)
+    const createForVerifiedRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        targetFacilityId: tier1Fac1Id,
+        inviteeEmail: "someone@else.fi",
+      }),
+    });
+    expect(createForVerifiedRes.status).toBe(409);
+
+    const acceptSecondInviteForVerifiedRes = await app.request(
+      `/api/v1/invites/${invADup.inviteToken}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: partner.cookie },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(acceptSecondInviteForVerifiedRes.status).toBe(409);
+
+    // 4. Verified partner's primary Scope 1+2 (180 + 70 = 250) rolls up into buyer's upstream Scope 3
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: buyer.cookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summary = AnalyticsSummarySchema.parse(await summaryRes.json());
+    expect(summary.esg.upstreamScope3Tco2e).toBe(250);
+
+    // 5. Deleting tier1Fac2Id revokes pending invB and prevents acceptance; deleting tier1Fac1Id cleans up partner link
+    const delFac2Res = await app.request(
+      `/api/v1/workspace/facilities/${tier1Fac2Id}`,
+      { method: "DELETE", headers: { Cookie: buyer.cookie } },
+    );
+    expect(delFac2Res.status).toBe(200);
+
+    const invitesAfterDelRes = await app.request("/api/v1/invites", {
+      headers: { Cookie: buyer.cookie },
+    });
+    const invitesAfterDel = ListInvitesResponseSchema.parse(
+      await invitesAfterDelRes.json(),
+    );
+    const deletedFacInvite = invitesAfterDel.invitations.find(
+      (i) => i.inviteId === invB.invitation.inviteId,
+    );
+    expect(deletedFacInvite?.status).toBe("REVOKED");
+
+    const acceptRevokedAfterDelRes = await app.request(
+      `/api/v1/invites/${invB.inviteToken}/accept`,
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: partner.cookie },
+        body: JSON.stringify({}),
+      },
+    );
+    expect(acceptRevokedAfterDelRes.status).toBe(409);
+
+    // Deleting tier1Fac1Id removes the verified partner link and drops partner Scope 1+2 roll-up
+    const delFac1Res = await app.request(
+      `/api/v1/workspace/facilities/${tier1Fac1Id}`,
+      { method: "DELETE", headers: { Cookie: buyer.cookie } },
+    );
+    expect(delFac1Res.status).toBe(200);
+
+    const summaryAfterDelRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: buyer.cookie },
+    });
+    const summaryAfterDel = AnalyticsSummarySchema.parse(
+      await summaryAfterDelRes.json(),
+    );
+    expect(summaryAfterDel.esg.upstreamScope3Tco2e).toBe(0);
+  });
 });

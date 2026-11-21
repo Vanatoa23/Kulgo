@@ -43,7 +43,14 @@ export function createAuthRoutes({
   config,
 }: AuthRoutesDependencies): Hono<{ Variables: AuthVariables }> {
   const routes = new Hono<{ Variables: AuthVariables }>();
-  const requireAuth = createRequireAuth(authRepo);
+  const requireAuth = createRequireAuth(authRepo, config.SESSION_SECRET);
+  let dummyHashPromise: Promise<string> | null = null;
+  const getDummyPasswordHash = () => {
+    if (!dummyHashPromise) {
+      dummyHashPromise = hashPassword("kulgo-timing-sidechannel-dummy-secret");
+    }
+    return dummyHashPromise;
+  };
 
   routes.post("/register", async (c) => {
     let rawBody: unknown;
@@ -103,7 +110,7 @@ export function createAuthRoutes({
     await authRepo.createSession({
       userId: created.user.userId,
       orgId: created.organization.orgId,
-      tokenHash: hashSessionToken(sessionToken),
+      tokenHash: hashSessionToken(sessionToken, config.SESSION_SECRET),
       expiresAt: computeSessionExpiryIso(),
     });
     setSessionCookie(c, sessionToken, config);
@@ -136,6 +143,7 @@ export function createAuthRoutes({
 
     const storedUser = await authRepo.findUserByEmail(parsed.data.email);
     if (!storedUser) {
+      await verifyPassword(parsed.data.password, await getDummyPasswordHash());
       return c.json({ error: "Invalid email or password" }, 401);
     }
 
@@ -152,11 +160,13 @@ export function createAuthRoutes({
       return c.json({ error: "Invalid email or password" }, 401);
     }
 
+    await authRepo.deleteExpiredSessions(new Date().toISOString());
+
     const sessionToken = generateSessionToken();
     await authRepo.createSession({
       userId: storedUser.userId,
       orgId: organization.orgId,
-      tokenHash: hashSessionToken(sessionToken),
+      tokenHash: hashSessionToken(sessionToken, config.SESSION_SECRET),
       expiresAt: computeSessionExpiryIso(),
     });
     setSessionCookie(c, sessionToken, config);
@@ -177,7 +187,9 @@ export function createAuthRoutes({
   routes.post("/logout", async (c) => {
     const token = getSessionTokenFromCookie(c);
     if (token) {
-      await authRepo.deleteSessionByTokenHash(hashSessionToken(token));
+      await authRepo.deleteSessionByTokenHash(
+        hashSessionToken(token, config.SESSION_SECRET),
+      );
     }
     clearSessionCookie(c, config);
     return c.json({ ok: true }, 200);

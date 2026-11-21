@@ -7,7 +7,11 @@ import {
   RevokeInviteResponseSchema,
 } from "@kulgo/shared";
 import { Hono } from "hono";
-import { createRequireAuth, type AuthVariables } from "../auth/middleware.js";
+import {
+  createRequireAuth,
+  requireOwner,
+  type AuthVariables,
+} from "../auth/middleware.js";
 import type { AuthRepository } from "../auth/repository.js";
 import type { AppConfig } from "../config.js";
 import {
@@ -33,7 +37,7 @@ export function createInviteRoutes({
 
   routes.use("*", requireAuth);
 
-  routes.post("/", async (c) => {
+  routes.post("/", requireOwner, async (c) => {
     const auth = c.get("auth");
     const orgId = auth.organization.orgId;
     let body: unknown;
@@ -76,6 +80,9 @@ export function createInviteRoutes({
       if (err instanceof InviteValidationError) {
         return c.json({ error: err.message }, 400);
       }
+      if (err instanceof InviteStateError) {
+        return c.json({ error: err.message }, 409);
+      }
       throw err;
     }
   });
@@ -86,7 +93,7 @@ export function createInviteRoutes({
     return c.json(ListInvitesResponseSchema.parse({ invitations }), 200);
   });
 
-  routes.post("/:token/accept", async (c) => {
+  routes.post("/:token/accept", requireOwner, async (c) => {
     const auth = c.get("auth");
     const orgId = auth.organization.orgId;
     const token = c.req.param("token");
@@ -120,7 +127,7 @@ export function createInviteRoutes({
         summary: `Accepted partner invitation ${result.invitation.inviteId}`,
         metadata: {
           inviteId: result.invitation.inviteId,
-          openToNewBuyers: parsed.data.openToNewBuyers ?? false,
+          openToNewBuyers: result.organization.openToNewBuyers,
         },
       });
 
@@ -139,7 +146,7 @@ export function createInviteRoutes({
     }
   });
 
-  routes.delete("/:inviteId", async (c) => {
+  routes.delete("/:inviteId", requireOwner, async (c) => {
     const auth = c.get("auth");
     const orgId = auth.organization.orgId;
     const inviteId = c.req.param("inviteId");

@@ -22,6 +22,7 @@ import {
   type TransportMode,
   type UpdateFacilityInput,
   type UpdateSupplyLaneInput,
+  type UserRole,
   type VolumeUnit,
 } from "@kulgo/shared";
 import {
@@ -61,6 +62,7 @@ export type SidebarTab =
 export interface WorkspaceSidebarProps {
   activeTab: SidebarTab;
   onChangeTab: (tab: SidebarTab) => void;
+  userRole?: UserRole;
   products: readonly Product[];
   inputs: readonly SupplyInput[];
   facilities: readonly Facility[];
@@ -112,6 +114,7 @@ const VOLUME_UNITS = VolumeUnitSchema.options;
 export function WorkspaceSidebar({
   activeTab,
   onChangeTab,
+  userRole = "OWNER",
   products,
   inputs,
   facilities,
@@ -145,6 +148,7 @@ export function WorkspaceSidebar({
   onCreateInvite,
   onRevokeInvite,
 }: WorkspaceSidebarProps) {
+  const isOwner = userRole === "OWNER";
   const selectedFacility =
     facilities.find((f) => f.facilityId === selectedFacilityId) ?? null;
   const selectedLane =
@@ -245,6 +249,8 @@ export function WorkspaceSidebar({
   const [laneMaterial, setLaneMaterial] = useState("");
   const [laneMode, setLaneMode] = useState<TransportMode>("ROAD");
   const [laneSharePct, setLaneSharePct] = useState("100");
+  const [laneAnnualVolume, setLaneAnnualVolume] = useState("");
+  const [laneVolumeUnit, setLaneVolumeUnit] = useState<VolumeUnit>("TONNES");
   const [laneSpendEur, setLaneSpendEur] = useState("");
   const [laneContractEnd, setLaneContractEnd] = useState("");
   const [laneRisk, setLaneRisk] = useState<RiskStatus>("GREEN");
@@ -260,6 +266,13 @@ export function WorkspaceSidebar({
       setLaneMaterial(selectedLane.materialCategory);
       setLaneMode(selectedLane.transportMode);
       setLaneSharePct(String(selectedLane.volumeSharePct));
+      setLaneAnnualVolume(
+        selectedLane.annualVolume !== null &&
+          selectedLane.annualVolume !== undefined
+          ? String(selectedLane.annualVolume)
+          : "",
+      );
+      setLaneVolumeUnit(selectedLane.volumeUnit ?? "TONNES");
       setLaneSpendEur(
         selectedLane.annualSpendEur !== null
           ? String(selectedLane.annualSpendEur)
@@ -277,6 +290,8 @@ export function WorkspaceSidebar({
       setLaneMaterial(inputs[0]?.category ?? "");
       setLaneMode("ROAD");
       setLaneSharePct("100");
+      setLaneAnnualVolume("");
+      setLaneVolumeUnit("TONNES");
       setLaneSpendEur("");
       setLaneContractEnd("");
       setLaneRisk("GREEN");
@@ -358,6 +373,15 @@ export function WorkspaceSidebar({
       setLaneFormError("Volume share must be between 0 and 100.");
       return;
     }
+    const annualVolume =
+      laneAnnualVolume.trim() !== "" ? Number(laneAnnualVolume) : null;
+    if (
+      annualVolume !== null &&
+      (!Number.isFinite(annualVolume) || annualVolume < 0)
+    ) {
+      setLaneFormError("Annual volume must be a non-negative number.");
+      return;
+    }
     const spend =
       laneSpendEur.trim() !== "" ? Number(laneSpendEur) : null;
     if (spend !== null && (!Number.isFinite(spend) || spend < 0)) {
@@ -383,6 +407,8 @@ export function WorkspaceSidebar({
         materialCategory: material,
         transportMode: laneMode,
         volumeSharePct: share,
+        annualVolume,
+        volumeUnit: laneVolumeUnit,
         annualSpendEur: spend,
         contractEndDate: contractDate,
         riskStatus: laneRisk,
@@ -396,7 +422,8 @@ export function WorkspaceSidebar({
         materialCategory: material,
         transportMode: laneMode,
         volumeSharePct: share,
-        volumeUnit: "TONNES",
+        annualVolume,
+        volumeUnit: laneVolumeUnit,
         annualSpendEur: spend,
         contractEndDate: contractDate,
         riskStatus: laneRisk,
@@ -973,51 +1000,58 @@ export function WorkspaceSidebar({
                   </p>
                 )}
 
-                <form
-                  onSubmit={async (e) => {
-                    e.preventDefault();
-                    setInviteFormError(null);
-                    const trimmed = inviteEmail.trim();
-                    if (!trimmed) {
-                      setInviteFormError("Enter the supplier contact email.");
-                      return;
-                    }
-                    const created = await onCreateInvite({
-                      targetFacilityId: selectedFacility.facilityId,
-                      inviteeEmail: trimmed,
-                    });
-                    if (created) {
-                      setGeneratedInvite(created);
-                      setInviteEmail("");
-                      setCopiedLink(false);
-                    }
-                  }}
-                  className="space-y-2"
-                >
-                  <div className="flex items-center gap-2">
-                    <div className="relative flex-1">
-                      <Mail className="h-3.5 w-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
-                      <input
-                        type="email"
-                        required
-                        value={inviteEmail}
-                        onChange={(e) => setInviteEmail(e.target.value)}
-                        placeholder="supplier@partner-company.eu"
-                        className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-2.5 py-1.5 text-xs text-slate-100 focus:border-teal-500 focus:outline-none"
-                      />
+                {isOwner ? (
+                  <form
+                    onSubmit={async (e) => {
+                      e.preventDefault();
+                      setInviteFormError(null);
+                      const trimmed = inviteEmail.trim();
+                      if (!trimmed) {
+                        setInviteFormError("Enter the supplier contact email.");
+                        return;
+                      }
+                      const created = await onCreateInvite({
+                        targetFacilityId: selectedFacility.facilityId,
+                        inviteeEmail: trimmed,
+                      });
+                      if (created) {
+                        setGeneratedInvite(created);
+                        setInviteEmail("");
+                        setCopiedLink(false);
+                      }
+                    }}
+                    className="space-y-2"
+                  >
+                    <div className="flex items-center gap-2">
+                      <div className="relative flex-1">
+                        <Mail className="h-3.5 w-3.5 text-slate-500 absolute left-2.5 top-1/2 -translate-y-1/2" />
+                        <input
+                          type="email"
+                          required
+                          value={inviteEmail}
+                          onChange={(e) => setInviteEmail(e.target.value)}
+                          placeholder="supplier@partner-company.eu"
+                          className="w-full rounded-lg border border-slate-800 bg-slate-950 pl-8 pr-2.5 py-1.5 text-xs text-slate-100 focus:border-teal-500 focus:outline-none"
+                        />
+                      </div>
+                      <button
+                        type="submit"
+                        disabled={busy}
+                        className="inline-flex items-center gap-1 rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-60 text-slate-950 font-semibold text-xs px-3 py-1.5 transition-colors cursor-pointer shrink-0"
+                      >
+                        <span>Send Invite</span>
+                      </button>
                     </div>
-                    <button
-                      type="submit"
-                      disabled={busy}
-                      className="inline-flex items-center gap-1 rounded-lg bg-teal-500 hover:bg-teal-400 disabled:opacity-60 text-slate-950 font-semibold text-xs px-3 py-1.5 transition-colors cursor-pointer shrink-0"
-                    >
-                      <span>Send Invite</span>
-                    </button>
-                  </div>
-                  {inviteFormError && (
-                    <p className="text-[11px] text-red-300">{inviteFormError}</p>
-                  )}
-                </form>
+                    {inviteFormError && (
+                      <p className="text-[11px] text-red-300">{inviteFormError}</p>
+                    )}
+                  </form>
+                ) : (
+                  <p className="text-[11px] text-slate-500 rounded-lg border border-slate-800/80 bg-slate-950/60 px-2.5 py-2">
+                    Only organization <strong>OWNER</strong> users can send or
+                    revoke partner verification invitations.
+                  </p>
+                )}
 
                 {generatedInvite && (
                   <div className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 p-2.5 space-y-2 text-xs">
@@ -1097,7 +1131,7 @@ export function WorkspaceSidebar({
                                 {inv.status}
                               </span>
                             </div>
-                            {inv.status === "PENDING" && (
+                            {isOwner && inv.status === "PENDING" && (
                               <button
                                 type="button"
                                 disabled={busy}
@@ -1272,6 +1306,41 @@ export function WorkspaceSidebar({
                         placeholder="250000"
                         className="w-full rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-2 text-xs font-mono text-slate-100"
                       />
+                    </div>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2.5">
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                        Annual Volume
+                      </label>
+                      <input
+                        type="number"
+                        min="0"
+                        step="any"
+                        value={laneAnnualVolume}
+                        onChange={(e) => setLaneAnnualVolume(e.target.value)}
+                        placeholder="e.g. 800"
+                        className="w-full rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-2 text-xs font-mono text-slate-100"
+                      />
+                    </div>
+                    <div>
+                      <label className="block text-[11px] font-medium text-slate-400 mb-1">
+                        Volume Unit
+                      </label>
+                      <select
+                        value={laneVolumeUnit}
+                        onChange={(e) =>
+                          setLaneVolumeUnit(e.target.value as VolumeUnit)
+                        }
+                        className="w-full rounded-lg border border-slate-800 bg-slate-900 px-2.5 py-2 text-xs text-slate-100"
+                      >
+                        {VOLUME_UNITS.map((unit) => (
+                          <option key={unit} value={unit}>
+                            {unit}
+                          </option>
+                        ))}
+                      </select>
                     </div>
                   </div>
 

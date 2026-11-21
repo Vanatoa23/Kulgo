@@ -30,7 +30,9 @@ export function AcceptInviteModal({
   onAccepted,
 }: AcceptInviteModalProps) {
   const [token, setToken] = useState(initialToken);
-  const [openToNewBuyers, setOpenToNewBuyers] = useState(true);
+  const [openToNewBuyers, setOpenToNewBuyers] = useState(
+    organization.openToNewBuyers ?? false,
+  );
   const [capabilitiesRaw, setCapabilitiesRaw] = useState(
     organization.capabilities.length > 0
       ? organization.capabilities.join(", ")
@@ -50,10 +52,11 @@ export function AcceptInviteModal({
   useEffect(() => {
     if (open) {
       setToken(initialToken);
+      setOpenToNewBuyers(organization.openToNewBuyers ?? false);
       setError(null);
       setAcceptedResult(null);
     }
-  }, [open, initialToken]);
+  }, [open, initialToken, organization.openToNewBuyers]);
 
   if (!open) {
     return null;

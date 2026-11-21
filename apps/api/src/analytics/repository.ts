@@ -20,6 +20,7 @@ import {
   type NetworkFilters,
   type WorkspaceRepository,
 } from "../workspace/repository.js";
+import type { PartnerSummaryResolutionContext } from "./partner-resolver.js";
 import type { RiskSignalRepository } from "./risk-signals.js";
 
 export class AnalyticsValidationError extends Error {
@@ -62,6 +63,7 @@ export interface OrgScopedAnalyticsRepositoryDeps {
    */
   resolvePartnerHiddenSummaries?: (
     orgId: string,
+    activeNetwork?: PartnerSummaryResolutionContext,
   ) => Promise<ReadonlyMap<string, HiddenPartnerAggregate>>;
 }
 
@@ -77,6 +79,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
   private readonly riskSignalRepo: RiskSignalRepository;
   private readonly resolvePartnerHiddenSummaries?: (
     orgId: string,
+    activeNetwork?: PartnerSummaryResolutionContext,
   ) => Promise<ReadonlyMap<string, HiddenPartnerAggregate>>;
 
   constructor(deps: OrgScopedAnalyticsRepositoryDeps) {
@@ -96,15 +99,14 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     asOfDate?: Date,
   ): Promise<AnalyticsSummary> {
     const safeOrgId = assertOrgId(orgId);
-    const [organization, network, riskSignals, partnerHiddenSummaries] =
-      await Promise.all([
-        this.authRepo.findOrganizationById(safeOrgId),
-        this.workspaceRepo.getNetwork(safeOrgId, filters),
-        this.riskSignalRepo.listActive(),
-        this.resolvePartnerHiddenSummaries
-          ? this.resolvePartnerHiddenSummaries(safeOrgId)
-          : Promise.resolve(undefined),
-      ]);
+    const [organization, network, riskSignals] = await Promise.all([
+      this.authRepo.findOrganizationById(safeOrgId),
+      this.workspaceRepo.getNetwork(safeOrgId, filters),
+      this.riskSignalRepo.listActive(),
+    ]);
+    const partnerHiddenSummaries = this.resolvePartnerHiddenSummaries
+      ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
+      : undefined;
 
     const summary = evaluateNetworkAnalytics({
       organization: {
@@ -128,15 +130,14 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     asOfDate?: Date,
   ): Promise<ExecutiveReport> {
     const safeOrgId = assertOrgId(orgId);
-    const [organization, network, riskSignals, partnerHiddenSummaries] =
-      await Promise.all([
-        this.authRepo.findOrganizationById(safeOrgId),
-        this.workspaceRepo.getNetwork(safeOrgId, filters),
-        this.riskSignalRepo.listActive(),
-        this.resolvePartnerHiddenSummaries
-          ? this.resolvePartnerHiddenSummaries(safeOrgId)
-          : Promise.resolve(undefined),
-      ]);
+    const [organization, network, riskSignals] = await Promise.all([
+      this.authRepo.findOrganizationById(safeOrgId),
+      this.workspaceRepo.getNetwork(safeOrgId, filters),
+      this.riskSignalRepo.listActive(),
+    ]);
+    const partnerHiddenSummaries = this.resolvePartnerHiddenSummaries
+      ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
+      : undefined;
 
     if (!organization) {
       throw new AnalyticsValidationError("Organization not found");
@@ -273,15 +274,11 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       inputId: request.inputId,
     };
 
-    const [organization, network, riskSignals, partnerHiddenSummaries] =
-      await Promise.all([
-        this.authRepo.findOrganizationById(safeOrgId),
-        this.workspaceRepo.getNetwork(safeOrgId, filters),
-        this.riskSignalRepo.listActive(),
-        this.resolvePartnerHiddenSummaries
-          ? this.resolvePartnerHiddenSummaries(safeOrgId)
-          : Promise.resolve(undefined),
-      ]);
+    const [organization, network, riskSignals] = await Promise.all([
+      this.authRepo.findOrganizationById(safeOrgId),
+      this.workspaceRepo.getNetwork(safeOrgId, filters),
+      this.riskSignalRepo.listActive(),
+    ]);
 
     // Enforce strict org boundary: every simulated laneId must belong to this org's network
     const ownedLaneIds = new Set(network.lanes.map((lane) => lane.laneId));
@@ -295,7 +292,45 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       );
     }
 
-    const result = simulateNetworkAnalytics(
+    const changesByLaneId = new Map(
+      request.laneChanges.map((change) => [change.laneId, change]),
+    );
+    const simulatedLanes = network.lanes.map((lane) => {
+      const change = changesByLaneId.get(lane.laneId);
+      if (!change || change.volumeSharePct === undefined) {
+        return lane;
+      }
+      return {
+        ...lane,
+        volumeSharePct: change.volumeSharePct,
+      };
+    });
+
+    const [baselinePartnerHiddenSummaries, simulatedPartnerHiddenSummaries] =
+      this.resolvePartnerHiddenSummaries
+        ? await Promise.all([
+            this.resolvePartnerHiddenSummaries(safeOrgId, network),
+            this.resolvePartnerHiddenSummaries(safeOrgId, {
+              facilities: network.facilities,
+              lanes: simulatedLanes,
+            }),
+          ])
+        : [undefined, undefined];
+
+    const baselineOnly = evaluateNetworkAnalytics({
+      organization: {
+        scope1Tco2e: organization?.scope1Tco2e ?? null,
+        scope2Tco2e: organization?.scope2Tco2e ?? null,
+      },
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: network.lanes,
+      riskSignals,
+      partnerHiddenSummaries: baselinePartnerHiddenSummaries,
+      asOfDate,
+    });
+
+    const simulatedResult = simulateNetworkAnalytics(
       {
         organization: {
           scope1Tco2e: organization?.scope1Tco2e ?? null,
@@ -305,12 +340,64 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         facilities: network.facilities,
         lanes: network.lanes,
         riskSignals,
-        partnerHiddenSummaries,
+        partnerHiddenSummaries: simulatedPartnerHiddenSummaries,
         asOfDate,
       },
       request.laneChanges,
     );
 
-    return SimulateAnalyticsResponseSchema.parse(result);
+    const summarizeHhi = (summary: AnalyticsSummary) => {
+      const materialHhis = summary.hhiMetrics.filter(
+        (m) => m.dimension === "MATERIAL",
+      );
+      const pool = materialHhis.length > 0 ? materialHhis : summary.hhiMetrics;
+      if (pool.length === 0) {
+        return { maxHhi: 0, avgHhi: 0, spofCount: 0 };
+      }
+      const maxHhi = Math.max(...pool.map((m) => m.rawHhi));
+      const avgHhi = Math.round(
+        pool.reduce((sum, m) => sum + m.rawHhi, 0) / pool.length,
+      );
+      const spofCount = materialHhis.filter(
+        (m) => m.isSinglePointOfFailure,
+      ).length;
+      return { maxHhi, avgHhi, spofCount };
+    };
+
+    const round2 = (value: number) => Math.round(value * 100) / 100;
+    const baseHhi = summarizeHhi(baselineOnly);
+    const simHhi = summarizeHhi(simulatedResult.simulated);
+    const baseRedAlerts = baselineOnly.alerts.filter(
+      (a) => a.severity === "RED",
+    ).length;
+    const simRedAlerts = simulatedResult.simulated.alerts.filter(
+      (a) => a.severity === "RED",
+    ).length;
+
+    return SimulateAnalyticsResponseSchema.parse({
+      baseline: baselineOnly,
+      simulated: simulatedResult.simulated,
+      deltas: {
+        resilienceScoreDelta: round2(
+          simulatedResult.simulated.resilienceScore -
+            baselineOnly.resilienceScore,
+        ),
+        maxHhiDelta: round2(simHhi.maxHhi - baseHhi.maxHhi),
+        avgHhiDelta: round2(simHhi.avgHhi - baseHhi.avgHhi),
+        alertCountDelta:
+          simulatedResult.simulated.alerts.length - baselineOnly.alerts.length,
+        redAlertCountDelta: simRedAlerts - baseRedAlerts,
+        spofCountDelta: simHhi.spofCount - baseHhi.spofCount,
+        transportScope3Tco2eDelta: round2(
+          simulatedResult.simulated.esg.transportScope3Tco2e -
+            baselineOnly.esg.transportScope3Tco2e,
+        ),
+        totalTco2eDelta: round2(
+          simulatedResult.simulated.esg.totalTco2e -
+            baselineOnly.esg.totalTco2e,
+        ),
+      },
+      appliedChangesCount: simulatedResult.appliedChangesCount,
+    });
   }
 }

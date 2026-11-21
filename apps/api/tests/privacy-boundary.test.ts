@@ -1092,4 +1092,185 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(JSON.stringify(auditB)).not.toContain(orgA.orgId);
     expect(JSON.stringify(auditB)).not.toContain("CSRD_REPORT_EXPORTED");
   });
+
+  it("prevents single-partner Tier-2 country inference leaks across product filters, 0% simulations, and duplicate partnerOrgId links", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, "leak-a@buyer.ee", "Leak Check Buyer AS");
+    const orgB = await registerOrg(app, "leak-b@tier1.fi", "Single Partner Oy");
+
+    // Org B sets up its own HQ + secret Tier-2 supplier in CN
+    const bOwnRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Partner B Plant",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 60.17,
+        lng: 24.94,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: bOwn } = (await bOwnRes.json()) as {
+      facility: { facilityId: string };
+    };
+    const bTier2Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Secret Shenzhen Tier2",
+        kind: "FACTORY",
+        countryCode: "CN",
+        lat: 22.54,
+        lng: 114.05,
+        isOwnFacility: false,
+      }),
+    });
+    const { facility: bTier2 } = (await bTier2Res.json()) as {
+      facility: { facilityId: string };
+    };
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        fromFacilityId: bTier2.facilityId,
+        toFacilityId: bOwn.facilityId,
+        materialCategory: "Wafers",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+      }),
+    });
+
+    // Org A sets up Product 1 + HQ + TWO Tier-1 facility nodes both linked to the SAME orgB
+    const prod1Res = await app.request("/api/v1/workspace/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({ name: "Filtered Product 1" }),
+    });
+    const { product: prod1 } = (await prod1Res.json()) as {
+      product: { productId: string };
+    };
+    const input1Res = await app.request("/api/v1/workspace/inputs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        productId: prod1.productId,
+        name: "Input 1",
+        category: "Chips",
+      }),
+    });
+    const { input: input1 } = (await input1Res.json()) as {
+      input: { inputId: string };
+    };
+
+    const createAFac = async (name: string, isOwn = false) => {
+      const res = await app.request("/api/v1/workspace/facilities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+        body: JSON.stringify({
+          name,
+          kind: "FACTORY",
+          countryCode: isOwn ? "EE" : "FI",
+          lat: 59.43,
+          lng: 24.75,
+          isOwnFacility: isOwn,
+        }),
+      });
+      return ((await res.json()) as { facility: { facilityId: string } }).facility
+        .facilityId;
+    };
+
+    const aHqId = await createAFac("Org A HQ", true);
+    const aTier1Node1 = await createAFac("Partner B Site North");
+    const aTier1Node2 = await createAFac("Partner B Site South");
+
+    const lane1Res = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: aTier1Node1,
+        toFacilityId: aHqId,
+        inputId: input1.inputId,
+        materialCategory: "Chips",
+        volumeSharePct: 50,
+      }),
+    });
+    const { lane: lane1 } = (await lane1Res.json()) as {
+      lane: { laneId: string };
+    };
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: aTier1Node2,
+        toFacilityId: aHqId,
+        materialCategory: "Casing",
+        volumeSharePct: 100,
+      }),
+    });
+
+    // Verify both Tier-1 nodes against the SAME partner organization orgB
+    for (const targetFacilityId of [aTier1Node1, aTier1Node2]) {
+      const invRes = await app.request("/api/v1/invites", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+        body: JSON.stringify({
+          targetFacilityId,
+          inviteeEmail: "leak-b@tier1.fi",
+        }),
+      });
+      const { inviteToken } = (await invRes.json()) as { inviteToken: string };
+      const accRes = await app.request(`/api/v1/invites/${inviteToken}/accept`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+        body: JSON.stringify({}),
+      });
+      expect(accRes.status).toBe(200);
+    }
+
+    // 1. Even with 2 facilities linked to the SAME partnerOrgId, SHARED_UPSTREAM_CHOKEPOINT must NOT be emitted
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    const summary = AnalyticsSummarySchema.parse(await summaryRes.json());
+    expect(
+      summary.alerts.some((a) => a.category === "SHARED_UPSTREAM_CHOKEPOINT"),
+    ).toBe(false);
+
+    // 2. Filtering to product 1 (only 1 partner) must NOT emit SHARED_UPSTREAM_CHOKEPOINT
+    const filteredRes = await app.request(
+      `/api/v1/analytics/summary?productId=${prod1.productId}`,
+      { headers: { Cookie: orgA.cookie } },
+    );
+    const filteredSummary = AnalyticsSummarySchema.parse(
+      await filteredRes.json(),
+    );
+    expect(
+      filteredSummary.alerts.some(
+        (a) => a.category === "SHARED_UPSTREAM_CHOKEPOINT",
+      ),
+    ).toBe(false);
+
+    // 3. Simulating lane1 at 0% volumeSharePct excludes it from active partner resolution
+    const simRes = await app.request("/api/v1/analytics/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        laneChanges: [{ laneId: lane1.laneId, volumeSharePct: 0 }],
+      }),
+    });
+    expect(simRes.status).toBe(200);
+    const sim = SimulateAnalyticsResponseSchema.parse(await simRes.json());
+    expect(
+      sim.simulated.alerts.some(
+        (a) => a.category === "SHARED_UPSTREAM_CHOKEPOINT",
+      ),
+    ).toBe(false);
+    // When lane1 is simulated at 0%, aTier1Node1 is inactive so Org B's Tier-2 geopolitical alert from aTier1Node1 does not appear
+    expect(
+      sim.simulated.alerts.some((a) =>
+        a.affectedTier1FacilityIds.includes(aTier1Node1),
+      ),
+    ).toBe(false);
+  });
 });

@@ -161,6 +161,28 @@ export function evaluateNetworkAnalytics(
   const hhiMetrics: HhiMetric[] = [];
 
   if (activeLanes.length > 0) {
+    const allHaveSpend = activeLanes.every(
+      (lane) =>
+        lane.annualSpendEur !== null &&
+        Number.isFinite(lane.annualSpendEur) &&
+        lane.annualSpendEur > 0,
+    );
+    const allHaveNormalizedVolume =
+      !allHaveSpend &&
+      activeLanes.every((lane) => {
+        const tonnes = toAnnualTonnes(lane.annualVolume, lane.volumeUnit);
+        return tonnes !== null && Number.isFinite(tonnes) && tonnes > 0;
+      });
+    const allHaveRawPositiveVolume =
+      !allHaveSpend &&
+      !allHaveNormalizedVolume &&
+      activeLanes.every(
+        (lane) =>
+          lane.annualVolume !== null &&
+          Number.isFinite(lane.annualVolume) &&
+          lane.annualVolume > 0,
+      );
+
     const supplierEntries: ShareEntry[] = [];
     const countryEntries: ShareEntry[] = [];
     const lanesByMaterialKey = new Map<
@@ -169,12 +191,16 @@ export function evaluateNetworkAnalytics(
     >();
 
     for (const lane of activeLanes) {
-      const weight =
-        lane.annualSpendEur && lane.annualSpendEur > 0
-          ? lane.annualSpendEur
-          : lane.annualVolume && lane.annualVolume > 0
-            ? lane.annualVolume
-            : lane.volumeSharePct;
+      let weight: number;
+      if (allHaveSpend) {
+        weight = lane.annualSpendEur!;
+      } else if (allHaveNormalizedVolume) {
+        weight = toAnnualTonnes(lane.annualVolume, lane.volumeUnit)!;
+      } else if (allHaveRawPositiveVolume) {
+        weight = lane.annualVolume!;
+      } else {
+        weight = lane.volumeSharePct;
+      }
 
       supplierEntries.push({ key: lane.fromFacilityId, weight });
 
@@ -395,17 +421,13 @@ export function evaluateNetworkAnalytics(
     }
 
     for (const [regionKey, affectedIds] of chokepointByRegion) {
-      const isMultiPartner = affectedIds.length > 1;
+      if (affectedIds.length < 2) continue;
       alerts.push({
         alertId: `partner-chokepoint-${regionKey.toLowerCase()}`,
-        severity: isMultiPartner ? "RED" : "YELLOW",
+        severity: "RED",
         category: "SHARED_UPSTREAM_CHOKEPOINT",
-        title: isMultiPartner
-          ? "Shared hidden upstream chokepoint detected"
-          : "Hidden upstream chokepoint exposure",
-        summary: isMultiPartner
-          ? `${affectedIds.length} Network-Verified Tier-1 partners share an anonymized upstream dependency or transit chokepoint.`
-          : "A Network-Verified Tier-1 partner relies on an anonymized upstream chokepoint corridor.",
+        title: "Shared hidden upstream chokepoint detected",
+        summary: `${affectedIds.length} Network-Verified Tier-1 partners share an anonymized upstream dependency or transit chokepoint.`,
         affectedTier1FacilityIds: affectedIds,
         affectedRegionCode: regionKey === "UPSTREAM" ? null : regionKey,
         confidence: "NETWORK_VERIFIED",
@@ -553,6 +575,18 @@ export function simulateNetworkAnalytics(
       );
     }
 
+    let nextAnnualSpendEur = lane.annualSpendEur;
+    if (
+      change.volumeSharePct !== undefined &&
+      lane.annualSpendEur !== null &&
+      lane.annualSpendEur !== undefined &&
+      lane.volumeSharePct > 0
+    ) {
+      nextAnnualSpendEur = round2(
+        lane.annualSpendEur * (change.volumeSharePct / lane.volumeSharePct),
+      );
+    }
+
     const nextTransportMode = change.transportMode ?? lane.transportMode;
     const nextRiskStatus = change.riskStatus ?? lane.riskStatus;
 
@@ -566,6 +600,7 @@ export function simulateNetworkAnalytics(
       ...lane,
       volumeSharePct: nextVolumeSharePct,
       annualVolume: nextAnnualVolume,
+      annualSpendEur: nextAnnualSpendEur,
       transportMode: nextTransportMode,
       riskStatus: nextRiskStatus,
       estimatedLaneCo2e: transportOrVolumeChanged ? null : lane.estimatedLaneCo2e,

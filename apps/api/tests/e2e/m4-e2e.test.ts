@@ -284,4 +284,159 @@ describe("Milestone 4 E2E — Org ESG Settings, Bulk CSV/JSON Import/Export & CS
     );
     expect(report.topRecommendedActions.length).toBeGreaterThan(0);
   });
+
+  it("neutralizes CSV formula injection, enforces MAX_CSV_ROWS, rejects invalid booleans, and round-trips duplicate facility names losslessly", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, {
+      email: "csv-sec@tallinn-ops.ee",
+      organizationName: "Tallinn CSV Hardening AS",
+    });
+
+    // 1. Neutralizes formula-injection cells on CSV export while preserving negative numeric coordinates
+    const hqRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "=CMD('calc')",
+        kind: "HQ",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: -24.7536,
+        isOwnFacility: true,
+        sector: "+SUM(A1:A2)",
+      }),
+    });
+    expect(hqRes.status).toBe(201);
+    const { facility: facHq } = (await hqRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    // Two distinct facilities with the exact same name
+    const dup1Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Shared Plant Name",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 60.17,
+        lng: 24.94,
+      }),
+    });
+    const { facility: dup1 } = (await dup1Res.json()) as {
+      facility: { facilityId: string };
+    };
+    const dup2Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Shared Plant Name",
+        kind: "WAREHOUSE",
+        countryCode: "SE",
+        lat: 59.33,
+        lng: 18.07,
+      }),
+    });
+    const { facility: dup2 } = (await dup2Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: dup2.facilityId,
+        toFacilityId: facHq.facilityId,
+        materialCategory: "Copper",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+      }),
+    });
+    expect(dup1.facilityId).not.toBe(dup2.facilityId);
+
+    const exportCsvRes = await app.request(
+      "/api/v1/workspace/export?format=csv",
+      { headers: { Cookie: orgA.cookie } },
+    );
+    expect(exportCsvRes.status).toBe(200);
+    const exportedCsv = await exportCsvRes.text();
+    // Dangerous formulas are prefixed with single-quote guard, negative coordinate is preserved unquoted
+    expect(exportedCsv).toContain("'=CMD('calc')");
+    expect(exportedCsv).toContain("'+SUM(A1:A2)");
+    expect(exportedCsv).toContain(",-24.7536,");
+    expect(exportedCsv).toContain("fromFacilityId,toFacilityId");
+
+    // Round-trip into Org B preserves exact link to dup2 (SE WAREHOUSE), not dup1 (FI FACTORY)
+    const orgB = await registerOrg(app, {
+      email: "csv-roundtrip-b@tallinn-ops.ee",
+      organizationName: "Roundtrip B AS",
+    });
+    const roundTripRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/csv", Cookie: orgB.cookie },
+      body: exportedCsv,
+    });
+    expect(roundTripRes.status).toBe(200);
+    const rtSummary = BulkImportSummarySchema.parse(await roundTripRes.json());
+    expect(rtSummary.createdFacilities).toBe(3);
+    expect(rtSummary.createdLanes).toBe(1);
+    expect(rtSummary.errors).toHaveLength(0);
+
+    const orgBNet = WorkspaceNetworkResponseSchema.parse(
+      await (
+        await app.request("/api/v1/workspace/network", {
+          headers: { Cookie: orgB.cookie },
+        })
+      ).json(),
+    );
+    const importedLane = orgBNet.lanes[0]!;
+    const sourceFac = orgBNet.facilities.find(
+      (f) => f.facilityId === importedLane.fromFacilityId,
+    );
+    expect(sourceFac?.countryCode).toBe("SE");
+    expect(sourceFac?.kind).toBe("WAREHOUSE");
+
+    // 2. Re-importing same CSV into Org B deduplicates existing facilities instead of duplicating them
+    const reImportRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/csv", Cookie: orgB.cookie },
+      body: exportedCsv,
+    });
+    expect(reImportRes.status).toBe(200);
+    const reSummary = BulkImportSummarySchema.parse(await reImportRes.json());
+    expect(reSummary.createdFacilities).toBe(0);
+
+    // 3. Invalid boolean strings in isOwnFacility produce a row-level error instead of coercing to false
+    const badBoolCsv = [
+      "recordType,name,countryCode,lat,lng,isOwnFacility",
+      "FACILITY,Invalid Bool Plant,EE,59.437,24.7536,maybe",
+    ].join("\n");
+    const badBoolRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/csv", Cookie: orgB.cookie },
+      body: badBoolCsv,
+    });
+    expect(badBoolRes.status).toBe(200);
+    const badBoolSummary = BulkImportSummarySchema.parse(
+      await badBoolRes.json(),
+    );
+    expect(badBoolSummary.createdFacilities).toBe(0);
+    expect(badBoolSummary.errors).toHaveLength(1);
+    expect(badBoolSummary.errors[0]?.field).toBe("isOwnFacility");
+
+    // 4. Exceeding MAX_CSV_ROWS (1505) returns 400 validation error
+    const tooManyRowsCsv = [
+      "recordType,name,countryCode,lat,lng",
+      ...Array.from(
+        { length: 1506 },
+        (_, i) => `FACILITY,Plant ${i},EE,59.437,24.7536`,
+      ),
+    ].join("\n");
+    const tooManyRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/csv", Cookie: orgB.cookie },
+      body: tooManyRowsCsv,
+    });
+    expect(tooManyRes.status).toBe(400);
+  });
 });
