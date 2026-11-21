@@ -37,6 +37,7 @@ pnpm --filter @kulgo/web test:e2e    # Run live Playwright browser E2E suite
 
 ## Documentation
 * [Product & Engineering Roadmap](docs/ROADMAP.md)
+* [AI & Engineering Decision Ledger (Append-Only)](docs/AI_LEDGER.md)
 * [Architecture](docs/ARCHITECTURE.md)
 * [Privacy Contract](docs/PRIVACY_CONTRACT.md)
 * [Deployment & Operations Guide](docs/DEPLOYMENT.md)
