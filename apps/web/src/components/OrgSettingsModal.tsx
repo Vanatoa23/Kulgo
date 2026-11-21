@@ -8,6 +8,7 @@ import type {
   UserRole,
 } from "@kulgo/shared";
 import {
+  Bell,
   CheckCircle2,
   Leaf,
   Loader2,
@@ -25,9 +26,11 @@ import {
 import { useCallback, useEffect, useState, type FormEvent } from "react";
 import {
   addOrgMember,
+  getAlertPreferences,
   listAuditEvents,
   listOrgMembers,
   removeOrgMember,
+  updateAlertPreferences,
   updateOrganizationProfile,
 } from "../lib/api.js";
 
@@ -117,6 +120,47 @@ export function OrgSettingsModal({
   const [loadingAuditLog, setLoadingAuditLog] = useState(false);
   const [auditLogError, setAuditLogError] = useState<string | null>(null);
 
+  // Alert Notification Channels (Sub-Project 1)
+  const [instantRedEmailEnabled, setInstantRedEmailEnabled] = useState(true);
+  const [dailyAmberDigestEnabled, setDailyAmberDigestEnabled] = useState(true);
+  const [alertRecipientsText, setAlertRecipientsText] = useState("");
+  const [webhookUrlText, setWebhookUrlText] = useState("");
+  const [webhookSecretText, setWebhookSecretText] = useState("");
+  const [webhookSecretConfigured, setWebhookSecretConfigured] = useState(false);
+  const [savingAlertPrefs, setSavingAlertPrefs] = useState(false);
+  const [alertPrefsSaved, setAlertPrefsSaved] = useState(false);
+  const [alertPrefsError, setAlertPrefsError] = useState<string | null>(null);
+
+  const handleSaveAlertPrefs = async (e: FormEvent) => {
+    e.preventDefault();
+    if (!isOwner) return;
+    setSavingAlertPrefs(true);
+    setAlertPrefsError(null);
+    setAlertPrefsSaved(false);
+    try {
+      const updated = await updateAlertPreferences({
+        instantRedEmailEnabled,
+        dailyAmberDigestEnabled,
+        emailRecipients: parseCommaList(alertRecipientsText),
+        webhookUrl: webhookUrlText.trim() || null,
+        ...(webhookSecretText.trim()
+          ? { webhookSecret: webhookSecretText.trim() }
+          : {}),
+      });
+      setWebhookSecretConfigured(updated.webhookSecretConfigured);
+      setWebhookSecretText("");
+      setAlertPrefsSaved(true);
+    } catch (err) {
+      setAlertPrefsError(
+        err instanceof Error
+          ? err.message
+          : "Failed to save alert notification preferences.",
+      );
+    } finally {
+      setSavingAlertPrefs(false);
+    }
+  };
+
   const refreshAuditLog = useCallback(async () => {
     if (!isOwner) return;
     setLoadingAuditLog(true);
@@ -155,8 +199,25 @@ export function OrgSettingsModal({
     setNewMemberPassword("");
     setNewMemberRole("MEMBER");
     setAuditLogError(null);
+    setAlertPrefsError(null);
+    setAlertPrefsSaved(false);
+    setWebhookSecretText("");
 
     let cancelled = false;
+    getAlertPreferences()
+      .then((pref) => {
+        if (!cancelled) {
+          setInstantRedEmailEnabled(pref.instantRedEmailEnabled);
+          setDailyAmberDigestEnabled(pref.dailyAmberDigestEnabled);
+          setAlertRecipientsText(pref.emailRecipients.join(", "));
+          setWebhookUrlText(pref.webhookUrl ?? "");
+          setWebhookSecretConfigured(pref.webhookSecretConfigured);
+        }
+      })
+      .catch(() => {
+        // Ignore non-fatal error when alert prefs are unavailable
+      });
+
     setLoadingMembers(true);
     listOrgMembers()
       .then((list) => {
@@ -824,6 +885,125 @@ export function OrgSettingsModal({
               )}
             </section>
           )}
+
+          {/* Alert Notification Channels (Sub-Project 1) */}
+          <section className="space-y-3 pt-4 border-t border-slate-800">
+            <div className="flex items-center justify-between">
+              <div className="flex items-center gap-2">
+                <Bell className="h-4 w-4 text-cyan-400" />
+                <h3 className="text-sm font-semibold text-white">
+                  Live Disruption Alert Channels
+                </h3>
+              </div>
+              {webhookSecretConfigured && (
+                <span className="rounded-full bg-emerald-500/15 border border-emerald-500/35 px-2 py-0.5 text-[10px] text-emerald-300">
+                  HMAC Secret Configured
+                </span>
+              )}
+            </div>
+            <p className="text-xs text-slate-400">
+              Anti-fatigue delivery: instant emails &amp; signed webhooks fire
+              only for new confirmed/corroborated RED disruptions.
+            </p>
+
+            <form onSubmit={(e) => void handleSaveAlertPrefs(e)} className="space-y-3">
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <label className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    disabled={!isOwner}
+                    checked={instantRedEmailEnabled}
+                    onChange={(e) => setInstantRedEmailEnabled(e.target.checked)}
+                    className="rounded border-slate-700 bg-slate-950 text-emerald-500"
+                  />
+                  Instant RED Email Alerts
+                </label>
+                <label className="flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-900/50 px-3 py-2 text-xs text-slate-200 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    disabled={!isOwner}
+                    checked={dailyAmberDigestEnabled}
+                    onChange={(e) =>
+                      setDailyAmberDigestEnabled(e.target.checked)
+                    }
+                    className="rounded border-slate-700 bg-slate-950 text-emerald-500"
+                  />
+                  Daily AMBER Morning Digest
+                </label>
+              </div>
+
+              <div>
+                <label className="block text-[11px] font-medium text-slate-300 mb-1">
+                  Alert Email Recipients (comma-separated)
+                </label>
+                <input
+                  type="text"
+                  disabled={!isOwner}
+                  value={alertRecipientsText}
+                  onChange={(e) => setAlertRecipientsText(e.target.value)}
+                  placeholder="ops@company.eu, risk@company.eu"
+                  className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none disabled:opacity-60"
+                />
+              </div>
+
+              <div className="grid grid-cols-1 sm:grid-cols-2 gap-2.5">
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-300 mb-1">
+                    Webhook URL (optional)
+                  </label>
+                  <input
+                    type="url"
+                    disabled={!isOwner}
+                    value={webhookUrlText}
+                    onChange={(e) => setWebhookUrlText(e.target.value)}
+                    placeholder="https://hooks.company.eu/kulgo"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+                <div>
+                  <label className="block text-[11px] font-medium text-slate-300 mb-1">
+                    HMAC Signing Secret (min 16 chars)
+                  </label>
+                  <input
+                    type="password"
+                    disabled={!isOwner}
+                    value={webhookSecretText}
+                    onChange={(e) => setWebhookSecretText(e.target.value)}
+                    placeholder={
+                      webhookSecretConfigured
+                        ? "•••••••• (leave blank to keep)"
+                        : "Enter signing secret"
+                    }
+                    className="w-full rounded-lg border border-slate-800 bg-slate-950 px-3 py-2 text-xs text-white placeholder-slate-500 focus:border-cyan-500 focus:outline-none disabled:opacity-60"
+                  />
+                </div>
+              </div>
+
+              {alertPrefsError && (
+                <p className="text-xs text-red-400">{alertPrefsError}</p>
+              )}
+              {alertPrefsSaved && (
+                <p className="text-xs text-emerald-400">
+                  Alert notification channels saved.
+                </p>
+              )}
+
+              {isOwner && (
+                <div className="flex justify-end">
+                  <button
+                    type="submit"
+                    disabled={savingAlertPrefs}
+                    className="inline-flex items-center gap-1.5 rounded-lg bg-cyan-600 hover:bg-cyan-500 disabled:opacity-50 px-3 py-1.5 text-xs font-medium text-white cursor-pointer"
+                  >
+                    {savingAlertPrefs && (
+                      <Loader2 className="h-3.5 w-3.5 animate-spin" />
+                    )}
+                    Save Alert Channels
+                  </button>
+                </div>
+              )}
+            </form>
+          </section>
 
           {/* Footer Close */}
           <div className="flex items-center justify-end pt-2 border-t border-slate-800">

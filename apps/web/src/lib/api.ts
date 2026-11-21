@@ -1,6 +1,7 @@
 import {
   AcceptInviteResponseSchema,
   AddOrgMemberResponseSchema,
+  AlertNotificationPreferenceSchema,
   AnalyticsSummarySchema,
   AuthMeResponseSchema,
   BulkImportSummarySchema,
@@ -12,9 +13,11 @@ import {
   ListAuditEventsResponseSchema,
   ListInvitesResponseSchema,
   ListOrgMembersResponseSchema,
+  OrgAlertAckSchema,
   ProductSchema,
   RemoveOrgMemberResponseSchema,
   RevokeInviteResponseSchema,
+  RiskSignalSchema,
   SimulateAnalyticsResponseSchema,
   SupplyInputSchema,
   SupplyLaneSchema,
@@ -24,12 +27,14 @@ import {
   type AcceptInviteInput,
   type AcceptInviteResponse,
   type AddOrgMemberInput,
+  type AlertNotificationPreference,
   type AlternativeCandidate,
   type AnalyticsSummary,
   type AuditEvent,
   type AuthMeResponse,
   type BulkImportJsonRequest,
   type BulkImportSummary,
+  type ChokepointCode,
   type CreateFacilityInput,
   type CreateInviteInput,
   type CreateInviteResponse,
@@ -42,11 +47,15 @@ import {
   type Invitation,
   type LoginInput,
   type Organization,
+  type OrgAlertAck,
   type OrgMember,
   type Product,
   type RegisterInput,
   type RemoveOrgMemberResponse,
   type RevokeInviteResponse,
+  type RiskSignal,
+  type RiskSignalKind,
+  type RiskStatus,
   type SimulateAnalyticsRequest,
   type SimulateAnalyticsResponse,
   type SupplyInput,
@@ -585,6 +594,113 @@ export async function listAuditEvents(limit = 50): Promise<AuditEvent[]> {
   );
   return result.events;
 }
+
+// --- Live Disruption Monitoring & Proactive Alerts (Sub-Project 1) ---
+
+export interface LiveAlertFeedResponse {
+  signals: RiskSignal[];
+  facilityMatches: Array<{
+    facilityId: string;
+    signalId: string;
+    matchType: "POLYGON" | "COUNTRY" | "REGION";
+    severity: RiskStatus;
+  }>;
+  laneMatches: Array<{
+    laneId: string;
+    signalId: string;
+    matchedChokepoints: ChokepointCode[];
+    severity: RiskStatus;
+  }>;
+  partnerRegionAlerts: Array<{
+    signalId: string;
+    kind: RiskSignalKind;
+    severity: RiskStatus;
+    title: string;
+    countryCode: string | null;
+    regionCode: string | null;
+    matchedChokepoints: ChokepointCode[];
+  }>;
+  acknowledgements: OrgAlertAck[];
+}
+
+export interface UpdateAlertPreferencesInput {
+  instantRedEmailEnabled?: boolean;
+  dailyAmberDigestEnabled?: boolean;
+  emailRecipients?: string[];
+  webhookUrl?: string | null;
+  webhookSecret?: string | null;
+}
+
+export async function getAlertFeed(): Promise<LiveAlertFeedResponse> {
+  return apiRequest("/api/v1/alerts/feed", { method: "GET" }, (payload) => {
+    if (typeof payload !== "object" || payload === null) {
+      throw new ApiError(500, "Unexpected alert feed response format", payload);
+    }
+    const raw = payload as Record<string, unknown>;
+    const signals = Array.isArray(raw.signals)
+      ? raw.signals.map((s) => parseWithSchema(RiskSignalSchema, s))
+      : [];
+    const acknowledgements = Array.isArray(raw.acknowledgements)
+      ? raw.acknowledgements.map((a) => parseWithSchema(OrgAlertAckSchema, a))
+      : [];
+    return {
+      signals,
+      facilityMatches: Array.isArray(raw.facilityMatches)
+        ? (raw.facilityMatches as LiveAlertFeedResponse["facilityMatches"])
+        : [],
+      laneMatches: Array.isArray(raw.laneMatches)
+        ? (raw.laneMatches as LiveAlertFeedResponse["laneMatches"])
+        : [],
+      partnerRegionAlerts: Array.isArray(raw.partnerRegionAlerts)
+        ? (raw.partnerRegionAlerts as LiveAlertFeedResponse["partnerRegionAlerts"])
+        : [],
+      acknowledgements,
+    };
+  });
+}
+
+export async function acknowledgeAlert(
+  signalId: string,
+  input: { status: "ACKNOWLEDGED" | "MUTED"; note?: string | null },
+): Promise<OrgAlertAck> {
+  return apiRequest(
+    `/api/v1/alerts/${encodeURIComponent(signalId)}/ack`,
+    { method: "POST", body: input },
+    (payload) => parseWithSchema(OrgAlertAckSchema, payload),
+  );
+}
+
+export async function getAlertPreferences(): Promise<AlertNotificationPreference> {
+  return apiRequest("/api/v1/alerts/preferences", { method: "GET" }, (payload) =>
+    parseWithSchema(AlertNotificationPreferenceSchema, payload),
+  );
+}
+
+export async function updateAlertPreferences(
+  input: UpdateAlertPreferencesInput,
+): Promise<AlertNotificationPreference> {
+  return apiRequest(
+    "/api/v1/alerts/preferences",
+    { method: "PATCH", body: input },
+    (payload) => parseWithSchema(AlertNotificationPreferenceSchema, payload),
+  );
+}
+
+export async function triggerAlertSweep(): Promise<{
+  upsertedNew: number;
+  upsertedMerged: number;
+  resolvedExpired: number;
+}> {
+  return apiRequest("/api/v1/alerts/sweep", { method: "POST" }, (payload) => {
+    const raw = (payload ?? {}) as Record<string, unknown>;
+    return {
+      upsertedNew: Number(raw.upsertedNew ?? 0),
+      upsertedMerged: Number(raw.upsertedMerged ?? 0),
+      resolvedExpired: Number(raw.resolvedExpired ?? 0),
+    };
+  });
+}
+
 
 
 
