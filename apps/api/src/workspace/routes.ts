@@ -564,11 +564,17 @@ export function createWorkspaceRoutes({
 
     try {
       const { lines, ...contractInput } = parsed.data;
-      const contract = await workspaceRepo.createContract(orgId, contractInput);
+      const contract = await workspaceRepo.createContract(
+        orgId,
+        contractInput as Parameters<typeof workspaceRepo.createContract>[1],
+      );
       const createdLines = [];
       for (const lineInput of lines ?? []) {
         const line = await workspaceRepo.createContractLine(orgId, {
-          ...lineInput,
+          ...(lineInput as Omit<
+            Parameters<typeof workspaceRepo.createContractLine>[1],
+            "contractId"
+          >),
           contractId: contract.contractId,
         });
         createdLines.push(line);
@@ -633,7 +639,10 @@ export function createWorkspaceRoutes({
 
     try {
       const line = await workspaceRepo.createContractLine(orgId, {
-        ...parsed.data,
+        ...(parsed.data as Omit<
+          Parameters<typeof workspaceRepo.createContractLine>[1],
+          "contractId"
+        >),
         contractId,
       });
       return c.json({ line }, 201);
@@ -707,7 +716,9 @@ export function createWorkspaceRoutes({
       );
     }
 
-    const poRows: ErpPoHistoryRow[] = [...(parsed.data.rows ?? [])];
+    const poRows: ErpPoHistoryRow[] = [
+      ...((parsed.data.rows ?? []) as ErpPoHistoryRow[]),
+    ];
     if (parsed.data.csv) {
       const lines = parsed.data.csv
         .split(/\r?\n/)
@@ -731,7 +742,7 @@ export function createWorkspaceRoutes({
             currency: (get("currency") || "EUR").toUpperCase(),
           });
           if (rowCandidate.success) {
-            poRows.push(rowCandidate.data);
+            poRows.push(rowCandidate.data as ErpPoHistoryRow);
           }
         }
       }
