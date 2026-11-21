@@ -60,6 +60,18 @@ const RawEnvSchema = z.object({
     .int()
     .min(1024)
     .default(5_242_880),
+  // --- Live Disruption Monitoring & AI API Centre (all optional for €0 MVP / test) ---
+  INTELLIGENCE_SWEEP_ENABLED: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v === "true"),
+  GEMINI_API_KEY: z.string().min(1).optional(),
+  GROQ_API_KEY: z.string().min(1).optional(),
+  OPENAI_API_KEY: z.string().min(1).optional(),
+  OPENROUTER_API_KEY: z.string().min(1).optional(),
+  RESEND_API_KEY: z.string().min(1).optional(),
+  BREVO_API_KEY: z.string().min(1).optional(),
+  ALERT_FROM_EMAIL: z.string().email().default("alerts@kulgo.eu"),
 });
 
 const EnvSchema = RawEnvSchema.superRefine((data, ctx) => {

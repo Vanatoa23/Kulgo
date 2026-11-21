@@ -1,10 +1,11 @@
-import type {
-  AuthMeResponse,
-  Facility,
-  Product,
-  SupplyInput,
-  SupplyLane,
-  WorkspaceNetworkResponse,
+import {
+  RiskSignalSchema,
+  type AuthMeResponse,
+  type Facility,
+  type Product,
+  type SupplyInput,
+  type SupplyLane,
+  type WorkspaceNetworkResponse,
 } from "@kulgo/shared";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import {
@@ -558,7 +559,7 @@ describe("api client", () => {
 
   it("parses RiskSignal WKT polygons for Deck.gl PolygonLayer", () => {
     const polygons = buildRiskSignalPolygons([
-      {
+      RiskSignalSchema.parse({
         signalId: "sig-lv",
         kind: "SANCTIONS",
         severity: "RED",
@@ -569,7 +570,7 @@ describe("api client", () => {
         polygonWkt:
           "POLYGON ((20.9 55.6, 28.3 55.6, 28.3 58.1, 20.9 58.1, 20.9 55.6))",
         active: true,
-      },
+      }),
     ]);
     expect(polygons).toHaveLength(1);
     expect(polygons[0]!.polygon).toHaveLength(5);

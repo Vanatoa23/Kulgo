@@ -108,8 +108,45 @@ export const RiskSignalKindSchema = z.enum([
   "MARITIME_CHOKEPOINT",
   "PORT_CONGESTION",
   "CLIMATE",
+  "LABOR_INDUSTRIAL",
+  "CYBER_FINANCIAL",
 ]);
 export type RiskSignalKind = z.infer<typeof RiskSignalKindSchema>;
+
+export const ChokepointCodeSchema = z.enum([
+  "SUEZ_CANAL",
+  "RED_SEA_BAB_EL_MANDEB",
+  "PANAMA_CANAL",
+  "MALACCA_STRAIT",
+  "STRAIT_OF_HORMUZ",
+  "BOSPORUS_STRAIT",
+  "BALTIC_SEA",
+  "DANISH_STRAITS",
+  "NORTH_SEA",
+  "ENGLISH_CHANNEL",
+  "ALPINE_BRENNER_CORRIDOR",
+  "ALPINE_GOTTHARD_CORRIDOR",
+  "RHINE_VALLEY_CORRIDOR",
+  "BALTIC_VIA_BALTICA_CORRIDOR",
+  "EU_EASTERN_BORDER_CORRIDOR",
+]);
+export type ChokepointCode = z.infer<typeof ChokepointCodeSchema>;
+
+export const RiskSignalVerificationStatusSchema = z.enum([
+  "CONFIRMED",
+  "CORROBORATED",
+  "ALLEGED",
+]);
+export type RiskSignalVerificationStatus = z.infer<
+  typeof RiskSignalVerificationStatusSchema
+>;
+
+export const RiskSignalLifecycleSchema = z.enum([
+  "PLANNED",
+  "ACTIVE",
+  "RESOLVED",
+]);
+export type RiskSignalLifecycle = z.infer<typeof RiskSignalLifecycleSchema>;
 
 export const RiskSignalSchema = z
   .object({
@@ -120,11 +157,49 @@ export const RiskSignalSchema = z
     description: z.string().max(1000).nullable().default(null),
     regionCode: z.string().max(64).nullable().default(null),
     affectedCountryCodes: z.array(z.string().length(2)).default([]),
+    affectedChokepoints: z.array(ChokepointCodeSchema).default([]),
+    affectedSectors: z.array(z.string().max(100)).default([]),
     polygonWkt: z.string().min(1),
+    sourceUrls: z.array(z.string().url()).default([]),
+    publishedAt: z.string().datetime().nullable().default(null),
+    lastSeenAt: z.string().datetime().nullable().default(null),
+    expiresAt: z.string().datetime().nullable().default(null),
+    resolvedAt: z.string().datetime().nullable().default(null),
+    dedupeKey: z.string().max(128).nullable().default(null),
+    confidence: z.number().min(0).max(1).default(1),
+    verificationStatus: RiskSignalVerificationStatusSchema.default("CONFIRMED"),
+    lifecycle: RiskSignalLifecycleSchema.default("ACTIVE"),
     active: z.boolean().default(true),
   })
   .strict();
 export type RiskSignal = z.infer<typeof RiskSignalSchema>;
+
+export const AlertNotificationPreferenceSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    instantRedEmailEnabled: z.boolean().default(true),
+    dailyAmberDigestEnabled: z.boolean().default(true),
+    emailRecipients: z.array(z.string().email()).max(20).default([]),
+    webhookUrl: z.string().url().nullable().default(null),
+    webhookSecretConfigured: z.boolean().default(false),
+    updatedAt: z.string().datetime(),
+  })
+  .strict();
+export type AlertNotificationPreference = z.infer<
+  typeof AlertNotificationPreferenceSchema
+>;
+
+export const OrgAlertAckSchema = z
+  .object({
+    orgId: z.string().uuid(),
+    signalId: z.string().min(1),
+    status: z.enum(["ACKNOWLEDGED", "MUTED"]),
+    acknowledgedByUserId: z.string().uuid(),
+    note: z.string().max(500).nullable().default(null),
+    acknowledgedAt: z.string().datetime(),
+  })
+  .strict();
+export type OrgAlertAck = z.infer<typeof OrgAlertAckSchema>;
 
 export const WorkspaceNetworkResponseSchema = z
   .object({
