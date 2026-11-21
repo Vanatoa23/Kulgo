@@ -63,7 +63,7 @@ services:
       api:
         condition: service_healthy
     ports:
-      - "${WEB_PORT:-8080}:80"
+      - "${WEB_PORT:-8080}:8080"
     networks:
       - kulgo-internal
 

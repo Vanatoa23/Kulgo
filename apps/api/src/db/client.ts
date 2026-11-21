@@ -5,6 +5,7 @@ export interface ArcadeDbConfig {
   database: string;
   user: string;
   password: string;
+  queryTimeoutMs?: number;
 }
 
 export interface ArcadeDbHealth {
@@ -27,6 +28,8 @@ export interface ArcadeDbClient {
   ): Promise<T[]>;
 }
 
+const DEFAULT_QUERY_TIMEOUT_MS = 10_000;
+
 /**
  * Hardened ArcadeDB HTTP/JSON client.
  * - Uses exclusively parameterized queries to prevent SQL/Cypher injection.
@@ -36,10 +39,12 @@ export class HttpArcadeDbClient implements ArcadeDbClient {
   private readonly baseUrl: string;
   private readonly authHeader: string;
   private readonly database: string;
+  private readonly queryTimeoutMs: number;
 
   constructor(config: ArcadeDbConfig) {
     this.baseUrl = config.url.replace(/\/+$/, "");
     this.database = config.database;
+    this.queryTimeoutMs = config.queryTimeoutMs ?? DEFAULT_QUERY_TIMEOUT_MS;
     const credentials = Buffer.from(
       `${config.user}:${config.password}`,
       "utf8",
@@ -72,6 +77,7 @@ export class HttpArcadeDbClient implements ArcadeDbClient {
       {
         method: "GET",
         headers: { Authorization: this.authHeader },
+        signal: AbortSignal.timeout(this.queryTimeoutMs),
       },
     );
     if (!existsRes.ok) {
@@ -91,6 +97,7 @@ export class HttpArcadeDbClient implements ArcadeDbClient {
       body: JSON.stringify({
         command: `create database ${this.database}`,
       }),
+      signal: AbortSignal.timeout(this.queryTimeoutMs),
     });
     if (!createRes.ok) {
       const body = await createRes.text();
@@ -135,6 +142,7 @@ export class HttpArcadeDbClient implements ArcadeDbClient {
           command: statement,
           params,
         }),
+        signal: AbortSignal.timeout(this.queryTimeoutMs),
       },
     );
     if (!res.ok) {

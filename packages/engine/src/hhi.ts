@@ -16,12 +16,12 @@ export function computeHhi(
 ): HhiMetric {
   const aggregated = new Map<string, number>();
   for (const entry of entries) {
-    if (entry.weight <= 0) continue;
+    if (!Number.isFinite(entry.weight) || entry.weight <= 0) continue;
     aggregated.set(entry.key, (aggregated.get(entry.key) ?? 0) + entry.weight);
   }
 
   const total = Array.from(aggregated.values()).reduce((sum, v) => sum + v, 0);
-  if (total <= 0) {
+  if (!Number.isFinite(total) || total <= 0) {
     return {
       dimension,
       label,
@@ -38,8 +38,8 @@ export function computeHhi(
     rawHhi += sharePct * sharePct;
   }
 
-  rawHhi = Math.round(rawHhi);
-  const normalizedScore = Math.min(100, Math.round(rawHhi / 100));
+  rawHhi = Math.min(10000, Math.max(0, Math.round(rawHhi)));
+  const normalizedScore = Math.min(100, Math.max(0, Math.round(rawHhi / 100)));
   const isSinglePointOfFailure = aggregated.size === 1;
 
   let concentrationLevel: HhiMetric["concentrationLevel"] = "LOW";

@@ -1,7 +1,7 @@
-import { createHash, randomBytes } from "node:crypto";
+import { createHmac, randomBytes } from "node:crypto";
 import type { Context } from "hono";
 import { getCookie, setCookie } from "hono/cookie";
-import type { AppConfig } from "../config.js";
+import { DEFAULT_SESSION_SECRET, type AppConfig } from "../config.js";
 
 export const SESSION_COOKIE_NAME = "kulgo_session";
 export const SESSION_TTL_SECONDS = 60 * 60 * 24 * 7; // 7 days
@@ -10,8 +10,15 @@ export function generateSessionToken(): string {
   return randomBytes(32).toString("base64url");
 }
 
-export function hashSessionToken(token: string): string {
-  return createHash("sha256").update(token, "utf8").digest("hex");
+export function hashSessionToken(
+  token: string,
+  secret: string = process.env.SESSION_SECRET || DEFAULT_SESSION_SECRET,
+): string {
+  const effectiveSecret =
+    secret && secret.length > 0 ? secret : DEFAULT_SESSION_SECRET;
+  return createHmac("sha256", effectiveSecret)
+    .update(token, "utf8")
+    .digest("hex");
 }
 
 export function computeSessionExpiryIso(nowMs: number = Date.now()): string {

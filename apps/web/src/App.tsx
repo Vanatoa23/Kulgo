@@ -316,6 +316,10 @@ export function App() {
           f.facilityId === facilityId ? updated : f,
         ),
       }));
+      if (input.lat !== undefined || input.lng !== undefined) {
+        const refreshed = await getNetwork();
+        setNetwork(refreshed);
+      }
       if (refiningFacilityId === facilityId) {
         setRefiningFacilityId(null);
       }
@@ -385,6 +389,9 @@ export function App() {
       setNetwork((prev) => ({
         ...prev,
         products: prev.products.filter((p) => p.productId !== productId),
+        inputs: prev.inputs.map((i) =>
+          i.productId === productId ? { ...i, productId: null } : i,
+        ),
       }));
       if (activeProductId === productId) {
         setActiveProductId(null);
@@ -406,6 +413,9 @@ export function App() {
       setNetwork((prev) => ({
         ...prev,
         inputs: prev.inputs.filter((i) => i.inputId !== inputId),
+        lanes: prev.lanes.map((l) =>
+          l.inputId === inputId ? { ...l, inputId: null } : l,
+        ),
       }));
       if (activeInputId === inputId) {
         setActiveInputId(null);
@@ -483,6 +493,7 @@ export function App() {
     <div className="h-screen bg-slate-950 text-slate-100 flex flex-col overflow-hidden">
       <FilterBar
         user={session.user}
+        userRole={session.user.role}
         organization={session.organization}
         products={network.products}
         inputs={filtered.inputs}
@@ -636,6 +647,7 @@ export function App() {
         <WorkspaceSidebar
           activeTab={activeTab}
           onChangeTab={setActiveTab}
+          userRole={session.user.role}
           products={network.products}
           inputs={network.inputs}
           facilities={network.facilities}
@@ -699,7 +711,7 @@ export function App() {
         />
 
         <AcceptInviteModal
-          open={acceptInviteOpen}
+          open={acceptInviteOpen && session.user.role === "OWNER"}
           initialToken={pendingInviteToken}
           organization={session.organization}
           onClose={() => {

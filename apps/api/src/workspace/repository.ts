@@ -143,8 +143,8 @@ function filterNetwork(
     facilityIds.add(lane.fromFacilityId);
     facilityIds.add(lane.toFacilityId);
   }
-  const facilities = network.facilities.filter((f) =>
-    facilityIds.has(f.facilityId),
+  const facilities = network.facilities.filter(
+    (f) => f.isOwnFacility || facilityIds.has(f.facilityId),
   );
 
   const matchedProductIds = new Set<string>();
@@ -167,6 +167,10 @@ function filterNetwork(
     lanes,
     riskSignals: network.riskSignals,
   });
+}
+
+export interface WorkspaceRepositoryHooks {
+  onFacilityDeleted?: (orgId: string, facilityId: string) => Promise<void>;
 }
 
 export interface WorkspaceRepository {
@@ -305,7 +309,23 @@ function mapSupplyLaneRow(row: Record<string, unknown>): SupplyLane {
  * Every query and mutation filters by `ownerOrgId = :orgId` using parameterized SQL.
  */
 export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
-  constructor(private readonly db: ArcadeDbClient) {}
+  private onFacilityDeleted?: (
+    orgId: string,
+    facilityId: string,
+  ) => Promise<void>;
+
+  constructor(
+    private readonly db: ArcadeDbClient,
+    hooks?: WorkspaceRepositoryHooks,
+  ) {
+    this.onFacilityDeleted = hooks?.onFacilityDeleted;
+  }
+
+  setOnFacilityDeleted(
+    hook: (orgId: string, facilityId: string) => Promise<void>,
+  ): void {
+    this.onFacilityDeleted = hook;
+  }
 
   async getNetwork(
     orgId: string,
@@ -891,6 +911,19 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
 
     await this.db.command(
       "sql",
+      `UPDATE Invitation SET status = 'REVOKED'
+       WHERE fromOrgId = :orgId
+         AND targetFacilityId = :facilityId
+         AND status = 'PENDING'`,
+      { orgId: safeOrgId, facilityId },
+    );
+    await this.db.command(
+      "sql",
+      "DELETE EDGE VERIFIED_PARTNER_LINK WHERE out.facilityId = :facilityId AND out.ownerOrgId = :orgId",
+      { orgId: safeOrgId, facilityId },
+    );
+    await this.db.command(
+      "sql",
       "DELETE EDGE SUPPLIES_LANE WHERE ownerOrgId = :orgId AND (fromFacilityId = :facilityId OR toFacilityId = :facilityId)",
       { orgId: safeOrgId, facilityId },
     );
@@ -899,6 +932,9 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       "DELETE VERTEX FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :orgId",
       { facilityId, orgId: safeOrgId },
     );
+    if (this.onFacilityDeleted) {
+      await this.onFacilityDeleted(safeOrgId, facilityId);
+    }
     return true;
   }
 
@@ -1175,12 +1211,40 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     });
 
     if (endpointsChanged) {
-      await this.db.command(
+      const existingRidRows = await this.db.query<Record<string, unknown>>(
         "sql",
-        "DELETE EDGE SUPPLIES_LANE WHERE laneId = :laneId AND ownerOrgId = :orgId",
-        { laneId, orgId: safeOrgId },
+        "SELECT @rid AS rid FROM SUPPLIES_LANE WHERE laneId = :laneId AND ownerOrgId = :ownerOrgId LIMIT 1",
+        { laneId, ownerOrgId: safeOrgId },
       );
-      await this.insertLaneEdge(updated);
+      const oldRid = existingRidRows[0]?.rid;
+      if (typeof oldRid === "string" && oldRid.length > 0) {
+        // Assign a temporary laneId on the old edge, insert the new edge, then
+        // delete the old edge by @rid so a failed CREATE EDGE never loses the lane
+        // and never violates the UNIQUE index on SUPPLIES_LANE.laneId.
+        const tempLaneId = `${laneId}::replacing::${randomUUID()}`;
+        await this.db.command(
+          "sql",
+          "UPDATE SUPPLIES_LANE SET laneId = :tempLaneId WHERE @rid = :oldRid AND ownerOrgId = :ownerOrgId",
+          { tempLaneId, oldRid, ownerOrgId: safeOrgId },
+        );
+        try {
+          await this.insertLaneEdge(updated);
+        } catch (err) {
+          await this.db.command(
+            "sql",
+            "UPDATE SUPPLIES_LANE SET laneId = :laneId WHERE @rid = :oldRid AND ownerOrgId = :ownerOrgId",
+            { laneId, oldRid, ownerOrgId: safeOrgId },
+          );
+          throw err;
+        }
+        await this.db.command(
+          "sql",
+          "DELETE EDGE FROM SUPPLIES_LANE WHERE @rid = :oldRid AND ownerOrgId = :ownerOrgId",
+          { oldRid, ownerOrgId: safeOrgId },
+        );
+      } else {
+        await this.insertLaneEdge(updated);
+      }
     } else {
       await this.db.command(
         "sql",
@@ -1251,6 +1315,20 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
   private readonly inputs = new Map<string, SupplyInput>();
   private readonly facilities = new Map<string, StoredFacilityRecord>();
   private readonly lanes = new Map<string, SupplyLane>();
+  private onFacilityDeleted?: (
+    orgId: string,
+    facilityId: string,
+  ) => Promise<void>;
+
+  constructor(hooks?: WorkspaceRepositoryHooks) {
+    this.onFacilityDeleted = hooks?.onFacilityDeleted;
+  }
+
+  setOnFacilityDeleted(
+    hook: (orgId: string, facilityId: string) => Promise<void>,
+  ): void {
+    this.onFacilityDeleted = hook;
+  }
 
   async getNetwork(
     orgId: string,
@@ -1625,6 +1703,9 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       }
     }
     this.facilities.delete(facilityId);
+    if (this.onFacilityDeleted) {
+      await this.onFacilityDeleted(safeOrgId, facilityId);
+    }
     return true;
   }
 

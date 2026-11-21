@@ -58,8 +58,8 @@ export class DuplicateEmailError extends Error {
 }
 
 export interface UpdateOrganizationDirectoryInput {
-  openToNewBuyers: boolean;
-  capabilities: string[];
+  openToNewBuyers?: boolean;
+  capabilities?: string[];
 }
 
 export interface AuthRepository {
@@ -84,6 +84,7 @@ export interface AuthRepository {
   createSession(input: CreateSessionInput): Promise<StoredSession>;
   findSessionByTokenHash(tokenHash: string): Promise<StoredSession | null>;
   deleteSessionByTokenHash(tokenHash: string): Promise<void>;
+  deleteExpiredSessions(nowIso: string): Promise<number>;
   recordAuditEvent(input: RecordAuditEventInput): Promise<AuditEvent>;
   listAuditEvents(orgId: string, limit?: number): Promise<AuditEvent[]>;
 }
@@ -533,6 +534,19 @@ export class ArcadeDbAuthRepository implements AuthRepository {
     );
   }
 
+  async deleteExpiredSessions(nowIso: string): Promise<number> {
+    const result = await this.db.command<Record<string, unknown>>(
+      "sql",
+      "DELETE VERTEX FROM Session WHERE expiresAt <= :nowIso",
+      { nowIso },
+    );
+    const first = result[0];
+    if (first && typeof first.count === "number") {
+      return first.count;
+    }
+    return result.length;
+  }
+
   async recordAuditEvent(input: RecordAuditEventInput): Promise<AuditEvent> {
     const event = AuditEventSchema.parse({
       eventId: randomUUID(),
@@ -813,6 +827,22 @@ export class InMemoryAuthRepository implements AuthRepository {
 
   async deleteSessionByTokenHash(tokenHash: string): Promise<void> {
     this.sessions.delete(tokenHash);
+  }
+
+  async deleteExpiredSessions(nowIso: string): Promise<number> {
+    const nowMs = Date.parse(nowIso);
+    let deleted = 0;
+    for (const [tokenHash, session] of this.sessions.entries()) {
+      const expiresAtMs = Date.parse(session.expiresAt);
+      if (
+        !Number.isFinite(expiresAtMs) ||
+        (Number.isFinite(nowMs) ? expiresAtMs <= nowMs : session.expiresAt <= nowIso)
+      ) {
+        this.sessions.delete(tokenHash);
+        deleted += 1;
+      }
+    }
+    return deleted;
   }
 
   async recordAuditEvent(input: RecordAuditEventInput): Promise<AuditEvent> {

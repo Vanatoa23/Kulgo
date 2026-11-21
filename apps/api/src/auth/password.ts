@@ -111,8 +111,11 @@ export async function verifyPassword(
     !Number.isSafeInteger(passes) ||
     !Number.isSafeInteger(parallelism) ||
     memory < 8 ||
+    memory > 65536 ||
     passes < 1 ||
-    parallelism < 1
+    passes > 10 ||
+    parallelism < 1 ||
+    parallelism > 4
   ) {
     return false;
   }

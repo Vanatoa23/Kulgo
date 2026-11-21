@@ -68,4 +68,61 @@ describe("ESG & transport emission engine", () => {
     expect(summary.confidence).toBe("NETWORK_VERIFIED");
     expect(summary.verifiedCoveragePct).toBe(100);
   });
+
+  it("handles antipodal coordinates in haversineDistanceKm without NaN", () => {
+    const antipodalKm = haversineDistanceKm(0, 0, 0, 180);
+    expect(Number.isFinite(antipodalKm)).toBe(true);
+    // Half Earth circumference: pi * 6371 ≈ 20015.1 km
+    expect(antipodalKm).toBeCloseTo(20015.1, 1);
+  });
+
+  it("guards haversineDistanceKm, estimateLaneCo2eTonnes, and computeEsgSummary against NaN and Infinity", () => {
+    expect(haversineDistanceKm(NaN, 0, 10, 10)).toBe(0);
+    expect(haversineDistanceKm(0, Infinity, 10, 10)).toBe(0);
+    expect(haversineDistanceKm(0, 0, -Infinity, 10)).toBe(0);
+    expect(haversineDistanceKm(0, 0, 10, NaN)).toBe(0);
+
+    expect(
+      estimateLaneCo2eTonnes({
+        distanceKm: NaN,
+        annualTonnes: 100,
+        transportMode: "ROAD",
+      }),
+    ).toBe(0);
+    expect(
+      estimateLaneCo2eTonnes({
+        distanceKm: 500,
+        annualTonnes: Infinity,
+        transportMode: "AIR",
+      }),
+    ).toBe(0);
+
+    const summary = computeEsgSummary({
+      ownScope1Tco2e: NaN,
+      ownScope2Tco2e: Infinity,
+      suppliers: [
+        {
+          isPartnerVerified: true,
+          sector: "Electronics",
+          reportedScope12Tco2e: NaN,
+          hiddenUpstreamScope3Tco2e: Infinity,
+        },
+        {
+          isPartnerVerified: false,
+          sector: "Metals",
+          reportedScope12Tco2e: Infinity,
+          hiddenUpstreamScope3Tco2e: null,
+        },
+      ],
+      laneTransportCo2eTonnes: [NaN, Infinity, -50, 25.5],
+    });
+
+    expect(summary.scope1Tco2e).toBe(0);
+    expect(summary.scope2Tco2e).toBe(0);
+    // Verified supplier with NaN/Infinity contributes 0; unverified with Infinity falls back to Metals baseline (1150)
+    expect(summary.upstreamScope3Tco2e).toBe(1150);
+    expect(summary.transportScope3Tco2e).toBe(25.5);
+    expect(summary.totalTco2e).toBe(1175.5);
+    expect(Number.isFinite(summary.totalTco2e)).toBe(true);
+  });
 });

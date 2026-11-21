@@ -13,6 +13,7 @@ import {
   type RiskSignalRepository,
 } from "./analytics/risk-signals.js";
 import { createAnalyticsRoutes } from "./analytics/routes.js";
+import { withSessionSecret } from "./auth/middleware.js";
 import {
   ArcadeDbAuthRepository,
   InMemoryAuthRepository,
@@ -86,6 +87,9 @@ export function createApp({
 }: AppDependencies): Hono {
   const app = new Hono();
 
+  app.use("*", async (_c, next) =>
+    withSessionSecret(config.SESSION_SECRET, next),
+  );
   app.use(
     "*",
     createRequestLogger({
@@ -128,6 +132,28 @@ export function createApp({
       windowMs: config.RATE_LIMIT_WINDOW_MS,
     }),
   );
+  const membersCreateRateLimiter = createRateLimiter({
+    bucket: "auth:members",
+    maxRequests: config.RATE_LIMIT_AUTH_MAX,
+    windowMs: config.RATE_LIMIT_WINDOW_MS,
+  });
+  app.use("/api/v1/auth/members", async (c, next) => {
+    if (c.req.method.toUpperCase() === "POST") {
+      return membersCreateRateLimiter(c, next);
+    }
+    await next();
+  });
+  const inviteAcceptRateLimiter = createRateLimiter({
+    bucket: "invites:accept",
+    maxRequests: config.RATE_LIMIT_AUTH_MAX,
+    windowMs: config.RATE_LIMIT_WINDOW_MS,
+  });
+  app.use("/api/v1/invites/:token/accept", async (c, next) => {
+    if (c.req.method.toUpperCase() === "POST") {
+      return inviteAcceptRateLimiter(c, next);
+    }
+    await next();
+  });
   app.use(
     "/api/v1/workspace/import",
     createRateLimiter({

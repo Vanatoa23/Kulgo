@@ -36,6 +36,7 @@ export type WorkspaceViewMode = "map" | "graph";
 
 export interface FilterBarProps {
   user: User;
+  userRole?: User["role"];
   organization: Organization;
   products: readonly Product[];
   inputs: readonly SupplyInput[];
@@ -66,6 +67,7 @@ export interface FilterBarProps {
 
 export function FilterBar({
   user,
+  userRole = user.role ?? "OWNER",
   organization,
   products,
   inputs,
@@ -94,6 +96,7 @@ export function FilterBar({
   onLogout,
 }: FilterBarProps) {
   const isAddingFacility = mapMode === "pick-new-facility";
+  const isOwner = userRole === "OWNER";
 
   return (
     <header className="shrink-0 border-b border-slate-800/90 bg-slate-950/95 backdrop-blur-md z-20">
@@ -171,14 +174,16 @@ export function FilterBar({
             <span>Directory</span>
           </button>
 
-          <button
-            type="button"
-            onClick={onOpenAcceptInvite}
-            className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-xs px-3 py-1.5 transition-colors cursor-pointer"
-          >
-            <Link2 className="h-3.5 w-3.5 text-teal-400" />
-            <span>Accept Invite</span>
-          </button>
+          {isOwner && (
+            <button
+              type="button"
+              onClick={onOpenAcceptInvite}
+              className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700/80 bg-slate-900 hover:bg-slate-800 text-slate-200 font-medium text-xs px-3 py-1.5 transition-colors cursor-pointer"
+            >
+              <Link2 className="h-3.5 w-3.5 text-teal-400" />
+              <span>Accept Invite</span>
+            </button>
+          )}
 
           <button
             type="button"

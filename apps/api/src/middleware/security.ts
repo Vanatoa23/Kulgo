@@ -13,17 +13,24 @@ interface RateLimitEntry {
   resetAtMs: number;
 }
 
+const MAX_TRACKED_KEYS = 10_000;
+const PRUNE_THRESHOLD = 1000;
+
 function getClientKey(c: Context): string {
-  const forwarded = c.req.header("x-forwarded-for");
-  if (forwarded) {
-    const firstIp = forwarded.split(",")[0]?.trim();
-    if (firstIp) {
-      return firstIp;
-    }
-  }
   const realIp = c.req.header("x-real-ip")?.trim();
   if (realIp) {
     return realIp;
+  }
+  const forwarded = c.req.header("x-forwarded-for");
+  if (forwarded) {
+    const parts = forwarded
+      .split(",")
+      .map((s) => s.trim())
+      .filter(Boolean);
+    const last = parts[parts.length - 1];
+    if (last) {
+      return last;
+    }
   }
   return "local";
 }
@@ -39,9 +46,16 @@ export function createRateLimiter({
   now = () => Date.now(),
 }: RateLimiterOptions) {
   const store = new Map<string, RateLimitEntry>();
+  let lastPrune = -Infinity;
 
-  const pruneExpired = (currentMs: number) => {
-    if (store.size < 1000) return;
+  const pruneExpired = (currentMs: number, force = false) => {
+    if (
+      !force &&
+      (store.size < PRUNE_THRESHOLD || currentMs - lastPrune < windowMs)
+    ) {
+      return;
+    }
+    lastPrune = currentMs;
     for (const [key, entry] of store.entries()) {
       if (entry.resetAtMs <= currentMs) {
         store.delete(key);
@@ -61,6 +75,17 @@ export function createRateLimiter({
     const key = `${bucket}:${getClientKey(c)}`;
     let entry = store.get(key);
     if (!entry || entry.resetAtMs <= currentMs) {
+      if (entry) {
+        store.delete(key);
+      } else if (store.size >= MAX_TRACKED_KEYS) {
+        pruneExpired(currentMs, true);
+        if (store.size >= MAX_TRACKED_KEYS) {
+          const oldestKey = store.keys().next().value;
+          if (oldestKey !== undefined) {
+            store.delete(oldestKey);
+          }
+        }
+      }
       entry = { count: 0, resetAtMs: currentMs + windowMs };
       store.set(key, entry);
     }
@@ -98,8 +123,8 @@ const BODY_METHODS = new Set(["POST", "PUT", "PATCH"]);
 
 /**
  * Enforces request payload byte limits for JSON and CSV/bulk import routes.
- * Checks both Content-Length header and actual streamed byte count so
- * chunked or headerless requests cannot bypass the limit.
+ * Checks both Content-Length header and actual streamed byte count in a single
+ * pass without cloning/double-buffering the request stream.
  */
 export function createBodySizeLimitMiddleware({
   maxJsonBytes,
@@ -122,11 +147,9 @@ export function createBodySizeLimitMiddleware({
       }
     }
 
-    // Verify actual streamed body length on a clone so downstream handlers
-    // can still read c.req.json() / c.req.text() untouched.
-    const cloned = c.req.raw.clone();
-    if (cloned.body) {
-      const reader = cloned.body.getReader();
+    if (c.req.raw.body) {
+      const reader = c.req.raw.body.getReader();
+      const chunks: Uint8Array[] = [];
       let totalBytes = 0;
       try {
         while (true) {
@@ -134,19 +157,31 @@ export function createBodySizeLimitMiddleware({
           if (done) break;
           totalBytes += value.byteLength;
           if (totalBytes > maxBytes) {
-            reader.releaseLock();
-            void cloned.body.cancel();
-            void c.req.raw.body?.cancel();
+            await reader.cancel().catch(() => {});
             return c.json({ error: "Request payload too large" }, 413);
           }
+          chunks.push(value);
         }
       } finally {
         try {
           reader.releaseLock();
         } catch {
-          // Lock already released on early 413 return
+          // Lock already released
         }
       }
+
+      const combined = new Uint8Array(totalBytes);
+      let offset = 0;
+      for (const chunk of chunks) {
+        combined.set(chunk, offset);
+        offset += chunk.byteLength;
+      }
+
+      c.req.raw = new Request(c.req.raw.url, {
+        method: c.req.raw.method,
+        headers: c.req.raw.headers,
+        body: combined,
+      });
     }
 
     await next();

@@ -65,6 +65,12 @@ export interface InvitationRepository {
   revokeInvite(fromOrgId: string, inviteId: string): Promise<Invitation>;
 
   /**
+   * Revokes pending invitations and removes partner link records referencing a
+   * deleted facility so no dangling invitations or partner links remain.
+   */
+  cleanupForDeletedFacility(fromOrgId: string, facilityId: string): Promise<void>;
+
+  /**
    * Strictly server-side traversal helper used ONLY by AnalyticsRepository
    * to resolve anonymized Tier-2+ partner summaries. Never exposed directly
    * via public API routes.
@@ -155,6 +161,25 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
     if (targetFacility.isOwnFacility) {
       throw new InviteValidationError(
         "Cannot send a partner invitation for your own facility",
+      );
+    }
+    if (targetFacility.isPartnerVerified) {
+      throw new InviteStateError(
+        "FACILITY_ALREADY_VERIFIED: Target facility is already partner-verified",
+      );
+    }
+
+    const existingLinks = await this.db.query<Record<string, unknown>>(
+      "sql",
+      `SELECT inviteId
+       FROM VERIFIED_PARTNER_LINK
+       WHERE out.facilityId = :targetFacilityId AND out.ownerOrgId = :fromOrgId
+       LIMIT 1`,
+      { targetFacilityId: input.targetFacilityId, fromOrgId: safeOrgId },
+    );
+    if (existingLinks.length > 0) {
+      throw new InviteStateError(
+        "FACILITY_ALREADY_VERIFIED: Target facility already has a verified partner link",
       );
     }
 
@@ -259,6 +284,49 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
       );
     }
 
+    const targetFacility = await this.workspaceRepo.getFacilityById(
+      existing.fromOrgId,
+      existing.targetFacilityId,
+    );
+    if (!targetFacility) {
+      await this.db.command(
+        "sql",
+        "UPDATE Invitation SET status = 'REVOKED' WHERE inviteId = :inviteId",
+        { inviteId: existing.inviteId },
+      );
+      throw new InviteNotFoundError(
+        "Target facility no longer exists in the inviting organization's workspace",
+      );
+    }
+    if (targetFacility.isPartnerVerified) {
+      throw new InviteStateError(
+        "FACILITY_ALREADY_VERIFIED: Target facility is already partner-verified",
+      );
+    }
+
+    const existingLinks = await this.db.query<Record<string, unknown>>(
+      "sql",
+      `SELECT inviteId
+       FROM VERIFIED_PARTNER_LINK
+       WHERE out.facilityId = :targetFacilityId AND out.ownerOrgId = :fromOrgId
+       LIMIT 1`,
+      {
+        targetFacilityId: existing.targetFacilityId,
+        fromOrgId: existing.fromOrgId,
+      },
+    );
+    if (existingLinks.length > 0) {
+      throw new InviteStateError(
+        "FACILITY_ALREADY_VERIFIED: Target facility already has a verified partner link",
+      );
+    }
+
+    const currentOrg =
+      await this.authRepo.findOrganizationById(safeAcceptingOrgId);
+    if (!currentOrg) {
+      throw new InviteValidationError("Accepting organization not found");
+    }
+
     const linkedAt = new Date().toISOString();
 
     await this.db.command(
@@ -289,13 +357,17 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
       input.refinedSite,
     );
 
-    const updatedOrg = await this.authRepo.updateOrganizationDirectoryProfile(
-      safeAcceptingOrgId,
-      {
-        openToNewBuyers: input.openToNewBuyers,
-        capabilities: input.capabilities,
-      },
-    );
+    const updatedOrg =
+      input.openToNewBuyers !== undefined || input.capabilities !== undefined
+        ? await this.authRepo.updateOrganizationDirectoryProfile(
+            safeAcceptingOrgId,
+            {
+              openToNewBuyers:
+                input.openToNewBuyers ?? currentOrg.openToNewBuyers,
+              capabilities: input.capabilities ?? currentOrg.capabilities,
+            },
+          )
+        : currentOrg;
     if (!updatedOrg) {
       throw new InviteValidationError("Accepting organization not found");
     }
@@ -353,6 +425,21 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
     });
   }
 
+  async cleanupForDeletedFacility(
+    fromOrgId: string,
+    facilityId: string,
+  ): Promise<void> {
+    const safeOrgId = assertOrgId(fromOrgId);
+    await this.db.command(
+      "sql",
+      `UPDATE Invitation SET status = 'REVOKED'
+       WHERE fromOrgId = :fromOrgId
+         AND targetFacilityId = :targetFacilityId
+         AND status = 'PENDING'`,
+      { fromOrgId: safeOrgId, targetFacilityId: facilityId },
+    );
+  }
+
   async listVerifiedPartnerLinksForOrg(
     fromOrgId: string,
   ): Promise<VerifiedPartnerLinkRecord[]> {
@@ -404,6 +491,14 @@ export class InMemoryInvitationRepository implements InvitationRepository {
   constructor(deps: InvitationRepositoryDeps) {
     this.authRepo = deps.authRepo;
     this.workspaceRepo = deps.workspaceRepo;
+    const hookable = deps.workspaceRepo as WorkspaceRepository & {
+      setOnFacilityDeleted?: (
+        hook: (orgId: string, facilityId: string) => Promise<void>,
+      ) => void;
+    };
+    hookable.setOnFacilityDeleted?.((orgId, facilityId) =>
+      this.cleanupForDeletedFacility(orgId, facilityId),
+    );
   }
 
   async createInvite(
@@ -424,6 +519,21 @@ export class InMemoryInvitationRepository implements InvitationRepository {
     if (targetFacility.isOwnFacility) {
       throw new InviteValidationError(
         "Cannot send a partner invitation for your own facility",
+      );
+    }
+    if (targetFacility.isPartnerVerified) {
+      throw new InviteStateError(
+        "FACILITY_ALREADY_VERIFIED: Target facility is already partner-verified",
+      );
+    }
+    const hasExistingLink = this.partnerLinks.some(
+      (link) =>
+        link.fromOrgId === safeOrgId &&
+        link.targetFacilityId === input.targetFacilityId,
+    );
+    if (hasExistingLink) {
+      throw new InviteStateError(
+        "FACILITY_ALREADY_VERIFIED: Target facility already has a verified partner link",
       );
     }
 
@@ -496,6 +606,41 @@ export class InMemoryInvitationRepository implements InvitationRepository {
       );
     }
 
+    const targetFacility = await this.workspaceRepo.getFacilityById(
+      existing.fromOrgId,
+      existing.targetFacilityId,
+    );
+    if (!targetFacility) {
+      stored.invitation = InvitationSchema.parse({
+        ...existing,
+        status: "REVOKED",
+      });
+      throw new InviteNotFoundError(
+        "Target facility no longer exists in the inviting organization's workspace",
+      );
+    }
+    if (targetFacility.isPartnerVerified) {
+      throw new InviteStateError(
+        "FACILITY_ALREADY_VERIFIED: Target facility is already partner-verified",
+      );
+    }
+    const hasExistingLink = this.partnerLinks.some(
+      (link) =>
+        link.fromOrgId === existing.fromOrgId &&
+        link.targetFacilityId === existing.targetFacilityId,
+    );
+    if (hasExistingLink) {
+      throw new InviteStateError(
+        "FACILITY_ALREADY_VERIFIED: Target facility already has a verified partner link",
+      );
+    }
+
+    const currentOrg =
+      await this.authRepo.findOrganizationById(safeAcceptingOrgId);
+    if (!currentOrg) {
+      throw new InviteValidationError("Accepting organization not found");
+    }
+
     const linkedAt = new Date().toISOString();
     const acceptedInvitation = InvitationSchema.parse({
       ...existing,
@@ -518,13 +663,17 @@ export class InMemoryInvitationRepository implements InvitationRepository {
       input.refinedSite,
     );
 
-    const updatedOrg = await this.authRepo.updateOrganizationDirectoryProfile(
-      safeAcceptingOrgId,
-      {
-        openToNewBuyers: input.openToNewBuyers,
-        capabilities: input.capabilities,
-      },
-    );
+    const updatedOrg =
+      input.openToNewBuyers !== undefined || input.capabilities !== undefined
+        ? await this.authRepo.updateOrganizationDirectoryProfile(
+            safeAcceptingOrgId,
+            {
+              openToNewBuyers:
+                input.openToNewBuyers ?? currentOrg.openToNewBuyers,
+              capabilities: input.capabilities ?? currentOrg.capabilities,
+            },
+          )
+        : currentOrg;
     if (!updatedOrg) {
       throw new InviteValidationError("Accepting organization not found");
     }
@@ -565,12 +714,49 @@ export class InMemoryInvitationRepository implements InvitationRepository {
     return { ...revoked };
   }
 
+  async cleanupForDeletedFacility(
+    fromOrgId: string,
+    facilityId: string,
+  ): Promise<void> {
+    const safeOrgId = assertOrgId(fromOrgId);
+    for (const stored of this.invitesById.values()) {
+      if (
+        stored.invitation.fromOrgId === safeOrgId &&
+        stored.invitation.targetFacilityId === facilityId &&
+        stored.invitation.status === "PENDING"
+      ) {
+        stored.invitation = InvitationSchema.parse({
+          ...stored.invitation,
+          status: "REVOKED",
+        });
+      }
+    }
+
+    for (let i = this.partnerLinks.length - 1; i >= 0; i -= 1) {
+      const link = this.partnerLinks[i]!;
+      if (link.fromOrgId === safeOrgId && link.targetFacilityId === facilityId) {
+        this.partnerLinks.splice(i, 1);
+      }
+    }
+  }
+
   async listVerifiedPartnerLinksForOrg(
     fromOrgId: string,
   ): Promise<VerifiedPartnerLinkRecord[]> {
     const safeOrgId = assertOrgId(fromOrgId);
-    return this.partnerLinks
-      .filter((link) => link.fromOrgId === safeOrgId)
-      .map((link) => ({ ...link }));
+    const orgLinks = this.partnerLinks.filter(
+      (link) => link.fromOrgId === safeOrgId,
+    );
+    const activeLinks: VerifiedPartnerLinkRecord[] = [];
+    for (const link of orgLinks) {
+      const facility = await this.workspaceRepo.getFacilityById(
+        safeOrgId,
+        link.targetFacilityId,
+      );
+      if (facility) {
+        activeLinks.push({ ...link });
+      }
+    }
+    return activeLinks;
   }
 }

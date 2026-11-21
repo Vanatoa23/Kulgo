@@ -271,4 +271,219 @@ describe("evaluateNetworkAnalytics & simulateNetworkAnalytics", () => {
     expect(sim.deltas.totalTco2eDelta).toBeLessThan(0);
     expect(sim.simulated.overallStatus).toBe("GREEN");
   });
+
+  it("scales annualSpendEur proportionally when volumeSharePct changes in simulateNetworkAnalytics, updating SUPPLIER and COUNTRY HHI", () => {
+    const sim = simulateNetworkAnalytics(
+      {
+        organization: { scope1Tco2e: 120, scope2Tco2e: 180 },
+        inputs: INPUTS,
+        facilities: FACILITIES,
+        lanes: LANES,
+        riskSignals: [],
+        asOfDate,
+      },
+      [
+        // Halve Tampere's share (60% -> 30%, spend 500k -> 250k) and boost Hamburg's share (40% -> 70%, spend 350k -> 612.5k)
+        { laneId: LANE_TAMPERE_ID, volumeSharePct: 30 },
+        { laneId: LANE_HAMBURG_ID, volumeSharePct: 70 },
+      ],
+    );
+
+    const baseSupplierHhi = sim.baseline.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    const simSupplierHhi = sim.simulated.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    const baseCountryHhi = sim.baseline.hhiMetrics.find(
+      (m) => m.dimension === "COUNTRY",
+    )!;
+    const simCountryHhi = sim.simulated.hhiMetrics.find(
+      (m) => m.dimension === "COUNTRY",
+    )!;
+
+    // Baseline spend: Riga 300k, Tampere 500k, Hamburg 350k (total 1150k)
+    // Simulated spend: Riga 300k, Tampere 250k, Hamburg 612.5k (total 1162.5k)
+    expect(simSupplierHhi.rawHhi).not.toBe(baseSupplierHhi.rawHhi);
+    expect(simCountryHhi.rawHhi).not.toBe(baseCountryHhi.rawHhi);
+    expect(simSupplierHhi.rawHhi).toBe(3904);
+  });
+
+  it("normalizes KG vs TONNES and uses a consistent weight dimension across mixed-unit lanes in HHI", () => {
+    // Case 1: One lane in KG (50,000 KG = 50 TONNES) and one lane in TONNES (50 TONNES) with no spend -> equal 50/50 -> HHI 5000
+    const kgVsTonnesLanes: SupplyLane[] = [
+      {
+        ...LANES[1]!,
+        annualSpendEur: null,
+        annualVolume: 50_000,
+        volumeUnit: "KG",
+        volumeSharePct: 50,
+      },
+      {
+        ...LANES[2]!,
+        annualSpendEur: null,
+        annualVolume: 50,
+        volumeUnit: "TONNES",
+        volumeSharePct: 50,
+      },
+    ];
+
+    const kgTonnesSummary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: kgVsTonnesLanes,
+      riskSignals: [],
+      asOfDate,
+    });
+
+    const kgTonnesSupplierHhi = kgTonnesSummary.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    );
+    const kgTonnesCountryHhi = kgTonnesSummary.hhiMetrics.find(
+      (m) => m.dimension === "COUNTRY",
+    );
+    expect(kgTonnesSupplierHhi?.rawHhi).toBe(5000);
+    expect(kgTonnesCountryHhi?.rawHhi).toBe(5000);
+
+    // Case 2: Mixed spend (only one lane has annualSpendEur) falls back to normalized volume across all active lanes
+    const mixedSpendLanes: SupplyLane[] = [
+      {
+        ...LANES[1]!,
+        annualSpendEur: 500_000,
+        annualVolume: 60_000,
+        volumeUnit: "KG",
+        volumeSharePct: 60,
+      },
+      {
+        ...LANES[2]!,
+        annualSpendEur: null,
+        annualVolume: 40,
+        volumeUnit: "TONNES",
+        volumeSharePct: 40,
+      },
+    ];
+
+    const mixedSpendSummary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: mixedSpendLanes,
+      riskSignals: [],
+      asOfDate,
+    });
+
+    const mixedSupplierHhi = mixedSpendSummary.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    );
+    // 60t vs 40t -> 60^2 + 40^2 = 5200 (not skewed by mixing 500,000 EUR with 40 TONNES)
+    expect(mixedSupplierHhi?.rawHhi).toBe(5200);
+
+    // Case 3: Mixed spend AND missing volume on one lane falls back consistently to volumeSharePct
+    const mixedVolumeAndShareLanes: SupplyLane[] = [
+      {
+        ...LANES[1]!,
+        annualSpendEur: 500_000,
+        annualVolume: null,
+        volumeUnit: "TONNES",
+        volumeSharePct: 60,
+      },
+      {
+        ...LANES[2]!,
+        annualSpendEur: null,
+        annualVolume: 40,
+        volumeUnit: "TONNES",
+        volumeSharePct: 40,
+      },
+    ];
+
+    const mixedShareSummary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: mixedVolumeAndShareLanes,
+      riskSignals: [],
+      asOfDate,
+    });
+
+    const mixedShareSupplierHhi = mixedShareSummary.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    );
+    expect(mixedShareSupplierHhi?.rawHhi).toBe(5200);
+  });
+
+  it("does not emit SHARED_UPSTREAM_CHOKEPOINT when only 1 Tier-1 partner has hasSharedChokepoint, but emits RED when 2+ share a region", () => {
+    const singlePartnerHidden = new Map([
+      [
+        FAC_TAMPERE_ID,
+        {
+          hiddenUpstreamScope3Tco2e: 200,
+          hasSanctionedUpstream: false,
+          regionCode: "FI",
+          hasSharedChokepoint: true,
+          chokepointRegionCode: "CN",
+        },
+      ],
+    ]);
+
+    const singleSummary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: LANES,
+      riskSignals: [],
+      partnerHiddenSummaries: singlePartnerHidden,
+      asOfDate,
+    });
+
+    expect(
+      singleSummary.alerts.some(
+        (a) => a.category === "SHARED_UPSTREAM_CHOKEPOINT",
+      ),
+    ).toBe(false);
+
+    const sharedPartnerHidden = new Map([
+      [
+        FAC_TAMPERE_ID,
+        {
+          hiddenUpstreamScope3Tco2e: 200,
+          hasSanctionedUpstream: false,
+          regionCode: "FI",
+          hasSharedChokepoint: true,
+          chokepointRegionCode: "CN",
+        },
+      ],
+      [
+        FAC_HAMBURG_ID,
+        {
+          hiddenUpstreamScope3Tco2e: 150,
+          hasSanctionedUpstream: false,
+          regionCode: "DE",
+          hasSharedChokepoint: true,
+          chokepointRegionCode: "CN",
+        },
+      ],
+    ]);
+
+    const sharedSummary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: LANES,
+      riskSignals: [],
+      partnerHiddenSummaries: sharedPartnerHidden,
+      asOfDate,
+    });
+
+    const chokepointAlert = sharedSummary.alerts.find(
+      (a) => a.category === "SHARED_UPSTREAM_CHOKEPOINT",
+    );
+    expect(chokepointAlert).toBeDefined();
+    expect(chokepointAlert?.severity).toBe("RED");
+    expect(chokepointAlert?.affectedRegionCode).toBe("CN");
+    expect(chokepointAlert?.affectedTier1FacilityIds).toEqual([
+      FAC_TAMPERE_ID,
+      FAC_HAMBURG_ID,
+    ]);
+  });
 });

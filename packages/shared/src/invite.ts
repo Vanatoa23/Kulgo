@@ -8,15 +8,17 @@ export const InvitationStatusSchema = z.enum([
 ]);
 export type InvitationStatus = z.infer<typeof InvitationStatusSchema>;
 
-export const InvitationSchema = z.object({
-  inviteId: z.string().uuid(),
-  fromOrgId: z.string().uuid(),
-  targetFacilityId: z.string().uuid(),
-  inviteeEmail: z.string().email(),
-  status: InvitationStatusSchema,
-  expiresAt: z.string().datetime(),
-  createdAt: z.string().datetime(),
-});
+export const InvitationSchema = z
+  .object({
+    inviteId: z.string().uuid(),
+    fromOrgId: z.string().uuid(),
+    targetFacilityId: z.string().uuid(),
+    inviteeEmail: z.string().email(),
+    status: InvitationStatusSchema,
+    expiresAt: z.string().datetime(),
+    createdAt: z.string().datetime(),
+  })
+  .strict();
 export type Invitation = z.infer<typeof InvitationSchema>;
 
 export const CreateInviteInputSchema = z.object({
@@ -27,8 +29,8 @@ export const CreateInviteInputSchema = z.object({
 export type CreateInviteInput = z.infer<typeof CreateInviteInputSchema>;
 
 export const AcceptInviteInputSchema = z.object({
-  openToNewBuyers: z.boolean().default(true),
-  capabilities: z.array(z.string().trim().min(1).max(100)).default([]),
+  openToNewBuyers: z.boolean().optional(),
+  capabilities: z.array(z.string().trim().min(1).max(80)).max(20).optional(),
   refinedSite: z
     .object({
       kind: z.enum(["HQ", "FACTORY", "WAREHOUSE", "PORT", "HUB"]),
