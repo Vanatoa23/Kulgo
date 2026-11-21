@@ -810,6 +810,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     );
     await this.db.command(
       "sql",
+      "UPDATE ContractLine SET inputId = null WHERE inputId = :inputId AND ownerOrgId = :orgId",
+      { inputId, orgId: safeOrgId },
+    );
+    await this.db.command(
+      "sql",
       "DELETE VERTEX FROM SupplyInput WHERE inputId = :inputId AND ownerOrgId = :orgId",
       { inputId, orgId: safeOrgId },
     );
@@ -821,7 +826,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
-              lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e
+              lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
+              defaultCarryingCostPct
        FROM Facility WHERE ownerOrgId = :orgId`,
       { orgId: safeOrgId },
     );
@@ -836,7 +842,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
-              lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e
+              lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
+              defaultCarryingCostPct
        FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :orgId LIMIT 1`,
       { facilityId, orgId: safeOrgId },
     );
@@ -878,6 +885,9 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       sector: input.sector ?? null,
       esgBadges: input.esgBadges ?? [],
       estimatedScope12Tco2e: input.estimatedScope12Tco2e ?? null,
+      ...(input.defaultCarryingCostPct !== undefined
+        ? { defaultCarryingCostPct: input.defaultCarryingCostPct }
+        : {}),
     });
 
     const locationWkt = formatPointWkt(facility.lng, facility.lat);
@@ -899,7 +909,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         isPartnerVerified = :isPartnerVerified,
         sector = :sector,
         esgBadges = :esgBadges,
-        estimatedScope12Tco2e = :estimatedScope12Tco2e`,
+        estimatedScope12Tco2e = :estimatedScope12Tco2e,
+        defaultCarryingCostPct = :defaultCarryingCostPct`,
       {
         facilityId: facility.facilityId,
         ownerOrgId: facility.ownerOrgId,
@@ -916,6 +927,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         sector: facility.sector,
         esgBadges: facility.esgBadges,
         estimatedScope12Tco2e: facility.estimatedScope12Tco2e,
+        defaultCarryingCostPct: facility.defaultCarryingCostPct ?? null,
       },
     );
 
@@ -958,6 +970,9 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         input.estimatedScope12Tco2e !== undefined
           ? input.estimatedScope12Tco2e
           : existing.estimatedScope12Tco2e,
+      ...(input.defaultCarryingCostPct !== undefined
+        ? { defaultCarryingCostPct: input.defaultCarryingCostPct }
+        : {}),
     });
 
     const locationWkt = formatPointWkt(updated.lng, updated.lat);
@@ -975,7 +990,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         isOwnFacility = :isOwnFacility,
         sector = :sector,
         esgBadges = :esgBadges,
-        estimatedScope12Tco2e = :estimatedScope12Tco2e
+        estimatedScope12Tco2e = :estimatedScope12Tco2e,
+        defaultCarryingCostPct = :defaultCarryingCostPct
        WHERE facilityId = :facilityId AND ownerOrgId = :orgId`,
       {
         name: updated.name,
@@ -990,6 +1006,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         sector: updated.sector,
         esgBadges: updated.esgBadges,
         estimatedScope12Tco2e: updated.estimatedScope12Tco2e,
+        defaultCarryingCostPct: updated.defaultCarryingCostPct ?? null,
         facilityId,
         orgId: safeOrgId,
       },
@@ -1144,6 +1161,25 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     await this.db.command(
       "sql",
       "DELETE EDGE VERIFIED_PARTNER_LINK WHERE out.facilityId = :facilityId AND out.ownerOrgId = :orgId",
+      { orgId: safeOrgId, facilityId },
+    );
+    const connectedLanes = await this.db.query<Record<string, unknown>>(
+      "sql",
+      "SELECT laneId FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId AND (fromFacilityId = :facilityId OR toFacilityId = :facilityId)",
+      { orgId: safeOrgId, facilityId },
+    );
+    for (const laneRow of connectedLanes) {
+      if (typeof laneRow.laneId === "string") {
+        await this.db.command(
+          "sql",
+          "DELETE VERTEX FROM ContractLine WHERE laneId = :laneId AND ownerOrgId = :orgId",
+          { laneId: laneRow.laneId, orgId: safeOrgId },
+        );
+      }
+    }
+    await this.db.command(
+      "sql",
+      "DELETE VERTEX FROM Contract WHERE supplierFacilityId = :facilityId AND ownerOrgId = :orgId",
       { orgId: safeOrgId, facilityId },
     );
     await this.db.command(
@@ -1589,6 +1625,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const existing = await this.findLane(safeOrgId, laneId);
     if (!existing) return false;
 
+    await this.db.command(
+      "sql",
+      "DELETE VERTEX FROM ContractLine WHERE laneId = :laneId AND ownerOrgId = :orgId",
+      { laneId, orgId: safeOrgId },
+    );
     await this.db.command(
       "sql",
       "DELETE EDGE SUPPLIES_LANE WHERE laneId = :laneId AND ownerOrgId = :orgId",
@@ -2150,6 +2191,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
         this.lanes.set(id, { ...lane, inputId: null });
       }
     }
+    for (const [id, line] of this.contractLines.entries()) {
+      if (line.ownerOrgId === safeOrgId && line.inputId === inputId) {
+        this.contractLines.set(id, { ...line, inputId: null });
+      }
+    }
     this.inputs.delete(inputId);
     return true;
   }
@@ -2194,6 +2240,9 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       sector: input.sector ?? null,
       esgBadges: input.esgBadges ?? [],
       estimatedScope12Tco2e: input.estimatedScope12Tco2e ?? null,
+      ...(input.defaultCarryingCostPct !== undefined
+        ? { defaultCarryingCostPct: input.defaultCarryingCostPct }
+        : {}),
     });
     this.facilities.set(facility.facilityId, {
       facility,
@@ -2239,6 +2288,9 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
         input.estimatedScope12Tco2e !== undefined
           ? input.estimatedScope12Tco2e
           : existing.estimatedScope12Tco2e,
+      ...(input.defaultCarryingCostPct !== undefined
+        ? { defaultCarryingCostPct: input.defaultCarryingCostPct }
+        : {}),
     });
 
     this.facilities.set(facilityId, {
@@ -2362,12 +2414,27 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     const record = this.facilities.get(facilityId);
     if (!record || record.facility.ownerOrgId !== safeOrgId) return false;
 
+    const deletedLaneIds = new Set<string>();
     for (const [laneId, lane] of this.lanes.entries()) {
       if (
         lane.ownerOrgId === safeOrgId &&
         (lane.fromFacilityId === facilityId || lane.toFacilityId === facilityId)
       ) {
+        deletedLaneIds.add(laneId);
         this.lanes.delete(laneId);
+      }
+    }
+    for (const [lineId, line] of this.contractLines.entries()) {
+      if (line.ownerOrgId === safeOrgId && deletedLaneIds.has(line.laneId)) {
+        this.contractLines.delete(lineId);
+      }
+    }
+    for (const [contractId, contract] of this.contracts.entries()) {
+      if (
+        contract.ownerOrgId === safeOrgId &&
+        contract.supplierFacilityId === facilityId
+      ) {
+        this.contracts.delete(contractId);
       }
     }
     this.facilities.delete(facilityId);
@@ -2632,6 +2699,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     const safeOrgId = assertOrgId(orgId);
     const existing = this.lanes.get(laneId);
     if (!existing || existing.ownerOrgId !== safeOrgId) return false;
+    for (const [lineId, line] of this.contractLines.entries()) {
+      if (line.ownerOrgId === safeOrgId && line.laneId === laneId) {
+        this.contractLines.delete(lineId);
+      }
+    }
     this.lanes.delete(laneId);
     return true;
   }

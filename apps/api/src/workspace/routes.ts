@@ -5,7 +5,7 @@ import {
 import {
   BulkImportJsonRequestSchema,
   CreateContractInputSchema,
-  CreateContractLineInputSchema,
+  CreateContractLineInputBaseSchema,
   CreateFacilityInputSchema,
   CreateProductInputSchema,
   CreateSupplyInputInputSchema,
@@ -538,11 +538,34 @@ export function createWorkspaceRoutes({
     return c.json({ contracts, contractLines }, 200);
   });
 
+  const CreateContractLineBodySchema = CreateContractLineInputBaseSchema.omit({
+    contractId: true,
+  }).refine(
+    (data) => {
+      if (
+        data.committedVolume !== null &&
+        data.committedVolume !== undefined &&
+        data.unitPrice !== null &&
+        data.unitPrice !== undefined &&
+        data.committedSpend !== null &&
+        data.committedSpend !== undefined
+      ) {
+        return (
+          Math.abs(data.committedSpend - data.committedVolume * data.unitPrice) <=
+          0.01
+        );
+      }
+      return true;
+    },
+    {
+      message:
+        "AMOUNT_CONFLICT: committedSpend disagrees with committedVolume * unitPrice by more than 0.01",
+      path: ["committedSpend"],
+    },
+  );
+
   const CreateContractWithLinesSchema = CreateContractInputSchema.extend({
-    lines: z
-      .array(CreateContractLineInputSchema.omit({ contractId: true }))
-      .max(50)
-      .optional(),
+    lines: z.array(CreateContractLineBodySchema).max(50).optional(),
   });
 
   routes.post("/contracts", async (c) => {
@@ -627,9 +650,7 @@ export function createWorkspaceRoutes({
       return c.json({ error: "Invalid JSON payload" }, 400);
     }
 
-    const parsed = CreateContractLineInputSchema.omit({
-      contractId: true,
-    }).safeParse(body);
+    const parsed = CreateContractLineBodySchema.safeParse(body);
     if (!parsed.success) {
       return c.json(
         { error: "Validation failed", details: parsed.error.flatten() },

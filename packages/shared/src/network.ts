@@ -486,7 +486,7 @@ export const UpdateContractInputSchema = CreateContractInputSchema.partial().ext
 });
 export type UpdateContractInput = z.infer<typeof UpdateContractInputSchema>;
 
-export const CreateContractLineInputSchema = z.object({
+export const CreateContractLineInputBaseSchema = z.object({
   contractId: z.string().uuid(),
   laneId: z.string().uuid(),
   inputId: z.string().uuid().nullable().optional(),
@@ -504,12 +504,37 @@ export const CreateContractLineInputSchema = z.object({
   startDateOverride: z.string().date().nullable().optional(),
   endDateOverride: z.string().date().nullable().optional(),
 });
+
+export const CreateContractLineInputSchema =
+  CreateContractLineInputBaseSchema.refine(
+    (data) => {
+      if (
+        data.committedVolume !== null &&
+        data.committedVolume !== undefined &&
+        data.unitPrice !== null &&
+        data.unitPrice !== undefined &&
+        data.committedSpend !== null &&
+        data.committedSpend !== undefined
+      ) {
+        return (
+          Math.abs(data.committedSpend - data.committedVolume * data.unitPrice) <=
+          0.01
+        );
+      }
+      return true;
+    },
+    {
+      message:
+        "AMOUNT_CONFLICT: committedSpend disagrees with committedVolume * unitPrice by more than 0.01",
+      path: ["committedSpend"],
+    },
+  );
 export type CreateContractLineInput = z.infer<
   typeof CreateContractLineInputSchema
 >;
 
 export const UpdateContractLineInputSchema =
-  CreateContractLineInputSchema.omit({ contractId: true }).partial();
+  CreateContractLineInputBaseSchema.omit({ contractId: true }).partial();
 export type UpdateContractLineInput = z.infer<
   typeof UpdateContractLineInputSchema
 >;

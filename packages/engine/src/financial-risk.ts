@@ -235,6 +235,40 @@ function selectExpeditingShiftKey(mode: TransportMode): ExpeditingShiftKey {
   }
 }
 
+function computeLaneMitigationCost(params: {
+  lane: SupplyLane;
+  dailySpendEur: number;
+  gapDays: number;
+  switchingTier: SwitchingReadinessTier;
+}): number {
+  const { lane, dailySpendEur, gapDays, switchingTier } = params;
+  if (gapDays <= 0) return 0;
+  const shiftKey = selectExpeditingShiftKey(lane.transportMode);
+  const freightMult =
+    FINANCIAL_RISK_PARAMS_V1.expeditingFreightMultipliers[shiftKey].base;
+  const swCfg = FINANCIAL_RISK_PARAMS_V1.switching[switchingTier];
+
+  if (
+    lane.ordinaryFreightCostPerUnitEur !== null &&
+    lane.ordinaryFreightCostPerUnitEur !== undefined &&
+    lane.annualVolume !== null &&
+    lane.annualVolume > 0
+  ) {
+    const expQty = (lane.annualVolume / DAY_COUNT_BASIS) * gapDays;
+    return expQty * lane.ordinaryFreightCostPerUnitEur * (freightMult - 1);
+  }
+  if (dailySpendEur > 0) {
+    const modeMod =
+      FINANCIAL_RISK_PARAMS_V1.transportModeModifiers[lane.transportMode];
+    const expCost =
+      dailySpendEur * gapDays * modeMod.freightCostShare * (freightMult - 1);
+    const swCost =
+      swCfg.eur[1] + dailySpendEur * gapDays * (swCfg.spotPremiumPct[1] / 100);
+    return 0.65 * expCost + 0.35 * swCost;
+  }
+  return 0;
+}
+
 interface DiscreteLossPoint {
   loss: number;
   mass: number;
@@ -801,30 +835,12 @@ export function computeFinancialRiskSummary(
               : rawMarginLoss;
 
           // Mitigation cost: explicit freight quote first, else provisional alpha_freight + switching blend
-          let mitigationCost = 0;
-          const shiftKey = selectExpeditingShiftKey(s.lane.transportMode);
-          const freightMult =
-            FINANCIAL_RISK_PARAMS_V1.expeditingFreightMultipliers[shiftKey].base;
-          const swCfg = FINANCIAL_RISK_PARAMS_V1.switching[s.switchingTier];
-
-          if (
-            s.lane.ordinaryFreightCostPerUnitEur !== null &&
-            s.lane.ordinaryFreightCostPerUnitEur !== undefined &&
-            s.lane.annualVolume !== null &&
-            s.lane.annualVolume > 0
-          ) {
-            const expQty = (s.lane.annualVolume / DAY_COUNT_BASIS) * gap;
-            mitigationCost =
-              expQty * s.lane.ordinaryFreightCostPerUnitEur * (freightMult - 1);
-          } else if (s.dailySpendEur > 0) {
-            const modeMod =
-              FINANCIAL_RISK_PARAMS_V1.transportModeModifiers[s.lane.transportMode];
-            const expCost =
-              s.dailySpendEur * gap * modeMod.freightCostShare * (freightMult - 1);
-            const swCost =
-              swCfg.eur[1] + s.dailySpendEur * gap * (swCfg.spotPremiumPct[1] / 100);
-            mitigationCost = 0.65 * expCost + 0.35 * swCost;
-          }
+          const mitigationCost = computeLaneMitigationCost({
+            lane: s.lane,
+            dailySpendEur: s.dailySpendEur,
+            gapDays: gap,
+            switchingTier: s.switchingTier,
+          });
 
           totalMitigationLoss += mitigationCost;
 
@@ -1077,8 +1093,23 @@ export function computeFinancialRiskSummary(
         ? (baseAgg?.materialCondTailP90.get(mat.inputId) ?? 0)
         : null,
       expeditingCostBaseEur:
-        matHasMonetary && totalDailySpend > 0 && unprotectedGapDaysBase > 0
-          ? round2(totalDailySpend * unprotectedGapDaysBase * 0.35)
+        matHasMonetary && unprotectedGapDaysBase > 0
+          ? round2(
+              matSpecs.reduce(
+                (sum, spec) =>
+                  sum +
+                  computeLaneMitigationCost({
+                    lane: spec.lane,
+                    dailySpendEur: spec.dailySpendEur,
+                    gapDays: Math.max(
+                      0,
+                      spec.ttrSupport[0] - spec.effectiveTtsBase,
+                    ),
+                    switchingTier: spec.switchingTier,
+                  }),
+                0,
+              ),
+            )
           : matHasMonetary
             ? 0
             : null,
@@ -1248,7 +1279,8 @@ export function computeFinancialSimulationDelta(params: {
     let carry = 0;
     for (const lane of lanes) {
       const spend = commMap.get(lane.laneId)?.activeSpendEur ?? lane.annualSpendEur ?? 0;
-      const tts = lane.safetyStockDays ?? 0;
+      const tts =
+        lane.safetyStockDays ?? FINANCIAL_RISK_PARAMS_V1.level1.defaultTtsDays;
       const h =
         (lane.carryingCostPct ?? FINANCIAL_RISK_PARAMS_V1.carryingCostPct.base) /
         100;
