@@ -606,6 +606,9 @@ export function WorkspaceSidebar({
             analytics={analytics}
             loading={loadingAnalytics}
             facilities={facilities}
+            financialViewMode={financialViewMode}
+            onChangeFinancialViewMode={onChangeFinancialViewMode}
+            onQuickFillInputs={() => onChangeTab("lane")}
             onSelectFacility={(facilityId) => onSelectFacility(facilityId)}
             onOpenSimulator={onOpenSimulator}
             onOpenDirectory={onOpenDirectory}
