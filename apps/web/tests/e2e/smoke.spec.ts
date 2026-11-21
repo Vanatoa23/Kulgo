@@ -253,8 +253,8 @@ test.describe("Kulgo Browser E2E Smoke Suite", () => {
       page.getByRole("button", { name: "Product X", exact: true }),
     ).toBeVisible({ timeout: 15_000 });
 
-    // Open Analytics tab (demo seed switches to Overview)
-    await page.getByRole("button", { name: "Analytics" }).click();
+    // Open ESG/Risk analytics tab (demo seed switches to Overview/Refine)
+    await page.getByRole("button", { name: "ESG/Risk" }).click();
 
     // Financial Risk & Provisions card renders on Analytics tab
     const finCard = page.getByTestId("financial-risk-card");
