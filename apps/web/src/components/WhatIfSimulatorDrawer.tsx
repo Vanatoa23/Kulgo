@@ -32,9 +32,31 @@ export interface WhatIfSimulatorDrawerProps {
 interface DraftLaneOverride {
   volumeSharePct: number;
   transportMode: TransportMode;
+  safetyStockDays: number;
 }
 
 const TRANSPORT_MODES = TransportModeSchema.options;
+
+function formatEurDelta(value: number | null | undefined): {
+  text: string;
+  className: string;
+} {
+  if (value === null || value === undefined || !Number.isFinite(value)) {
+    return { text: "—", className: "text-slate-400" };
+  }
+  const rounded = Math.round(value);
+  if (rounded === 0) {
+    return { text: "€0", className: "text-slate-400" };
+  }
+  const sign = rounded > 0 ? "+" : "-";
+  const abs = Math.abs(rounded);
+  const formatted =
+    abs >= 1000 ? `${(abs / 1000).toFixed(1)}k` : abs.toLocaleString("en-US");
+  return {
+    text: `${sign}€${formatted}`,
+    className: rounded < 0 ? "text-emerald-400" : "text-amber-300",
+  };
+}
 
 function formatDelta(
   value: number,
@@ -88,13 +110,16 @@ export function WhatIfSimulatorDrawer({
     for (const lane of lanes) {
       const draft = drafts[lane.laneId];
       if (!draft) continue;
+      const baseStock = lane.safetyStockDays ?? 7;
       const shareChanged = draft.volumeSharePct !== lane.volumeSharePct;
       const modeChanged = draft.transportMode !== lane.transportMode;
-      if (!shareChanged && !modeChanged) continue;
+      const stockChanged = draft.safetyStockDays !== baseStock;
+      if (!shareChanged && !modeChanged && !stockChanged) continue;
       changes.push({
         laneId: lane.laneId,
         ...(shareChanged ? { volumeSharePct: draft.volumeSharePct } : {}),
         ...(modeChanged ? { transportMode: draft.transportMode } : {}),
+        ...(stockChanged ? { safetyStockDays: draft.safetyStockDays } : {}),
       });
     }
     return changes;
@@ -155,6 +180,7 @@ export function WhatIfSimulatorDrawer({
       const current = prev[lane.laneId] ?? {
         volumeSharePct: lane.volumeSharePct,
         transportMode: lane.transportMode,
+        safetyStockDays: lane.safetyStockDays ?? 7,
       };
       return {
         ...prev,
@@ -170,6 +196,7 @@ export function WhatIfSimulatorDrawer({
         next[lane.laneId] = {
           volumeSharePct: 0,
           transportMode: lane.transportMode,
+          safetyStockDays: lane.safetyStockDays ?? 7,
         };
       }
     }
@@ -183,8 +210,21 @@ export function WhatIfSimulatorDrawer({
         next[lane.laneId] = {
           volumeSharePct: lane.volumeSharePct,
           transportMode: lane.transportMode === "AIR" ? "SEA" : "RAIL",
+          safetyStockDays: lane.safetyStockDays ?? 7,
         };
       }
+    }
+    setDrafts(next);
+  };
+
+  const applyAdd14DaysStockPreset = () => {
+    const next: Record<string, DraftLaneOverride> = {};
+    for (const lane of lanes) {
+      next[lane.laneId] = {
+        volumeSharePct: lane.volumeSharePct,
+        transportMode: lane.transportMode,
+        safetyStockDays: (lane.safetyStockDays ?? 7) + 14,
+      };
     }
     setDrafts(next);
   };
@@ -253,6 +293,15 @@ export function WhatIfSimulatorDrawer({
         </button>
         <button
           type="button"
+          data-testid="preset-add-14d-stock"
+          onClick={applyAdd14DaysStockPreset}
+          className="inline-flex items-center gap-1.5 rounded-lg border border-amber-500/35 bg-amber-500/10 hover:bg-amber-500/20 text-amber-200 text-xs font-medium px-2.5 py-1 transition-colors cursor-pointer"
+        >
+          <Sparkles className="h-3 w-3" />
+          +14d Safety Stock
+        </button>
+        <button
+          type="button"
           onClick={() => {
             setDrafts({});
             setResult(null);
@@ -278,84 +327,134 @@ export function WhatIfSimulatorDrawer({
         {running ? (
           <div className="flex items-center justify-center gap-2 py-4 text-xs text-slate-400">
             <Loader2 className="h-4 w-4 animate-spin text-indigo-400" />
-            <span>Simulating HHI, risk &amp; CO2e deltas...</span>
+            <span>Simulating HHI, risk, EAL &amp; CO2e deltas...</span>
           </div>
         ) : result ? (
-          <div className="grid grid-cols-2 gap-2">
-            <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-2.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">
-                Resilience Score
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs font-mono">
-                <span className="text-slate-400">
-                  {result.baseline.resilienceScore}
-                </span>
-                <ArrowRight className="h-3 w-3 text-slate-600" />
-                <span className="text-white font-semibold">
-                  {result.simulated.resilienceScore}
-                </span>
-                {resilienceDelta && (
-                  <span className={`ml-auto font-semibold ${resilienceDelta.className}`}>
-                    {resilienceDelta.text}
+          <div className="space-y-2">
+            <div className="grid grid-cols-2 gap-2">
+              <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-2.5">
+                <div className="text-[10px] uppercase tracking-wider text-slate-500">
+                  Resilience Score
+                </div>
+                <div className="mt-1 flex items-center gap-1.5 text-xs font-mono">
+                  <span className="text-slate-400">
+                    {result.baseline.resilienceScore}
                   </span>
-                )}
+                  <ArrowRight className="h-3 w-3 text-slate-600" />
+                  <span className="text-white font-semibold">
+                    {result.simulated.resilienceScore}
+                  </span>
+                  {resilienceDelta && (
+                    <span className={`ml-auto font-semibold ${resilienceDelta.className}`}>
+                      {resilienceDelta.text}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-2.5">
+                <div className="text-[10px] uppercase tracking-wider text-slate-500">
+                  Avg Material HHI
+                </div>
+                <div className="mt-1 flex items-center justify-between text-xs font-mono">
+                  <span className="text-white font-semibold">
+                    {hhiDelta?.text}
+                  </span>
+                  <span className="text-[10px] text-slate-500">
+                    SPOF Δ {result.deltas.spofCountDelta >= 0 ? `+${result.deltas.spofCountDelta}` : result.deltas.spofCountDelta}
+                  </span>
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-2.5">
+                <div className="text-[10px] uppercase tracking-wider text-slate-500">
+                  Active Alerts
+                </div>
+                <div className="mt-1 flex items-center gap-1.5 text-xs font-mono">
+                  <span className="text-slate-400">
+                    {result.baseline.alerts.length}
+                  </span>
+                  <ArrowRight className="h-3 w-3 text-slate-600" />
+                  <span className="text-white font-semibold">
+                    {result.simulated.alerts.length}
+                  </span>
+                  {alertsDelta && (
+                    <span className={`ml-auto font-semibold ${alertsDelta.className}`}>
+                      {alertsDelta.text}
+                    </span>
+                  )}
+                </div>
+              </div>
+
+              <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-2.5">
+                <div className="text-[10px] uppercase tracking-wider text-slate-500">
+                  Transport Scope 3
+                </div>
+                <div className="mt-1 flex items-center gap-1.5 text-xs font-mono">
+                  <span className="text-white font-semibold">
+                    {result.simulated.esg.transportScope3Tco2e.toFixed(1)}t
+                  </span>
+                  {co2Delta && (
+                    <span className={`ml-auto font-semibold ${co2Delta.className}`}>
+                      {co2Delta.text}
+                    </span>
+                  )}
+                </div>
               </div>
             </div>
 
-            <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-2.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">
-                Avg Material HHI
-              </div>
-              <div className="mt-1 flex items-center justify-between text-xs font-mono">
-                <span className="text-white font-semibold">
-                  {hhiDelta?.text}
-                </span>
-                <span className="text-[10px] text-slate-500">
-                  SPOF Δ {result.deltas.spofCountDelta >= 0 ? `+${result.deltas.spofCountDelta}` : result.deltas.spofCountDelta}
-                </span>
-              </div>
-            </div>
-
-            <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-2.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">
-                Active Alerts
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs font-mono">
-                <span className="text-slate-400">
-                  {result.baseline.alerts.length}
-                </span>
-                <ArrowRight className="h-3 w-3 text-slate-600" />
-                <span className="text-white font-semibold">
-                  {result.simulated.alerts.length}
-                </span>
-                {alertsDelta && (
-                  <span className={`ml-auto font-semibold ${alertsDelta.className}`}>
-                    {alertsDelta.text}
+            {result.deltas.financialDeltas && (
+              <div
+                data-testid="whatif-financial-deltas"
+                className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 space-y-1.5 text-[11px]"
+              >
+                <div className="flex items-center justify-between">
+                  <span className="text-[10px] uppercase tracking-wider text-amber-300 font-semibold">
+                    Financial EAL &amp; Buffer ROI
                   </span>
-                )}
+                  {result.deltas.financialDeltas.workingCapitalRoiPct !== null && (
+                    <span className="font-mono text-[10px] font-semibold text-emerald-300">
+                      WC ROI: {result.deltas.financialDeltas.workingCapitalRoiPct.toFixed(1)}%/yr
+                      {result.deltas.financialDeltas.paybackYears !== null
+                        ? ` · Payback ${result.deltas.financialDeltas.paybackYears.toFixed(1)}y`
+                        : ""}
+                    </span>
+                  )}
+                </div>
+                <div className="grid grid-cols-3 gap-2 font-mono text-[11px]">
+                  <div>
+                    <div className="text-[9px] text-slate-400">EAL Δ/yr</div>
+                    <div
+                      data-testid="whatif-eal-delta"
+                      className={`font-semibold ${formatEurDelta(result.deltas.financialDeltas.baseEalDeltaEur).className}`}
+                    >
+                      {formatEurDelta(result.deltas.financialDeltas.baseEalDeltaEur).text}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[9px] text-slate-400">Carry Δ/yr</div>
+                    <div
+                      className={`font-semibold ${formatEurDelta(result.deltas.financialDeltas.carryingCostDeltaEur).className}`}
+                    >
+                      {formatEurDelta(result.deltas.financialDeltas.carryingCostDeltaEur).text}
+                    </div>
+                  </div>
+                  <div>
+                    <div className="text-[9px] text-slate-400">Net Benefit</div>
+                    <div className="font-semibold text-white">
+                      {result.deltas.financialDeltas.netAnnualBenefitEur !== null
+                        ? `${result.deltas.financialDeltas.netAnnualBenefitEur >= 0 ? "+" : "-"}€${Math.abs(Math.round(result.deltas.financialDeltas.netAnnualBenefitEur)).toLocaleString("en-US")}`
+                        : "—"}
+                    </div>
+                  </div>
+                </div>
               </div>
-            </div>
-
-            <div className="rounded-lg border border-slate-800 bg-slate-950/90 p-2.5">
-              <div className="text-[10px] uppercase tracking-wider text-slate-500">
-                Transport Scope 3
-              </div>
-              <div className="mt-1 flex items-center gap-1.5 text-xs font-mono">
-                <span className="text-white font-semibold">
-                  {result.simulated.esg.transportScope3Tco2e.toFixed(1)}t
-                </span>
-                {co2Delta && (
-                  <span className={`ml-auto font-semibold ${co2Delta.className}`}>
-                    {co2Delta.text}
-                  </span>
-                )}
-              </div>
-            </div>
+            )}
           </div>
         ) : (
           <p className="text-xs text-slate-400 text-center py-2">
-            Adjust any lane volume split or transport mode below to preview live
-            HHI, risk alert, and CO2e deltas.
+            Adjust any lane volume split, safety stock buffer, or transport mode
+            below to preview live HHI, EAL/ROI, and CO2e deltas.
           </p>
         )}
       </div>
@@ -368,13 +467,16 @@ export function WhatIfSimulatorDrawer({
           </p>
         ) : (
           lanes.map((lane) => {
+            const baseStock = lane.safetyStockDays ?? 7;
             const draft = drafts[lane.laneId] ?? {
               volumeSharePct: lane.volumeSharePct,
               transportMode: lane.transportMode,
+              safetyStockDays: baseStock,
             };
             const isModified =
               draft.volumeSharePct !== lane.volumeSharePct ||
-              draft.transportMode !== lane.transportMode;
+              draft.transportMode !== lane.transportMode ||
+              draft.safetyStockDays !== baseStock;
             const from = facilitiesById.get(lane.fromFacilityId);
             const input = lane.inputId
               ? inputsById.get(lane.inputId)
@@ -436,6 +538,34 @@ export function WhatIfSimulatorDrawer({
                       })
                     }
                     className="w-full accent-indigo-400 cursor-pointer"
+                  />
+                </div>
+
+                {/* Safety Stock Buffer (TTS) Slider */}
+                <div className="space-y-1">
+                  <div className="flex items-center justify-between text-[11px]">
+                    <span className="text-slate-400">Safety Stock (TTS)</span>
+                    <span className="font-mono text-white">
+                      {draft.safetyStockDays}d
+                      {draft.safetyStockDays !== baseStock && (
+                        <span className="text-slate-500 ml-1">
+                          (was {baseStock}d)
+                        </span>
+                      )}
+                    </span>
+                  </div>
+                  <input
+                    type="range"
+                    min={0}
+                    max={90}
+                    step={1}
+                    value={draft.safetyStockDays}
+                    onChange={(e) =>
+                      updateDraft(lane, {
+                        safetyStockDays: Number(e.target.value),
+                      })
+                    }
+                    className="w-full accent-amber-400 cursor-pointer"
                   />
                 </div>
 

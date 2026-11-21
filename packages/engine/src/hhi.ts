@@ -1,4 +1,8 @@
-import type { HhiMetric, HhiWeightingBasis } from "@kulgo/shared";
+import type {
+  HhiCoverageReason,
+  HhiMetric,
+  HhiWeightingBasis,
+} from "@kulgo/shared";
 
 export interface ShareEntry {
   key: string;
@@ -9,6 +13,9 @@ export interface HhiCoverageOptions {
   coveredLanesCount?: number;
   totalActiveLanesCount?: number;
   weightingBasis?: HhiWeightingBasis;
+  unknownWeightPct?: number;
+  isEstimatedUpperBoundForGhost?: boolean;
+  coverageReason?: HhiCoverageReason | null;
 }
 
 function buildCoverageFields(
@@ -19,6 +26,9 @@ function buildCoverageFields(
   | "totalActiveLanesCount"
   | "coveragePct"
   | "weightingBasis"
+  | "unknownWeightPct"
+  | "isEstimatedUpperBoundForGhost"
+  | "coverageReason"
 > {
   if (!options) return {};
   const result: Pick<
@@ -27,6 +37,9 @@ function buildCoverageFields(
     | "totalActiveLanesCount"
     | "coveragePct"
     | "weightingBasis"
+    | "unknownWeightPct"
+    | "isEstimatedUpperBoundForGhost"
+    | "coverageReason"
   > = {};
 
   if (
@@ -62,6 +75,22 @@ function buildCoverageFields(
   }
   if (options.weightingBasis) {
     result.weightingBasis = options.weightingBasis;
+  }
+  if (
+    options.unknownWeightPct !== undefined &&
+    Number.isFinite(options.unknownWeightPct)
+  ) {
+    result.unknownWeightPct = Math.min(
+      100,
+      Math.max(0, Math.round(options.unknownWeightPct * 100) / 100),
+    );
+  }
+  if (options.isEstimatedUpperBoundForGhost !== undefined) {
+    result.isEstimatedUpperBoundForGhost =
+      options.isEstimatedUpperBoundForGhost;
+  }
+  if (options.coverageReason !== undefined) {
+    result.coverageReason = options.coverageReason;
   }
   return result;
 }

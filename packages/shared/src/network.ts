@@ -32,8 +32,95 @@ export const VolumeUnitSchema = z.enum([
 ]);
 export type VolumeUnit = z.infer<typeof VolumeUnitSchema>;
 
+export const UnitFamilySchema = z.enum([
+  "MASS",
+  "COUNT",
+  "VOLUME",
+  "AREA",
+  "CURRENCY",
+]);
+export type UnitFamily = z.infer<typeof UnitFamilySchema>;
+
 export const RiskStatusSchema = z.enum(["GREEN", "YELLOW", "RED"]);
 export type RiskStatus = z.infer<typeof RiskStatusSchema>;
+
+export const ContractTypeSchema = z.enum(["FRAMEWORK", "SPOT_PO", "ESTIMATE"]);
+export type ContractType = z.infer<typeof ContractTypeSchema>;
+
+export const ContractCadenceSchema = z.enum(["PER_YEAR", "TOTAL_OVER_TERM"]);
+export type ContractCadence = z.infer<typeof ContractCadenceSchema>;
+
+export const ContractPricingModelSchema = z.enum(["FIXED", "INDEXED"]);
+export type ContractPricingModel = z.infer<typeof ContractPricingModelSchema>;
+
+export const ContractExpiryBehaviorSchema = z.enum([
+  "HOLDOVER",
+  "AUTO_RENEW",
+  "AUTO_ARCHIVE",
+]);
+export type ContractExpiryBehavior = z.infer<
+  typeof ContractExpiryBehaviorSchema
+>;
+
+export const ContractConfidenceSchema = z.enum([
+  "CONTRACTED",
+  "IMPORTED",
+  "ESTIMATED",
+]);
+export type ContractConfidence = z.infer<typeof ContractConfidenceSchema>;
+
+export const ContractLifecycleStateSchema = z.enum([
+  "ACTIVE",
+  "SCHEDULED",
+  "EXPIRED_ASSUMED_HOLDOVER",
+  "ARCHIVED_EXPIRED",
+  "ARCHIVED_BY_FRAMEWORK",
+  "ARCHIVED_MANUAL",
+]);
+export type ContractLifecycleState = z.infer<
+  typeof ContractLifecycleStateSchema
+>;
+
+export const ContractSchema = z
+  .object({
+    contractId: z.string().uuid(),
+    ownerOrgId: z.string().uuid(),
+    supplierFacilityId: z.string().uuid(),
+    title: z.string().min(1).max(200),
+    contractType: ContractTypeSchema,
+    pricingModel: ContractPricingModelSchema.default("FIXED"),
+    expiryBehavior: ContractExpiryBehaviorSchema.default("HOLDOVER"),
+    confidence: ContractConfidenceSchema.default("CONTRACTED"),
+    startDate: z.string().date(),
+    endDate: z.string().date().nullable().default(null),
+    noticePeriodDays: z.number().int().nonnegative().default(0),
+    nonRenewalNoticeGiven: z.boolean().default(false),
+    archiveEffectiveDate: z.string().date().nullable().default(null),
+    isManuallyArchived: z.boolean().default(false),
+    incoterms: z.string().max(32).nullable().default(null),
+    notes: z.string().max(1000).nullable().default(null),
+  })
+  .strict();
+export type Contract = z.infer<typeof ContractSchema>;
+
+export const ContractLineSchema = z
+  .object({
+    contractLineId: z.string().uuid(),
+    contractId: z.string().uuid(),
+    ownerOrgId: z.string().uuid(),
+    laneId: z.string().uuid(),
+    inputId: z.string().uuid().nullable().default(null),
+    cadence: ContractCadenceSchema.default("PER_YEAR"),
+    committedVolume: z.number().finite().nonnegative().nullable().default(null),
+    unit: z.string().min(1).max(32).default("TONNES"),
+    committedSpend: z.number().finite().nonnegative().nullable().default(null),
+    unitPrice: z.number().finite().nonnegative().nullable().default(null),
+    currency: z.string().length(3).default("EUR"),
+    startDateOverride: z.string().date().nullable().default(null),
+    endDateOverride: z.string().date().nullable().default(null),
+  })
+  .strict();
+export type ContractLine = z.infer<typeof ContractLineSchema>;
 
 export const ProductSchema = z
   .object({
@@ -42,6 +129,8 @@ export const ProductSchema = z
     name: z.string().min(1).max(160),
     sku: z.string().max(64).nullable().default(null),
     description: z.string().max(1000).nullable().default(null),
+    annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
+    grossMarginPct: z.number().finite().min(0).max(100).nullable().optional(),
   })
   .strict();
 export type Product = z.infer<typeof ProductSchema>;
@@ -54,6 +143,13 @@ export const SupplyInputSchema = z
     name: z.string().min(1).max(160),
     category: z.string().min(1).max(100),
     unit: VolumeUnitSchema.default("TONNES"),
+    baseUnit: VolumeUnitSchema.optional(),
+    unitFamily: UnitFamilySchema.optional(),
+    unitConversionFactors: z
+      .record(z.string().min(1).max(32), z.number().finite().positive())
+      .optional(),
+    totalAnnualDemand: z.number().finite().nonnegative().nullable().optional(),
+    materialCriticality: z.number().finite().min(0).max(1).nullable().optional(),
   })
   .strict();
 export type SupplyInput = z.infer<typeof SupplyInputSchema>;
@@ -74,6 +170,7 @@ export const FacilitySchema = z
     sector: z.string().max(100).nullable().default(null),
     esgBadges: z.array(z.string()).default([]),
     estimatedScope12Tco2e: z.number().nonnegative().nullable().default(null),
+    defaultCarryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
   })
   .strict();
 export type Facility = z.infer<typeof FacilitySchema>;
@@ -98,6 +195,13 @@ export const SupplyLaneSchema = z
     estimatedLaneCo2e: z.number().nonnegative().nullable().default(null),
     riskStatus: RiskStatusSchema.default("GREEN"),
     riskReason: z.string().max(300).nullable().default(null),
+    safetyStockDays: z.number().finite().nonnegative().nullable().optional(),
+    defectRatePct: z.number().finite().min(0).max(95).nullable().optional(),
+    carryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
+    unitLandedCostEur: z.number().finite().nonnegative().nullable().optional(),
+    ordinaryFreightCostPerUnitEur: z.number().finite().nonnegative().nullable().optional(),
+    customAnnualDisruptionProb: z.number().finite().min(0).max(1).nullable().optional(),
+    customTtrDays: z.number().finite().nonnegative().nullable().optional(),
   })
   .strict();
 export type SupplyLane = z.infer<typeof SupplyLaneSchema>;
@@ -208,6 +312,8 @@ export const WorkspaceNetworkResponseSchema = z
     facilities: z.array(FacilitySchema),
     lanes: z.array(SupplyLaneSchema),
     riskSignals: z.array(RiskSignalSchema).default([]),
+    contracts: z.array(ContractSchema).optional(),
+    contractLines: z.array(ContractLineSchema).optional(),
   })
   .strict();
 export type WorkspaceNetworkResponse = z.infer<
@@ -230,6 +336,8 @@ export const CreateProductInputSchema = z.object({
   name: z.string().trim().min(1).max(160),
   sku: z.string().trim().max(64).nullable().optional(),
   description: z.string().trim().max(500).nullable().optional(),
+  annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
+  grossMarginPct: z.number().finite().min(0).max(100).nullable().optional(),
 });
 export type CreateProductInput = z.infer<typeof CreateProductInputSchema>;
 
@@ -241,6 +349,13 @@ export const CreateSupplyInputInputSchema = z.object({
   name: z.string().trim().min(1).max(160),
   category: z.string().trim().min(1).max(80),
   unit: VolumeUnitSchema.default("TONNES"),
+  baseUnit: VolumeUnitSchema.optional(),
+  unitFamily: UnitFamilySchema.optional(),
+  unitConversionFactors: z
+    .record(z.string().min(1).max(32), z.number().finite().positive())
+    .optional(),
+  totalAnnualDemand: z.number().finite().nonnegative().nullable().optional(),
+  materialCriticality: z.number().finite().min(0).max(1).nullable().optional(),
 });
 export type CreateSupplyInputInput = z.infer<
   typeof CreateSupplyInputInputSchema
@@ -251,6 +366,13 @@ export const UpdateSupplyInputInputSchema = z.object({
   name: z.string().trim().min(1).max(160).optional(),
   category: z.string().trim().min(1).max(80).optional(),
   unit: VolumeUnitSchema.optional(),
+  baseUnit: VolumeUnitSchema.optional(),
+  unitFamily: UnitFamilySchema.optional(),
+  unitConversionFactors: z
+    .record(z.string().min(1).max(32), z.number().finite().positive())
+    .optional(),
+  totalAnnualDemand: z.number().finite().nonnegative().nullable().optional(),
+  materialCriticality: z.number().finite().min(0).max(1).nullable().optional(),
 });
 export type UpdateSupplyInputInput = z.infer<
   typeof UpdateSupplyInputInputSchema
@@ -268,6 +390,7 @@ export const CreateFacilityInputSchema = z.object({
   sector: z.string().trim().max(100).nullable().optional(),
   esgBadges: z.array(z.string().trim().min(1).max(64)).optional(),
   estimatedScope12Tco2e: z.number().finite().nonnegative().nullable().optional(),
+  defaultCarryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
 });
 export type CreateFacilityInput = z.infer<typeof CreateFacilityInputSchema>;
 
@@ -283,6 +406,7 @@ export const UpdateFacilityInputSchema = z.object({
   sector: z.string().trim().max(100).nullable().optional(),
   esgBadges: z.array(z.string().trim().min(1).max(64)).optional(),
   estimatedScope12Tco2e: z.number().finite().nonnegative().nullable().optional(),
+  defaultCarryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
 });
 export type UpdateFacilityInput = z.infer<typeof UpdateFacilityInputSchema>;
 
@@ -303,6 +427,13 @@ export const CreateSupplyLaneInputSchema = z.object({
   estimatedLaneCo2e: z.number().finite().nonnegative().nullable().optional(),
   riskStatus: RiskStatusSchema.default("GREEN"),
   riskReason: z.string().trim().max(300).nullable().optional(),
+  safetyStockDays: z.number().finite().nonnegative().nullable().optional(),
+  defectRatePct: z.number().finite().min(0).max(95).nullable().optional(),
+  carryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
+  unitLandedCostEur: z.number().finite().nonnegative().nullable().optional(),
+  ordinaryFreightCostPerUnitEur: z.number().finite().nonnegative().nullable().optional(),
+  customAnnualDisruptionProb: z.number().finite().min(0).max(1).nullable().optional(),
+  customTtrDays: z.number().finite().nonnegative().nullable().optional(),
 });
 export type CreateSupplyLaneInput = z.infer<typeof CreateSupplyLaneInputSchema>;
 
@@ -323,8 +454,90 @@ export const UpdateSupplyLaneInputSchema = z.object({
   estimatedLaneCo2e: z.number().finite().nonnegative().nullable().optional(),
   riskStatus: RiskStatusSchema.optional(),
   riskReason: z.string().trim().max(300).nullable().optional(),
+  safetyStockDays: z.number().finite().nonnegative().nullable().optional(),
+  defectRatePct: z.number().finite().min(0).max(95).nullable().optional(),
+  carryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
+  unitLandedCostEur: z.number().finite().nonnegative().nullable().optional(),
+  ordinaryFreightCostPerUnitEur: z.number().finite().nonnegative().nullable().optional(),
+  customAnnualDisruptionProb: z.number().finite().min(0).max(1).nullable().optional(),
+  customTtrDays: z.number().finite().nonnegative().nullable().optional(),
 });
 export type UpdateSupplyLaneInput = z.infer<typeof UpdateSupplyLaneInputSchema>;
+
+export const CreateContractInputSchema = z.object({
+  supplierFacilityId: z.string().uuid(),
+  title: z.string().trim().min(1).max(200),
+  contractType: ContractTypeSchema.default("FRAMEWORK"),
+  pricingModel: ContractPricingModelSchema.default("FIXED"),
+  expiryBehavior: ContractExpiryBehaviorSchema.optional(),
+  confidence: ContractConfidenceSchema.default("CONTRACTED"),
+  startDate: z.string().date(),
+  endDate: z.string().date().nullable().optional(),
+  noticePeriodDays: z.number().int().nonnegative().default(0),
+  nonRenewalNoticeGiven: z.boolean().default(false),
+  incoterms: z.string().trim().max(32).nullable().optional(),
+  notes: z.string().trim().max(1000).nullable().optional(),
+});
+export type CreateContractInput = z.infer<typeof CreateContractInputSchema>;
+
+export const UpdateContractInputSchema = CreateContractInputSchema.partial().extend({
+  archiveEffectiveDate: z.string().date().nullable().optional(),
+  isManuallyArchived: z.boolean().optional(),
+});
+export type UpdateContractInput = z.infer<typeof UpdateContractInputSchema>;
+
+export const CreateContractLineInputBaseSchema = z.object({
+  contractId: z.string().uuid(),
+  laneId: z.string().uuid(),
+  inputId: z.string().uuid().nullable().optional(),
+  cadence: ContractCadenceSchema.default("PER_YEAR"),
+  committedVolume: z.number().finite().nonnegative().nullable().optional(),
+  unit: z.string().trim().min(1).max(32).default("TONNES"),
+  committedSpend: z.number().finite().nonnegative().nullable().optional(),
+  unitPrice: z.number().finite().nonnegative().nullable().optional(),
+  currency: z
+    .string()
+    .trim()
+    .length(3)
+    .transform((v) => v.toUpperCase())
+    .default("EUR"),
+  startDateOverride: z.string().date().nullable().optional(),
+  endDateOverride: z.string().date().nullable().optional(),
+});
+
+export const CreateContractLineInputSchema =
+  CreateContractLineInputBaseSchema.refine(
+    (data) => {
+      if (
+        data.committedVolume !== null &&
+        data.committedVolume !== undefined &&
+        data.unitPrice !== null &&
+        data.unitPrice !== undefined &&
+        data.committedSpend !== null &&
+        data.committedSpend !== undefined
+      ) {
+        return (
+          Math.abs(data.committedSpend - data.committedVolume * data.unitPrice) <=
+          0.01
+        );
+      }
+      return true;
+    },
+    {
+      message:
+        "AMOUNT_CONFLICT: committedSpend disagrees with committedVolume * unitPrice by more than 0.01",
+      path: ["committedSpend"],
+    },
+  );
+export type CreateContractLineInput = z.infer<
+  typeof CreateContractLineInputSchema
+>;
+
+export const UpdateContractLineInputSchema =
+  CreateContractLineInputBaseSchema.omit({ contractId: true }).partial();
+export type UpdateContractLineInput = z.infer<
+  typeof UpdateContractLineInputSchema
+>;
 
 // --- M4 Bulk Import & Export Schemas ---
 
@@ -352,6 +565,9 @@ export const BulkImportLaneRowSchema = z.object({
   estimatedLaneCo2e: z.number().finite().nonnegative().nullable().optional(),
   riskStatus: RiskStatusSchema.default("GREEN"),
   riskReason: z.string().trim().max(300).nullable().optional(),
+  safetyStockDays: z.number().finite().nonnegative().nullable().optional(),
+  defectRatePct: z.number().finite().min(0).max(95).nullable().optional(),
+  carryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
 });
 export type BulkImportLaneRow = z.infer<typeof BulkImportLaneRowSchema>;
 

@@ -615,6 +615,26 @@ export function ImportExportModal({
                       </span>
                     </div>
                   </div>
+                  {csrdPreview.financialExposure && (
+                    <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-2.5 text-[11px] flex flex-wrap items-center justify-between gap-2">
+                      <span className="font-semibold text-amber-200">
+                        Financial Exposure ({csrdPreview.financialExposure.confidenceBadge})
+                      </span>
+                      <span className="font-mono text-slate-200">
+                        Base EAL:{" "}
+                        {csrdPreview.financialExposure.baseEur !== null
+                          ? `€${Math.round(csrdPreview.financialExposure.baseEur).toLocaleString("en-US")}/yr`
+                          : "Unpriced"}{" "}
+                        · VaR p90:{" "}
+                        {csrdPreview.financialExposure.varP90Eur !== null
+                          ? `€${Math.round(csrdPreview.financialExposure.varP90Eur).toLocaleString("en-US")}`
+                          : "—"}
+                        {csrdPreview.financialExposure.renewalCliffCount > 0
+                          ? ` · ${csrdPreview.financialExposure.renewalCliffCount} renewal cliff(s)`
+                          : ""}
+                      </span>
+                    </div>
+                  )}
                 </div>
               )}
             </>

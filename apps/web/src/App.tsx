@@ -78,6 +78,9 @@ export function App() {
 
   // M2 Analytics & View Mode state
   const [viewMode, setViewMode] = useState<WorkspaceViewMode>("map");
+  const [financialViewMode, setFinancialViewMode] = useState<
+    "RUN_RATE" | "PERIOD_WINDOW"
+  >("PERIOD_WINDOW");
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
   const [simulatorOpen, setSimulatorOpen] = useState(false);
@@ -201,6 +204,7 @@ export function App() {
     getAnalyticsSummary({
       productId: activeProductId ?? undefined,
       inputId: activeInputId ?? undefined,
+      viewMode: financialViewMode,
     })
       .then((summary) => {
         if (!cancelled) {
@@ -221,7 +225,7 @@ export function App() {
     return () => {
       cancelled = true;
     };
-  }, [session, network, activeProductId, activeInputId]);
+  }, [session, network, activeProductId, activeInputId, financialViewMode]);
 
   const refreshAlertFeed = useCallback(async () => {
     setLoadingAlerts(true);
@@ -700,10 +704,15 @@ export function App() {
           inputs={network.inputs}
           facilities={network.facilities}
           visibleLanes={filtered.lanes}
+          contracts={network.contracts ?? []}
+          contractLines={network.contractLines ?? []}
           invitations={invitations}
           stats={filtered.stats}
           analytics={analytics}
           loadingAnalytics={loadingAnalytics}
+          financialViewMode={financialViewMode}
+          onChangeFinancialViewMode={setFinancialViewMode}
+          onContractsChanged={() => loadWorkspaceNetwork(false)}
           selectedFacilityId={selectedFacilityId}
           selectedLaneId={selectedLaneId}
           pickedCoords={pickedCoords}

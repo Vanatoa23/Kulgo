@@ -47,12 +47,18 @@ import {
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
 import type { LiveAlertFeedResponse } from "../lib/api.js";
+import type {
+  Contract,
+  ContractLine,
+  FinancialViewMode,
+} from "@kulgo/shared";
 import {
   formatEur,
   type WorkspaceSummaryStats,
 } from "../lib/workspace-utils.js";
 import { AnalyticsPanel } from "./AnalyticsPanel.js";
 import type { MapInteractionMode } from "./FilterBar.js";
+import { LaneContractsDrawerSection } from "./LaneContractsDrawerSection.js";
 import { LiveAlertsPanel } from "./LiveAlertsPanel.js";
 
 export type SidebarTab =
@@ -71,10 +77,15 @@ export interface WorkspaceSidebarProps {
   inputs: readonly SupplyInput[];
   facilities: readonly Facility[];
   visibleLanes: readonly SupplyLane[];
+  contracts?: readonly Contract[];
+  contractLines?: readonly ContractLine[];
   invitations: readonly Invitation[];
   stats: WorkspaceSummaryStats;
   analytics: AnalyticsSummary | null;
   loadingAnalytics: boolean;
+  financialViewMode?: FinancialViewMode;
+  onChangeFinancialViewMode?: (mode: FinancialViewMode) => void;
+  onContractsChanged?: () => Promise<void> | void;
   selectedFacilityId: string | null;
   selectedLaneId: string | null;
   pickedCoords: { lat: number; lng: number } | null;
@@ -132,10 +143,15 @@ export function WorkspaceSidebar({
   inputs,
   facilities,
   visibleLanes,
+  contracts = [],
+  contractLines = [],
   invitations,
   stats,
   analytics,
   loadingAnalytics,
+  financialViewMode = "PERIOD_WINDOW",
+  onChangeFinancialViewMode,
+  onContractsChanged,
   selectedFacilityId,
   selectedLaneId,
   pickedCoords,
@@ -300,6 +316,24 @@ export function WorkspaceSidebar({
       setLaneContractEnd(selectedLane.contractEndDate ?? "");
       setLaneRisk(selectedLane.riskStatus);
       setLaneRiskReason(selectedLane.riskReason ?? "");
+      setLaneSafetyStockDays(
+        selectedLane.safetyStockDays !== null &&
+          selectedLane.safetyStockDays !== undefined
+          ? String(selectedLane.safetyStockDays)
+          : "",
+      );
+      setLaneDefectRatePct(
+        selectedLane.defectRatePct !== null &&
+          selectedLane.defectRatePct !== undefined
+          ? String(selectedLane.defectRatePct)
+          : "",
+      );
+      setLaneCarryingCostPct(
+        selectedLane.carryingCostPct !== null &&
+          selectedLane.carryingCostPct !== undefined
+          ? String(selectedLane.carryingCostPct)
+          : "",
+      );
     } else {
       const ownFac = facilities.find((f) => f.isOwnFacility);
       const supplierFac = facilities.find((f) => !f.isOwnFacility);
@@ -315,8 +349,15 @@ export function WorkspaceSidebar({
       setLaneContractEnd("");
       setLaneRisk("GREEN");
       setLaneRiskReason("");
+      setLaneSafetyStockDays("");
+      setLaneDefectRatePct("");
+      setLaneCarryingCostPct("");
     }
   }, [selectedLane, facilities, inputs]);
+
+  const [laneSafetyStockDays, setLaneSafetyStockDays] = useState("");
+  const [laneDefectRatePct, setLaneDefectRatePct] = useState("");
+  const [laneCarryingCostPct, setLaneCarryingCostPct] = useState("");
 
   // --- Catalog Form State ---
   const [prodName, setProdName] = useState("");
@@ -418,6 +459,16 @@ export function WorkspaceSidebar({
       return;
     }
 
+    const safetyStockDays = laneSafetyStockDays.trim()
+      ? Number(laneSafetyStockDays)
+      : null;
+    const defectRatePct = laneDefectRatePct.trim()
+      ? Number(laneDefectRatePct)
+      : null;
+    const carryingCostPct = laneCarryingCostPct.trim()
+      ? Number(laneCarryingCostPct)
+      : null;
+
     if (selectedLane) {
       await onUpdateLane(selectedLane.laneId, {
         fromFacilityId: laneFromId,
@@ -432,6 +483,18 @@ export function WorkspaceSidebar({
         contractEndDate: contractDate,
         riskStatus: laneRisk,
         riskReason: laneRiskReason.trim() || null,
+        safetyStockDays:
+          safetyStockDays !== null && Number.isFinite(safetyStockDays)
+            ? safetyStockDays
+            : null,
+        defectRatePct:
+          defectRatePct !== null && Number.isFinite(defectRatePct)
+            ? defectRatePct
+            : null,
+        carryingCostPct:
+          carryingCostPct !== null && Number.isFinite(carryingCostPct)
+            ? carryingCostPct
+            : null,
       });
     } else {
       await onCreateLane({
@@ -447,6 +510,18 @@ export function WorkspaceSidebar({
         contractEndDate: contractDate,
         riskStatus: laneRisk,
         riskReason: laneRiskReason.trim() || null,
+        safetyStockDays:
+          safetyStockDays !== null && Number.isFinite(safetyStockDays)
+            ? safetyStockDays
+            : null,
+        defectRatePct:
+          defectRatePct !== null && Number.isFinite(defectRatePct)
+            ? defectRatePct
+            : null,
+        carryingCostPct:
+          carryingCostPct !== null && Number.isFinite(carryingCostPct)
+            ? carryingCostPct
+            : null,
       });
     }
   };
@@ -531,6 +606,9 @@ export function WorkspaceSidebar({
             analytics={analytics}
             loading={loadingAnalytics}
             facilities={facilities}
+            financialViewMode={financialViewMode}
+            onChangeFinancialViewMode={onChangeFinancialViewMode}
+            onQuickFillInputs={() => onChangeTab("lane")}
             onSelectFacility={(facilityId) => onSelectFacility(facilityId)}
             onOpenSimulator={onOpenSimulator}
             onOpenDirectory={onOpenDirectory}
@@ -1427,6 +1505,59 @@ export function WorkspaceSidebar({
                     />
                   </div>
 
+                  {/* Progressive Disclosure: Collapsed Financial & Operational Buffer Details */}
+                  <details className="rounded-lg border border-slate-800 bg-slate-900/60 p-2.5">
+                    <summary className="cursor-pointer text-[11px] font-semibold text-slate-300 select-none">
+                      Financial &amp; Buffer Details (Optional — narrows EAL)
+                    </summary>
+                    <div className="mt-2.5 grid grid-cols-3 gap-2">
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">
+                          Safety Stock (d)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          step="1"
+                          value={laneSafetyStockDays}
+                          onChange={(e) => setLaneSafetyStockDays(e.target.value)}
+                          placeholder="10"
+                          className="w-full rounded-md border border-slate-800 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">
+                          Defect Rate (%)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="95"
+                          step="0.1"
+                          value={laneDefectRatePct}
+                          onChange={(e) => setLaneDefectRatePct(e.target.value)}
+                          placeholder="2.0"
+                          className="w-full rounded-md border border-slate-800 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
+                        />
+                      </div>
+                      <div>
+                        <label className="block text-[10px] text-slate-400 mb-1">
+                          Carry Cost (%)
+                        </label>
+                        <input
+                          type="number"
+                          min="0"
+                          max="100"
+                          step="0.5"
+                          value={laneCarryingCostPct}
+                          onChange={(e) => setLaneCarryingCostPct(e.target.value)}
+                          placeholder="20"
+                          className="w-full rounded-md border border-slate-800 bg-slate-950 px-2 py-1.5 text-xs text-slate-100"
+                        />
+                      </div>
+                    </div>
+                  </details>
+
                   <div className="flex items-center gap-2 pt-2">
                     <button
                       type="submit"
@@ -1451,6 +1582,18 @@ export function WorkspaceSidebar({
                     )}
                   </div>
                 </form>
+
+                {selectedLane && (
+                  <LaneContractsDrawerSection
+                    lane={selectedLane}
+                    contracts={contracts}
+                    contractLines={contractLines}
+                    derivedSummary={analytics?.financialRisk?.laneCommercials.find(
+                      (c) => c.laneId === selectedLane.laneId,
+                    )}
+                    onChanged={onContractsChanged ?? (() => {})}
+                  />
+                )}
               </>
             )}
           </section>

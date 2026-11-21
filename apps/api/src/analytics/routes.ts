@@ -1,6 +1,7 @@
 import {
   AnalyticsSummarySchema,
   ExecutiveReportSchema,
+  FinancialViewModeSchema,
   SimulateAnalyticsRequestSchema,
   SimulateAnalyticsResponseSchema,
 } from "@kulgo/shared";
@@ -21,6 +22,7 @@ export interface AnalyticsRoutesDependencies {
 const AnalyticsQuerySchema = z.object({
   productId: z.string().uuid().optional(),
   inputId: z.string().uuid().optional(),
+  viewMode: FinancialViewModeSchema.optional(),
 });
 
 export function createAnalyticsRoutes({
@@ -36,10 +38,12 @@ export function createAnalyticsRoutes({
     const orgId = c.get("auth").organization.orgId;
     const rawProductId = c.req.query("productId");
     const rawInputId = c.req.query("inputId");
+    const rawViewMode = c.req.query("viewMode");
 
     const parsedQuery = AnalyticsQuerySchema.safeParse({
       productId: rawProductId || undefined,
       inputId: rawInputId || undefined,
+      viewMode: rawViewMode || undefined,
     });
     if (!parsedQuery.success) {
       return c.json(
@@ -51,7 +55,12 @@ export function createAnalyticsRoutes({
       );
     }
 
-    const summary = await analyticsRepo.getSummary(orgId, parsedQuery.data);
+    const summary = await analyticsRepo.getSummary(
+      orgId,
+      { productId: parsedQuery.data.productId, inputId: parsedQuery.data.inputId },
+      undefined,
+      parsedQuery.data.viewMode,
+    );
     return c.json(AnalyticsSummarySchema.parse(summary), 200);
   });
 
@@ -60,10 +69,12 @@ export function createAnalyticsRoutes({
     const orgId = auth.organization.orgId;
     const rawProductId = c.req.query("productId");
     const rawInputId = c.req.query("inputId");
+    const rawViewMode = c.req.query("viewMode");
 
     const parsedQuery = AnalyticsQuerySchema.safeParse({
       productId: rawProductId || undefined,
       inputId: rawInputId || undefined,
+      viewMode: rawViewMode || undefined,
     });
     if (!parsedQuery.success) {
       return c.json(
@@ -78,7 +89,9 @@ export function createAnalyticsRoutes({
     try {
       const report = await analyticsRepo.getExecutiveReport(
         orgId,
-        parsedQuery.data,
+        { productId: parsedQuery.data.productId, inputId: parsedQuery.data.inputId },
+        undefined,
+        parsedQuery.data.viewMode,
       );
       const validated = ExecutiveReportSchema.parse(report);
 

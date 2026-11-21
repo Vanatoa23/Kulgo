@@ -32,6 +32,8 @@ export async function seedEstoniaProductXDemo(
     sku: DEMO_PRODUCT_SKU,
     description:
       "Precision industrial electronics assembly manufactured in Tallinn, Estonia.",
+    annualRevenueEur: 8_000_000,
+    grossMarginPct: 35,
   });
 
   const [

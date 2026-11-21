@@ -1628,3 +1628,143 @@ describe("Privacy Boundary Contract (Live Disruption Monitoring & Alerts)", () =
   });
 });
 
+describe("Privacy Boundary Contract (Sub-Project 2 Financial Risk & Contracts)", () => {
+  it("enforces two-org isolation on /api/v1/workspace/contracts and strips Tier-2+ internals from financialRisk DTOs", async () => {
+    const app = createTestApp();
+
+    const orgA = await registerOrg(app, "fin-org-a@example.com", "FinBuyer A");
+    const orgB = await registerOrg(app, "fin-org-b@example.com", "FinSupplier B");
+
+    // Org A creates product, input, facilities, lane, and contract
+    const prodRes = await app.request("/api/v1/workspace/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Product X",
+        annualRevenueEur: 8_000_000,
+        grossMarginPct: 35,
+      }),
+    });
+    expect(prodRes.status).toBe(201);
+    const prod = ((await prodRes.json()) as { product: { productId: string } }).product;
+
+    const inputRes = await app.request("/api/v1/workspace/inputs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        productId: prod.productId,
+        name: "Sensors",
+        category: "Electronics",
+        unit: "UNITS",
+        baseUnit: "UNITS",
+        totalAnnualDemand: 100_000,
+      }),
+    });
+    expect(inputRes.status).toBe(201);
+    const mat = ((await inputRes.json()) as { input: { inputId: string } }).input;
+
+    const hqRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Tallinn HQ",
+        kind: "FACTORY",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: true,
+      }),
+    });
+    const hq = ((await hqRes.json()) as { facility: { facilityId: string } }).facility;
+
+    const supRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Nordic Partner B",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 60.1699,
+        lng: 24.9384,
+        isOwnFacility: false,
+      }),
+    });
+    const sup = ((await supRes.json()) as { facility: { facilityId: string } }).facility;
+
+    const laneRes = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: sup.facilityId,
+        toFacilityId: hq.facilityId,
+        inputId: mat.inputId,
+        materialCategory: "Electronics",
+        transportMode: "ROAD",
+        volumeSharePct: 100,
+        safetyStockDays: 10,
+      }),
+    });
+    expect(laneRes.status).toBe(201);
+    const lane = ((await laneRes.json()) as { lane: { laneId: string } }).lane;
+
+    const contractRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        supplierFacilityId: sup.facilityId,
+        title: "Confidential Framework 2026",
+        contractType: "FRAMEWORK",
+        startDate: "2026-01-01",
+        endDate: "2027-06-30",
+        lines: [
+          {
+            laneId: lane.laneId,
+            cadence: "PER_YEAR",
+            committedVolume: 100_000,
+            unit: "UNITS",
+            committedSpend: 1_200_000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(contractRes.status).toBe(201);
+    const { contract } = (await contractRes.json()) as {
+      contract: { contractId: string };
+    };
+
+    // Org B MUST NOT see or mutate Org A's contract
+    const orgBContractsRes = await app.request("/api/v1/workspace/contracts", {
+      headers: { Cookie: orgB.cookie },
+    });
+    expect(orgBContractsRes.status).toBe(200);
+    const orgBContractsText = await orgBContractsRes.text();
+    expect(orgBContractsText).not.toContain("Confidential Framework 2026");
+    expect(orgBContractsText).not.toContain(contract.contractId);
+
+    const orgBPatchRes = await app.request(
+      `/api/v1/workspace/contracts/${contract.contractId}`,
+      {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+        body: JSON.stringify({ title: "Hijacked" }),
+      },
+    );
+    expect(orgBPatchRes.status).toBe(404);
+
+    // Org A fetches analytics summary & report -> valid .strict() financialRisk present, zero opaque hidden fields
+    const summaryRes = await app.request(
+      "/api/v1/analytics/summary?viewMode=RUN_RATE",
+      { headers: { Cookie: orgA.cookie } },
+    );
+    expect(summaryRes.status).toBe(200);
+    const summaryText = await summaryRes.text();
+    const summary = AnalyticsSummarySchema.parse(JSON.parse(summaryText));
+    expect(summary.financialRisk).toBeDefined();
+    expect(summary.financialRisk?.totalActiveSpendEur).toBe(1_200_000);
+    expect(summaryText).not.toContain("hiddenProbabilityMultiplier");
+    expect(summaryText).not.toContain("eventGroupId");
+  });
+});
+
+
