@@ -39,21 +39,25 @@ import {
   MapPin,
   Package,
   Plus,
+  Radio,
   ShieldAlert,
   ShieldCheck,
   Trash2,
   XCircle,
 } from "lucide-react";
 import { useEffect, useState, type FormEvent } from "react";
+import type { LiveAlertFeedResponse } from "../lib/api.js";
 import {
   formatEur,
   type WorkspaceSummaryStats,
 } from "../lib/workspace-utils.js";
 import { AnalyticsPanel } from "./AnalyticsPanel.js";
 import type { MapInteractionMode } from "./FilterBar.js";
+import { LiveAlertsPanel } from "./LiveAlertsPanel.js";
 
 export type SidebarTab =
   | "analytics"
+  | "alerts"
   | "overview"
   | "facility"
   | "lane"
@@ -103,6 +107,15 @@ export interface WorkspaceSidebarProps {
     input: CreateInviteInput,
   ) => Promise<CreateInviteResponse | null>;
   onRevokeInvite: (inviteId: string) => Promise<void>;
+  alertFeed?: LiveAlertFeedResponse | null;
+  loadingAlerts?: boolean;
+  sweepingAlerts?: boolean;
+  onAcknowledgeAlert?: (
+    signalId: string,
+    status: "ACKNOWLEDGED" | "MUTED",
+  ) => Promise<void>;
+  onTriggerAlertSweep?: () => Promise<void>;
+  onOpenOrgSettings?: () => void;
 }
 
 const FACILITY_KINDS = FacilityKindSchema.options;
@@ -147,6 +160,12 @@ export function WorkspaceSidebar({
   onDeleteSupplyInput,
   onCreateInvite,
   onRevokeInvite,
+  alertFeed = null,
+  loadingAlerts = false,
+  sweepingAlerts = false,
+  onAcknowledgeAlert,
+  onTriggerAlertSweep,
+  onOpenOrgSettings,
 }: WorkspaceSidebarProps) {
   const isOwner = userRole === "OWNER";
   const selectedFacility =
@@ -474,11 +493,12 @@ export function WorkspaceSidebar({
       {/* Sidebar Tabs */}
       <nav
         aria-label="Workspace editor tabs"
-        className="grid grid-cols-5 border-b border-slate-800 bg-slate-900/60 p-1 gap-1 shrink-0"
+        className="grid grid-cols-6 border-b border-slate-800 bg-slate-900/60 p-1 gap-1 shrink-0"
       >
         {(
           [
             { id: "analytics", label: "ESG/Risk", icon: BarChart3 },
+            { id: "alerts", label: "Alerts", icon: Radio },
             { id: "overview", label: "Refine", icon: ShieldAlert },
             { id: "facility", label: "Facility", icon: MapPin },
             { id: "lane", label: "Lane", icon: GitBranch },
@@ -491,7 +511,7 @@ export function WorkspaceSidebar({
               key={id}
               type="button"
               onClick={() => onChangeTab(id)}
-              className={`flex flex-col items-center justify-center gap-0.5 rounded-lg py-1.5 text-[11px] font-medium transition-colors cursor-pointer ${
+              className={`flex flex-col items-center justify-center gap-0.5 rounded-lg py-1.5 text-[10px] font-medium transition-colors cursor-pointer ${
                 active
                   ? "bg-slate-800 text-white shadow-sm"
                   : "text-slate-400 hover:text-slate-200"
@@ -514,6 +534,24 @@ export function WorkspaceSidebar({
             onSelectFacility={(facilityId) => onSelectFacility(facilityId)}
             onOpenSimulator={onOpenSimulator}
             onOpenDirectory={onOpenDirectory}
+          />
+        )}
+
+        {activeTab === "alerts" && (
+          <LiveAlertsPanel
+            feed={alertFeed}
+            loading={loadingAlerts}
+            sweeping={sweepingAlerts}
+            userRole={userRole}
+            facilities={facilities}
+            lanes={visibleLanes}
+            onAcknowledge={
+              onAcknowledgeAlert ?? (async () => {})
+            }
+            onTriggerSweep={onTriggerAlertSweep ?? (async () => {})}
+            onOpenSettings={onOpenOrgSettings ?? (() => {})}
+            onSelectFacility={(facilityId) => onSelectFacility(facilityId)}
+            onSelectLane={(laneId) => onSelectLane(laneId)}
           />
         )}
 

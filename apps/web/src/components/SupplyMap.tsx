@@ -12,7 +12,7 @@ import type {
   SupplyInput,
   SupplyLane,
 } from "@kulgo/shared";
-import { AlertTriangle, Crosshair, X } from "lucide-react";
+import { AlertTriangle, Crosshair, ExternalLink, X } from "lucide-react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
 import { useEffect, useMemo, useRef, useState } from "react";
@@ -34,6 +34,25 @@ const DARK_BASEMAP_STYLE =
 const DEFAULT_CENTER: [number, number] = [24.7536, 59.437]; // Tallinn, Estonia
 const DEFAULT_ZOOM = 3.6;
 
+interface ChokepointMarkerDatum {
+  signal: RiskSignal;
+  position: [number, number];
+  label: string;
+}
+
+function computePolygonCentroid(
+  polygon: readonly [number, number][],
+): [number, number] | null {
+  if (polygon.length === 0) return null;
+  let sumLng = 0;
+  let sumLat = 0;
+  for (const [lng, lat] of polygon) {
+    sumLng += lng;
+    sumLat += lat;
+  }
+  return [sumLng / polygon.length, sumLat / polygon.length];
+}
+
 export interface SupplyMapProps {
   facilities: readonly Facility[];
   lanes: readonly SupplyLane[];
@@ -48,6 +67,10 @@ export interface SupplyMapProps {
   onSelectLane: (laneId: string) => void;
   onMapPickCoordinates: (coords: { lat: number; lng: number }) => void;
   onCancelMapMode: () => void;
+  onAcknowledgeSignal?: (
+    signalId: string,
+    status: "ACKNOWLEDGED" | "MUTED",
+  ) => Promise<void>;
 }
 
 type HoverState =
@@ -70,12 +93,16 @@ export function SupplyMap({
   onSelectLane,
   onMapPickCoordinates,
   onCancelMapMode,
+  onAcknowledgeSignal,
 }: SupplyMapProps) {
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<maplibregl.Map | null>(null);
   const overlayRef = useRef<MapboxOverlay | null>(null);
 
   const [hover, setHover] = useState<HoverState>(null);
+  const [inspectedSignal, setInspectedSignal] = useState<RiskSignal | null>(
+    null,
+  );
   const [tileError, setTileError] = useState<string | null>(null);
 
   // Keep latest callbacks & mode in refs so imperative MapLibre/Deck handlers never go stale
@@ -316,6 +343,18 @@ export function SupplyMap({
       fontWeight: 600,
     });
 
+    const chokepointMarkers: ChokepointMarkerDatum[] = [];
+    for (const poly of riskPolygons) {
+      if (poly.signal.affectedChokepoints.length === 0) continue;
+      const centroid = computePolygonCentroid(poly.polygon);
+      if (!centroid) continue;
+      chokepointMarkers.push({
+        signal: poly.signal,
+        position: centroid,
+        label: poly.signal.affectedChokepoints[0]!.replace(/_/g, " "),
+      });
+    }
+
     const riskSignalLayer = new PolygonLayer<RiskSignalPolygonDatum>({
       id: "kulgo-risk-signal-polygons",
       data: riskPolygons,
@@ -338,10 +377,42 @@ export function SupplyMap({
           setHover((prev) => (prev?.kind === "signal" ? null : prev));
         }
       },
+      onClick: (info: PickingInfo<RiskSignalPolygonDatum>) => {
+        if (info.object && mapModeRef.current === "inspect") {
+          setInspectedSignal(info.object.signal);
+        }
+      },
+    });
+
+    const chokepointMarkerLayer = new ScatterplotLayer<ChokepointMarkerDatum>({
+      id: "kulgo-chokepoint-markers",
+      data: chokepointMarkers,
+      pickable: !isPickingCoords,
+      stroked: true,
+      filled: true,
+      radiusUnits: "pixels",
+      getRadius: 11,
+      lineWidthMinPixels: 2,
+      getPosition: (d) => d.position,
+      getFillColor: (d) =>
+        d.signal.severity === "RED" ? [239, 68, 68, 120] : [245, 158, 11, 120],
+      getLineColor: (d) =>
+        d.signal.severity === "RED" ? [254, 202, 202, 240] : [253, 230, 138, 240],
+      onClick: (info: PickingInfo<ChokepointMarkerDatum>) => {
+        if (info.object && mapModeRef.current === "inspect") {
+          setInspectedSignal(info.object.signal);
+        }
+      },
     });
 
     overlay.setProps({
-      layers: [riskSignalLayer, arcLayer, facilityLayer, labelLayer],
+      layers: [
+        riskSignalLayer,
+        chokepointMarkerLayer,
+        arcLayer,
+        facilityLayer,
+        labelLayer,
+      ],
     });
   }, [riskPolygons, arcs, markers, selectedFacilityId, selectedLaneId, mapMode]);
 
@@ -534,6 +605,105 @@ export function SupplyMap({
                 {hover.datum.facility.lat.toFixed(4)},{" "}
                 {hover.datum.facility.lng.toFixed(4)}
               </p>
+            </div>
+          )}
+        </div>
+      )}
+
+      {/* Click-to-Inspect Risk Signal Card */}
+      {inspectedSignal && (
+        <div
+          data-testid="map-signal-inspector"
+          className="absolute top-4 right-4 z-20 w-80 max-w-[calc(100%-2rem)] rounded-xl border border-slate-700 bg-slate-950/95 backdrop-blur-md p-3.5 text-xs text-slate-200 shadow-2xl space-y-2.5"
+        >
+          <div className="flex items-start justify-between gap-2">
+            <div className="space-y-1">
+              <div className="flex flex-wrap items-center gap-1.5">
+                <span
+                  className={`px-1.5 py-0.5 rounded text-[10px] font-semibold uppercase ${
+                    inspectedSignal.severity === "RED"
+                      ? "bg-red-500/20 text-red-300 border border-red-500/40"
+                      : "bg-amber-500/20 text-amber-300 border border-amber-500/40"
+                  }`}
+                >
+                  {inspectedSignal.severity} · {inspectedSignal.kind.replace(/_/g, " ")}
+                </span>
+                <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] text-slate-300">
+                  {inspectedSignal.verificationStatus}
+                </span>
+              </div>
+              <h4 className="font-semibold text-white leading-snug">
+                {inspectedSignal.title}
+              </h4>
+            </div>
+            <button
+              type="button"
+              onClick={() => setInspectedSignal(null)}
+              className="rounded-md p-1 text-slate-400 hover:bg-slate-800 hover:text-white transition"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+
+          {inspectedSignal.description && (
+            <p className="text-[11px] text-slate-300 leading-relaxed">
+              {inspectedSignal.description}
+            </p>
+          )}
+
+          {inspectedSignal.affectedChokepoints.length > 0 && (
+            <div className="flex flex-wrap gap-1">
+              {inspectedSignal.affectedChokepoints.map((cp) => (
+                <span
+                  key={cp}
+                  className="rounded bg-red-500/15 border border-red-500/30 px-1.5 py-0.5 text-[10px] text-red-200"
+                >
+                  {cp.replace(/_/g, " ")}
+                </span>
+              ))}
+            </div>
+          )}
+
+          {inspectedSignal.sourceUrls.length > 0 && (
+            <div className="flex flex-wrap gap-2 pt-1 border-t border-slate-800">
+              {inspectedSignal.sourceUrls.slice(0, 3).map((url, idx) => (
+                <a
+                  key={url}
+                  href={url}
+                  target="_blank"
+                  rel="noopener noreferrer"
+                  className="inline-flex items-center gap-1 text-[11px] text-cyan-300 hover:text-cyan-200 underline"
+                >
+                  Source {idx + 1}
+                  <ExternalLink className="h-3 w-3" />
+                </a>
+              ))}
+            </div>
+          )}
+
+          {onAcknowledgeSignal && (
+            <div className="flex items-center gap-2 pt-1.5 border-t border-slate-800">
+              <button
+                type="button"
+                onClick={() =>
+                  void onAcknowledgeSignal(
+                    inspectedSignal.signalId,
+                    "ACKNOWLEDGED",
+                  )
+                }
+                className="flex-1 rounded-lg bg-emerald-600/20 hover:bg-emerald-600/30 border border-emerald-500/40 px-2.5 py-1.5 text-[11px] font-medium text-emerald-200 transition"
+              >
+                Acknowledge
+              </button>
+              <button
+                type="button"
+                onClick={() =>
+                  void onAcknowledgeSignal(inspectedSignal.signalId, "MUTED")
+                }
+                className="flex-1 rounded-lg bg-slate-800 hover:bg-slate-700 border border-slate-700 px-2.5 py-1.5 text-[11px] font-medium text-slate-300 transition"
+              >
+                Mute
+              </button>
             </div>
           )}
         </div>

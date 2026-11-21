@@ -33,6 +33,7 @@ import {
 } from "./components/WorkspaceSidebar.js";
 import {
   ApiError,
+  acknowledgeAlert,
   createFacility,
   createInvite,
   createLane,
@@ -42,6 +43,7 @@ import {
   deleteLane,
   deleteProduct,
   deleteSupplyInput,
+  getAlertFeed,
   getAnalyticsSummary,
   getMe,
   getNetwork,
@@ -49,8 +51,10 @@ import {
   logout,
   revokeInvite,
   seedDemo,
+  triggerAlertSweep,
   updateFacility,
   updateLane,
+  type LiveAlertFeedResponse,
 } from "./lib/api.js";
 import {
   extractInviteTokenFromSearch,
@@ -77,6 +81,11 @@ export function App() {
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
   const [simulatorOpen, setSimulatorOpen] = useState(false);
+
+  // Sub-Project 1 Live Disruption Alerts state
+  const [alertFeed, setAlertFeed] = useState<LiveAlertFeedResponse | null>(null);
+  const [loadingAlerts, setLoadingAlerts] = useState(false);
+  const [sweepingAlerts, setSweepingAlerts] = useState(false);
 
   // M3 Partner Invites & Alternative Directory state
   const [invitations, setInvitations] = useState<Invitation[]>([]);
@@ -213,6 +222,44 @@ export function App() {
       cancelled = true;
     };
   }, [session, network, activeProductId, activeInputId]);
+
+  const refreshAlertFeed = useCallback(async () => {
+    setLoadingAlerts(true);
+    try {
+      const feed = await getAlertFeed();
+      setAlertFeed(feed);
+    } catch {
+      // Non-fatal; keep existing feed state
+    } finally {
+      setLoadingAlerts(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (!session) {
+      setAlertFeed(null);
+      return;
+    }
+    void refreshAlertFeed();
+  }, [session, network, refreshAlertFeed]);
+
+  const handleAcknowledgeAlert = useCallback(
+    async (signalId: string, status: "ACKNOWLEDGED" | "MUTED") => {
+      await acknowledgeAlert(signalId, { status });
+      await refreshAlertFeed();
+    },
+    [refreshAlertFeed],
+  );
+
+  const handleTriggerAlertSweep = useCallback(async () => {
+    setSweepingAlerts(true);
+    try {
+      await triggerAlertSweep();
+      await Promise.all([loadWorkspaceNetwork(false), refreshAlertFeed()]);
+    } finally {
+      setSweepingAlerts(false);
+    }
+  }, [loadWorkspaceNetwork, refreshAlertFeed]);
 
   const handleAuthenticated = (me: AuthMeResponse) => {
     setSession(me);
@@ -611,6 +658,7 @@ export function App() {
               setMapMode("inspect");
               setRefiningFacilityId(null);
             }}
+            onAcknowledgeSignal={handleAcknowledgeAlert}
           />
         ) : (
           <LogicalGraphView
@@ -698,6 +746,12 @@ export function App() {
           onDeleteSupplyInput={handleDeleteSupplyInput}
           onCreateInvite={handleCreateInvite}
           onRevokeInvite={handleRevokeInvite}
+          alertFeed={alertFeed}
+          loadingAlerts={loadingAlerts}
+          sweepingAlerts={sweepingAlerts}
+          onAcknowledgeAlert={handleAcknowledgeAlert}
+          onTriggerAlertSweep={handleTriggerAlertSweep}
+          onOpenOrgSettings={() => setOrgSettingsOpen(true)}
         />
 
         <WhatIfSimulatorDrawer

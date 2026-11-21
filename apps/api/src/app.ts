@@ -28,6 +28,18 @@ import {
 } from "./directory/repository.js";
 import { createDirectoryRoutes } from "./directory/routes.js";
 import {
+  ArcadeDbAlertRepository,
+  InMemoryAlertRepository,
+  type AlertRepository,
+} from "./intelligence/alert-repository.js";
+import { LlmRouter } from "./intelligence/llm-router.js";
+import {
+  createBrevoEmailProvider,
+  createResendEmailProvider,
+} from "./intelligence/notifications.js";
+import { createAlertRoutes } from "./intelligence/routes.js";
+import { IntelligenceRunner } from "./intelligence/runner.js";
+import {
   ArcadeDbInvitationRepository,
   InMemoryInvitationRepository,
   type InvitationRepository,
@@ -55,6 +67,8 @@ export interface AppDependencies {
   inviteRepo?: InvitationRepository;
   directoryRepo?: DirectoryRepository;
   analyticsRepo?: AnalyticsRepository;
+  alertRepo?: AlertRepository;
+  intelligenceRunner?: IntelligenceRunner;
   onRequestLog?: (entry: RequestLogEntry) => void;
 }
 
@@ -82,6 +96,27 @@ export function createApp({
       riskSignalRepo,
       inviteRepo,
     }),
+  }),
+  alertRepo = new ArcadeDbAlertRepository(db),
+  intelligenceRunner = new IntelligenceRunner({
+    authRepo,
+    workspaceRepo,
+    inviteRepo,
+    riskSignalRepo,
+    alertRepo,
+    llmRouter: LlmRouter.fromConfig({
+      geminiApiKey: config.GEMINI_API_KEY,
+      groqApiKey: config.GROQ_API_KEY,
+      openaiApiKey: config.OPENAI_API_KEY,
+      openrouterApiKey: config.OPENROUTER_API_KEY,
+    }),
+    redEmailProvider: config.RESEND_API_KEY
+      ? createResendEmailProvider(config.RESEND_API_KEY)
+      : null,
+    digestEmailProvider: config.BREVO_API_KEY
+      ? createBrevoEmailProvider(config.BREVO_API_KEY)
+      : null,
+    fromEmail: config.ALERT_FROM_EMAIL,
   }),
   onRequestLog,
 }: AppDependencies): Hono {
@@ -196,6 +231,10 @@ export function createApp({
     "/api/v1/directory",
     createDirectoryRoutes({ authRepo, directoryRepo }),
   );
+  app.route(
+    "/api/v1/alerts",
+    createAlertRoutes({ authRepo, alertRepo, intelligenceRunner }),
+  );
 
   app.notFound((c) => c.json({ error: "Not Found" }, 404));
 
@@ -241,6 +280,7 @@ export function createTestApp(
   const authRepo = new InMemoryAuthRepository();
   const workspaceRepo = new InMemoryWorkspaceRepository();
   const riskSignalRepo = new InMemoryRiskSignalRepository();
+  const alertRepo = new InMemoryAlertRepository();
   const inviteRepo = new InMemoryInvitationRepository({
     authRepo,
     workspaceRepo,
@@ -260,6 +300,16 @@ export function createTestApp(
       inviteRepo,
     }),
   });
+  const intelligenceRunner = new IntelligenceRunner({
+    authRepo,
+    workspaceRepo,
+    inviteRepo,
+    riskSignalRepo,
+    alertRepo,
+    llmRouter: new LlmRouter([]),
+    fromEmail: config.ALERT_FROM_EMAIL,
+    fetchStage1: async () => ({ signals: [], errors: [] }),
+  });
 
   return createApp({
     config,
@@ -270,6 +320,8 @@ export function createTestApp(
     inviteRepo,
     directoryRepo,
     analyticsRepo,
+    alertRepo,
+    intelligenceRunner,
     onRequestLog: options.onRequestLog,
   });
 }
