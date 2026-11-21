@@ -268,7 +268,10 @@ test.describe("Kulgo Browser E2E Smoke Suite", () => {
     await page.getByTestId("view-mode-period-window").click();
 
     // Open What-If Simulator and test +14d Safety Stock EAL/ROI delta
-    await page.getByRole("button", { name: "What-If Simulator" }).click();
+    await page
+      .getByRole("button", { name: "What-If Simulator" })
+      .first()
+      .click();
     await page.getByTestId("preset-add-14d-stock").click();
     await expect(page.getByTestId("whatif-financial-deltas")).toBeVisible({
       timeout: 10_000,
