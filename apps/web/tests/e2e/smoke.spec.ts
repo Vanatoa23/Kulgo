@@ -224,6 +224,55 @@ test.describe("Kulgo Browser E2E Smoke Suite", () => {
       orgDialog.getByText("Alert notification channels saved."),
     ).toBeVisible({ timeout: 10_000 });
   });
+
+  test("Financial Risk & Provisions card, Run-Rate vs Next 12M toggle, and What-If +14d Safety Stock EAL delta", async ({
+    page,
+  }) => {
+    const unique = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const email = `fin-e2e-${unique}@kulgo.ee`;
+
+    await page.goto("/");
+    await page.getByRole("tab", { name: "Create Workspace" }).click();
+    await page.locator("#auth-email").fill(email);
+    await page.locator("#auth-password").fill("FinancialE2ePassword2026!");
+    await page.locator("#auth-org-name").fill("Tallinn Financial E2E OÜ");
+    await page.locator("#auth-country").fill("EE");
+    await page.locator("#auth-sector").fill("Electronics");
+    await page
+      .getByRole("button", { name: "Create Private Workspace" })
+      .click();
+
+    await expect(page.getByText("Tallinn Financial E2E OÜ")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await page
+      .getByRole("button", { name: "Load Estonia Product X Demo" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Product X", exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
+
+    // Financial Risk & Provisions card renders on Analytics tab
+    const finCard = page.getByTestId("financial-risk-card");
+    await expect(finCard).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("financial-base-eal")).toContainText("€");
+    await expect(page.getByTestId("financial-confidence-badge")).toBeVisible();
+
+    // Toggle Run-Rate vs Next 12M window
+    await page.getByTestId("view-mode-run-rate").click();
+    await expect(page.getByTestId("financial-base-eal")).toContainText("€");
+    await page.getByTestId("view-mode-period-window").click();
+
+    // Open What-If Simulator and test +14d Safety Stock EAL/ROI delta
+    await page.getByRole("button", { name: "What-If Simulator" }).click();
+    await page.getByTestId("preset-add-14d-stock").click();
+    await expect(page.getByTestId("whatif-financial-deltas")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(page.getByTestId("whatif-eal-delta")).toContainText("€");
+  });
 });
+
 
 

@@ -5,6 +5,8 @@ import {
   AnalyticsSummarySchema,
   AuthMeResponseSchema,
   BulkImportSummarySchema,
+  ContractLineSchema,
+  ContractSchema,
   CreateInviteResponseSchema,
   DirectoryAlternativesResponseSchema,
   ExecutiveReportSchema,
@@ -35,6 +37,10 @@ import {
   type BulkImportJsonRequest,
   type BulkImportSummary,
   type ChokepointCode,
+  type Contract,
+  type ContractLine,
+  type CreateContractInput,
+  type CreateContractLineInput,
   type CreateFacilityInput,
   type CreateInviteInput,
   type CreateInviteResponse,
@@ -43,6 +49,7 @@ import {
   type CreateSupplyLaneInput,
   type ExecutiveReport,
   type Facility,
+  type FinancialViewMode,
   type HealthResponse,
   type Invitation,
   type LoginInput,
@@ -60,6 +67,8 @@ import {
   type SimulateAnalyticsResponse,
   type SupplyInput,
   type SupplyLane,
+  type UpdateContractInput,
+  type UpdateContractLineInput,
   type UpdateFacilityInput,
   type UpdateOrganizationProfileInput,
   type UpdateProductInput,
@@ -380,7 +389,7 @@ export async function deleteLane(laneId: string): Promise<{ ok: true }> {
 // --- Analytics & What-If Simulation ---
 
 export async function getAnalyticsSummary(
-  filters?: NetworkQueryFilters,
+  filters?: NetworkQueryFilters & { viewMode?: FinancialViewMode },
 ): Promise<AnalyticsSummary> {
   const params = new URLSearchParams();
   if (filters?.productId) {
@@ -388,6 +397,9 @@ export async function getAnalyticsSummary(
   }
   if (filters?.inputId) {
     params.set("inputId", filters.inputId);
+  }
+  if (filters?.viewMode) {
+    params.set("viewMode", filters.viewMode);
   }
   const query = params.toString();
   const path = query
@@ -405,6 +417,106 @@ export async function simulateAnalytics(
     "/api/v1/analytics/simulate",
     { method: "POST", body: request },
     (payload) => parseWithSchema(SimulateAnalyticsResponseSchema, payload),
+  );
+}
+
+// --- Contracts & ERP PO History Clustering (Sub-Project 2) ---
+
+export async function listContracts(): Promise<{
+  contracts: Contract[];
+  contractLines: ContractLine[];
+}> {
+  return apiRequest("/api/v1/workspace/contracts", { method: "GET" }, (p) => {
+    const rec = p as { contracts?: unknown[]; contractLines?: unknown[] };
+    return {
+      contracts: (rec.contracts ?? []).map((c) =>
+        parseWithSchema(ContractSchema, c),
+      ),
+      contractLines: (rec.contractLines ?? []).map((l) =>
+        parseWithSchema(ContractLineSchema, l),
+      ),
+    };
+  });
+}
+
+export async function createContract(
+  input: CreateContractInput & {
+    lines?: Array<Omit<CreateContractLineInput, "contractId">>;
+  },
+): Promise<{ contract: Contract; lines: ContractLine[] }> {
+  return apiRequest(
+    "/api/v1/workspace/contracts",
+    { method: "POST", body: input },
+    (p) => {
+      const rec = p as { contract?: unknown; lines?: unknown[] };
+      return {
+        contract: parseWithSchema(ContractSchema, rec.contract),
+        lines: (rec.lines ?? []).map((l) =>
+          parseWithSchema(ContractLineSchema, l),
+        ),
+      };
+    },
+  );
+}
+
+export async function updateContract(
+  contractId: string,
+  input: UpdateContractInput,
+): Promise<Contract> {
+  return apiRequest(
+    `/api/v1/workspace/contracts/${encodeURIComponent(contractId)}`,
+    { method: "PATCH", body: input },
+    (payload) => parseWrappedField(payload, "contract", ContractSchema),
+  );
+}
+
+export async function createContractLine(
+  contractId: string,
+  input: Omit<CreateContractLineInput, "contractId">,
+): Promise<ContractLine> {
+  return apiRequest(
+    `/api/v1/workspace/contracts/${encodeURIComponent(contractId)}/lines`,
+    { method: "POST", body: input },
+    (payload) => parseWrappedField(payload, "line", ContractLineSchema),
+  );
+}
+
+export async function updateContractLine(
+  contractLineId: string,
+  input: UpdateContractLineInput,
+): Promise<ContractLine> {
+  return apiRequest(
+    `/api/v1/workspace/contract-lines/${encodeURIComponent(contractLineId)}`,
+    { method: "PATCH", body: input },
+    (payload) => parseWrappedField(payload, "line", ContractLineSchema),
+  );
+}
+
+export interface DraftClusteredContractDto {
+  supplierName: string;
+  materialName: string;
+  contractType: "FRAMEWORK" | "SPOT_PO";
+  cadence: "PER_YEAR" | "TOTAL_OVER_TERM";
+  expiryBehavior: "HOLDOVER" | "AUTO_ARCHIVE";
+  confidence: "IMPORTED";
+  startDate: string;
+  endDate: string | null;
+  committedVolume: number;
+  unit: string;
+  committedSpend: number;
+  weightedAvgUnitPrice: number;
+  currency: string;
+  sourceOrderCount: number;
+}
+
+export async function importErpPoCsv(
+  csv: string,
+): Promise<{ drafts: DraftClusteredContractDto[]; processedRowCount: number }> {
+  return apiRequest(
+    "/api/v1/workspace/contracts/import-po-csv",
+    { method: "POST", body: { csv } },
+    (p) =>
+      p as { drafts: DraftClusteredContractDto[]; processedRowCount: number },
   );
 }
 
