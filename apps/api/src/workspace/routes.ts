@@ -1,9 +1,17 @@
 import {
+  clusterErpPoHistoryToDraftContracts,
+  type ErpPoHistoryRow,
+} from "@kulgo/engine";
+import {
   BulkImportJsonRequestSchema,
+  CreateContractInputSchema,
+  CreateContractLineInputSchema,
   CreateFacilityInputSchema,
   CreateProductInputSchema,
   CreateSupplyInputInputSchema,
   CreateSupplyLaneInputSchema,
+  UpdateContractInputSchema,
+  UpdateContractLineInputSchema,
   UpdateFacilityInputSchema,
   UpdateProductInputSchema,
   UpdateSupplyInputInputSchema,
@@ -518,6 +526,222 @@ export function createWorkspaceRoutes({
       return c.json({ error: "Supply lane not found" }, 404);
     }
     return c.json({ ok: true }, 200);
+  });
+
+  // --- Contracts & ContractLines (Never delete expired contracts; archive instead) ---
+  routes.get("/contracts", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    const [contracts, contractLines] = await Promise.all([
+      workspaceRepo.listContracts(orgId),
+      workspaceRepo.listContractLines(orgId),
+    ]);
+    return c.json({ contracts, contractLines }, 200);
+  });
+
+  const CreateContractWithLinesSchema = CreateContractInputSchema.extend({
+    lines: z
+      .array(CreateContractLineInputSchema.omit({ contractId: true }))
+      .max(50)
+      .optional(),
+  });
+
+  routes.post("/contracts", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = CreateContractWithLinesSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "Validation failed", details: parsed.error.flatten() },
+        400,
+      );
+    }
+
+    try {
+      const { lines, ...contractInput } = parsed.data;
+      const contract = await workspaceRepo.createContract(orgId, contractInput);
+      const createdLines = [];
+      for (const lineInput of lines ?? []) {
+        const line = await workspaceRepo.createContractLine(orgId, {
+          ...lineInput,
+          contractId: contract.contractId,
+        });
+        createdLines.push(line);
+      }
+      return c.json({ contract, lines: createdLines }, 201);
+    } catch (err) {
+      if (err instanceof WorkspaceValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
+  });
+
+  routes.patch("/contracts/:contractId", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    const contractId = c.req.param("contractId");
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = UpdateContractInputSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "Validation failed", details: parsed.error.flatten() },
+        400,
+      );
+    }
+
+    const contract = await workspaceRepo.updateContract(
+      orgId,
+      contractId,
+      parsed.data,
+    );
+    if (!contract) {
+      return c.json({ error: "Contract not found" }, 404);
+    }
+    return c.json({ contract }, 200);
+  });
+
+  routes.post("/contracts/:contractId/lines", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    const contractId = c.req.param("contractId");
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = CreateContractLineInputSchema.omit({
+      contractId: true,
+    }).safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "Validation failed", details: parsed.error.flatten() },
+        400,
+      );
+    }
+
+    try {
+      const line = await workspaceRepo.createContractLine(orgId, {
+        ...parsed.data,
+        contractId,
+      });
+      return c.json({ line }, 201);
+    } catch (err) {
+      if (err instanceof WorkspaceValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
+  });
+
+  routes.patch("/contract-lines/:contractLineId", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    const contractLineId = c.req.param("contractLineId");
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = UpdateContractLineInputSchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "Validation failed", details: parsed.error.flatten() },
+        400,
+      );
+    }
+
+    const line = await workspaceRepo.updateContractLine(
+      orgId,
+      contractLineId,
+      parsed.data,
+    );
+    if (!line) {
+      return c.json({ error: "Contract line not found" }, 404);
+    }
+    return c.json({ line }, 200);
+  });
+
+  // --- ERP 12-Month PO History CSV Auto-Clustering ---
+  const PoRowSchema = z.object({
+    supplierName: z.string().trim().min(1),
+    materialName: z.string().trim().min(1),
+    orderDate: z.string().date(),
+    quantity: z.number().finite().positive(),
+    unit: z.string().trim().min(1).max(32),
+    unitPrice: z.number().finite().nonnegative(),
+    currency: z.string().trim().length(3).default("EUR"),
+  });
+
+  routes.post("/contracts/import-po-csv", async (c) => {
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = z
+      .object({
+        rows: z.array(PoRowSchema).max(5000).optional(),
+        csv: z.string().min(1).max(2_000_000).optional(),
+        priceOutlierTolerancePct: z.number().min(1).max(100).default(15),
+      })
+      .safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "Validation failed", details: parsed.error.flatten() },
+        400,
+      );
+    }
+
+    const poRows: ErpPoHistoryRow[] = [...(parsed.data.rows ?? [])];
+    if (parsed.data.csv) {
+      const lines = parsed.data.csv
+        .split(/\r?\n/)
+        .map((l) => l.trim())
+        .filter((l) => l.length > 0);
+      if (lines.length >= 2) {
+        const headers = lines[0]!.split(",").map((h) => h.trim().toLowerCase());
+        for (let i = 1; i < lines.length; i++) {
+          const cols = lines[i]!.split(",").map((v) => v.trim());
+          const get = (key: string) => {
+            const idx = headers.indexOf(key);
+            return idx >= 0 ? (cols[idx] ?? "") : "";
+          };
+          const rowCandidate = PoRowSchema.safeParse({
+            supplierName: get("suppliername") || get("supplier"),
+            materialName: get("materialname") || get("material"),
+            orderDate: get("orderdate") || get("date"),
+            quantity: Number(get("quantity") || get("qty")),
+            unit: get("unit") || "UNITS",
+            unitPrice: Number(get("unitprice") || get("price")),
+            currency: (get("currency") || "EUR").toUpperCase(),
+          });
+          if (rowCandidate.success) {
+            poRows.push(rowCandidate.data);
+          }
+        }
+      }
+    }
+
+    const drafts = clusterErpPoHistoryToDraftContracts(
+      poRows,
+      parsed.data.priceOutlierTolerancePct,
+    );
+    return c.json({ drafts, processedRowCount: poRows.length }, 200);
   });
 
   return routes;

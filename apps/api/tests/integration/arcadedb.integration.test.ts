@@ -598,5 +598,62 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
       ),
     ).toBe(true);
   });
+
+  it("persists Contract & ContractLine vertices and returns financialRisk on /api/v1/analytics/summary against live ArcadeDB", async () => {
+    const email = `fin-contracts-${runId}@kulgo-ci.ee`;
+    const regRes = await app.request("/api/v1/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email,
+        password: "LiveArcadeDbPassword2026!",
+        organizationName: `FinContracts Org ${runId}`,
+        countryCode: "EE",
+        sector: "Electronics",
+      }),
+    });
+    expect(regRes.status).toBe(201);
+    const cookie = extractCookie(regRes);
+
+    const seedRes = await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+    expect(seedRes.status).toBe(201);
+    const seeded = WorkspaceNetworkResponseSchema.parse(await seedRes.json());
+    const firstLane = seeded.lanes[0]!;
+
+    const contractRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        supplierFacilityId: firstLane.fromFacilityId,
+        title: "Live ArcadeDB Framework",
+        contractType: "FRAMEWORK",
+        startDate: "2026-01-01",
+        endDate: "2027-06-30",
+        lines: [
+          {
+            laneId: firstLane.laneId,
+            cadence: "PER_YEAR",
+            committedVolume: 500,
+            unit: "TONNES",
+            committedSpend: 250_000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(contractRes.status).toBe(201);
+
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: cookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summary = AnalyticsSummarySchema.parse(await summaryRes.json());
+    expect(summary.financialRisk).toBeDefined();
+    expect(summary.financialRisk?.totalActiveSpendEur).toBeGreaterThan(0);
+  });
 });
+
 

@@ -1,6 +1,9 @@
 import {
+  computeFinancialRiskSummary,
+  computeFinancialSimulationDelta,
   evaluateNetworkAnalytics,
   simulateNetworkAnalytics,
+  type HiddenFinancialRiskInput,
   type HiddenPartnerAggregate,
 } from "@kulgo/engine";
 import {
@@ -9,10 +12,12 @@ import {
   SimulateAnalyticsResponseSchema,
   type AnalyticsSummary,
   type ExecutiveReport,
+  type FinancialViewMode,
   type RecommendedAction,
   type RiskSignal,
   type SimulateAnalyticsRequest,
   type SimulateAnalyticsResponse,
+  type SupplyLane,
 } from "@kulgo/shared";
 import type { AuthRepository } from "../auth/repository.js";
 import {
@@ -30,17 +35,67 @@ export class AnalyticsValidationError extends Error {
   }
 }
 
+function toIsoDateUtc(date: Date): string {
+  const yyyy = String(date.getUTCFullYear()).padStart(4, "0");
+  const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
+  const dd = String(date.getUTCDate()).padStart(2, "0");
+  return `${yyyy}-${mm}-${dd}`;
+}
+
+/**
+ * Collapses server-only Tier-2+ HiddenPartnerAggregate records into anonymized
+ * scalar multipliers and opaque event-group keys for @kulgo/engine.
+ * Zero Tier-2+ IDs, names, revenues, unit prices, or coordinates are passed.
+ */
+function buildHiddenFinancialRiskMap(
+  lanes: readonly SupplyLane[],
+  partnerHiddenSummaries?: ReadonlyMap<string, HiddenPartnerAggregate>,
+): Map<string, HiddenFinancialRiskInput> | undefined {
+  if (!partnerHiddenSummaries || partnerHiddenSummaries.size === 0) {
+    return undefined;
+  }
+  const result = new Map<string, HiddenFinancialRiskInput>();
+  for (const lane of lanes) {
+    const hidden = partnerHiddenSummaries.get(lane.fromFacilityId);
+    if (!hidden) continue;
+    let probMult = 1.0;
+    let ttrMult = 1.0;
+    if (hidden.hasSanctionedUpstream) {
+      probMult = Math.max(probMult, 1.65);
+      ttrMult = Math.max(ttrMult, 1.45);
+    }
+    if (hidden.hasSharedChokepoint) {
+      probMult = Math.max(probMult, 1.45);
+      ttrMult = Math.max(ttrMult, 1.35);
+    }
+    const eventGroupId = hidden.chokepointRegionCode
+      ? `hidden-chokepoint::${hidden.chokepointRegionCode}`
+      : hidden.regionCode
+        ? `hidden-region::${hidden.regionCode}`
+        : `hidden-tier1::${lane.fromFacilityId}`;
+    result.set(lane.laneId, {
+      eventGroupId,
+      hiddenProbabilityMultiplier: probMult,
+      hiddenTtrMultiplier: ttrMult,
+      verified: true,
+    });
+  }
+  return result.size > 0 ? result : undefined;
+}
+
 export interface AnalyticsRepository {
   getSummary(
     orgId: string,
     filters?: NetworkFilters,
     asOfDate?: Date,
+    viewMode?: FinancialViewMode,
   ): Promise<AnalyticsSummary>;
 
   getExecutiveReport(
     orgId: string,
     filters?: NetworkFilters,
     asOfDate?: Date,
+    viewMode?: FinancialViewMode,
   ): Promise<ExecutiveReport>;
 
   simulate(
@@ -97,6 +152,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     orgId: string,
     filters?: NetworkFilters,
     asOfDate?: Date,
+    viewMode: FinancialViewMode = "PERIOD_WINDOW",
   ): Promise<AnalyticsSummary> {
     const safeOrgId = assertOrgId(orgId);
     const [organization, network, riskSignals] = await Promise.all([
@@ -121,13 +177,30 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       asOfDate,
     });
 
-    return AnalyticsSummarySchema.parse(summary);
+    const financialRisk = computeFinancialRiskSummary({
+      products: network.products,
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: network.lanes,
+      contracts: network.contracts,
+      contractLines: network.contractLines,
+      riskSignals,
+      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+        network.lanes,
+        partnerHiddenSummaries,
+      ),
+      asOfDate: toIsoDateUtc(asOfDate ?? new Date()),
+      viewMode,
+    });
+
+    return AnalyticsSummarySchema.parse({ ...summary, financialRisk });
   }
 
   async getExecutiveReport(
     orgId: string,
     filters?: NetworkFilters,
     asOfDate?: Date,
+    viewMode: FinancialViewMode = "PERIOD_WINDOW",
   ): Promise<ExecutiveReport> {
     const safeOrgId = assertOrgId(orgId);
     const [organization, network, riskSignals] = await Promise.all([
@@ -143,8 +216,24 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       throw new AnalyticsValidationError("Organization not found");
     }
 
-    const summary = AnalyticsSummarySchema.parse(
-      evaluateNetworkAnalytics({
+    const financialRisk = computeFinancialRiskSummary({
+      products: network.products,
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: network.lanes,
+      contracts: network.contracts,
+      contractLines: network.contractLines,
+      riskSignals,
+      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+        network.lanes,
+        partnerHiddenSummaries,
+      ),
+      asOfDate: toIsoDateUtc(asOfDate ?? new Date()),
+      viewMode,
+    });
+
+    const summary = AnalyticsSummarySchema.parse({
+      ...evaluateNetworkAnalytics({
         organization: {
           scope1Tco2e: organization.scope1Tco2e,
           scope2Tco2e: organization.scope2Tco2e,
@@ -156,7 +245,8 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         partnerHiddenSummaries,
         asOfDate,
       }),
-    );
+      financialRisk,
+    });
 
     const tier1Suppliers = network.facilities.filter((f) => !f.isOwnFacility);
     const verifiedTier1Suppliers = tier1Suppliers.filter(
@@ -260,6 +350,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         privacyAttestation:
           "All Tier-2+ upstream risk alerts and Scope 3 roll-ups are computed strictly server-side and anonymized per Kulgo Privacy Contract. No hidden upstream supplier identities, emails, or exact coordinates are disclosed.",
       },
+      financialExposure: financialRisk,
     });
   }
 
@@ -297,12 +388,35 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     );
     const simulatedLanes = network.lanes.map((lane) => {
       const change = changesByLaneId.get(lane.laneId);
-      if (!change || change.volumeSharePct === undefined) {
+      if (!change) {
         return lane;
       }
       return {
         ...lane,
-        volumeSharePct: change.volumeSharePct,
+        ...(change.volumeSharePct !== undefined
+          ? { volumeSharePct: change.volumeSharePct }
+          : {}),
+        ...(change.transportMode !== undefined
+          ? { transportMode: change.transportMode }
+          : {}),
+        ...(change.annualVolume !== undefined
+          ? { annualVolume: change.annualVolume }
+          : {}),
+        ...(change.annualSpendEur !== undefined
+          ? { annualSpendEur: change.annualSpendEur }
+          : {}),
+        ...(change.safetyStockDays !== undefined
+          ? { safetyStockDays: change.safetyStockDays }
+          : {}),
+        ...(change.carryingCostPct !== undefined
+          ? { carryingCostPct: change.carryingCostPct }
+          : {}),
+        ...(change.defectRatePct !== undefined
+          ? { defectRatePct: change.defectRatePct }
+          : {}),
+        ...(change.riskStatus !== undefined
+          ? { riskStatus: change.riskStatus }
+          : {}),
       };
     });
 
@@ -316,6 +430,56 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
             }),
           ])
         : [undefined, undefined];
+
+    const isoDate = toIsoDateUtc(asOfDate ?? new Date());
+    const baselineFinancialRisk = computeFinancialRiskSummary({
+      products: network.products,
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: network.lanes,
+      contracts: network.contracts,
+      contractLines: network.contractLines,
+      riskSignals,
+      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+        network.lanes,
+        baselinePartnerHiddenSummaries,
+      ),
+      asOfDate: isoDate,
+      viewMode: "RUN_RATE",
+    });
+
+    const simulatedFinancialRisk = computeFinancialRiskSummary({
+      products: network.products,
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: simulatedLanes,
+      // When simulating volume/spend changes directly on lanes, evaluate from simulated lanes
+      contracts: request.laneChanges.some(
+        (c) => c.annualSpendEur !== undefined || c.annualVolume !== undefined,
+      )
+        ? []
+        : network.contracts,
+      contractLines: request.laneChanges.some(
+        (c) => c.annualSpendEur !== undefined || c.annualVolume !== undefined,
+      )
+        ? []
+        : network.contractLines,
+      riskSignals,
+      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+        simulatedLanes,
+        simulatedPartnerHiddenSummaries,
+      ),
+      asOfDate: isoDate,
+      viewMode: "RUN_RATE",
+    });
+
+    const financialDeltas = computeFinancialSimulationDelta({
+      baseline: baselineFinancialRisk,
+      simulated: simulatedFinancialRisk,
+      baselineLanes: network.lanes,
+      simulatedLanes,
+      oneTimeQualificationEur: request.oneTimeQualificationEur,
+    });
 
     const baselineOnly = evaluateNetworkAnalytics({
       organization: {
@@ -375,8 +539,11 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     ).length;
 
     return SimulateAnalyticsResponseSchema.parse({
-      baseline: baselineOnly,
-      simulated: simulatedResult.simulated,
+      baseline: { ...baselineOnly, financialRisk: baselineFinancialRisk },
+      simulated: {
+        ...simulatedResult.simulated,
+        financialRisk: simulatedFinancialRisk,
+      },
       deltas: {
         resilienceScoreDelta: round2(
           simulatedResult.simulated.resilienceScore -
@@ -396,6 +563,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
           simulatedResult.simulated.esg.totalTco2e -
             baselineOnly.esg.totalTco2e,
         ),
+        financialDeltas,
       },
       appliedChangesCount: simulatedResult.appliedChangesCount,
     });
