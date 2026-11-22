@@ -511,7 +511,8 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       lane: { laneId: string };
     };
 
-    // Baseline Org A summary before partner verification (no hidden upstream Scope 3 or sanction alert)
+    // Baseline before verification: Baltic corridor signals may match directly,
+    // but no hidden partner warning is available yet.
     const beforeSummaryRes = await app.request("/api/v1/analytics/summary", {
       headers: { Cookie: orgA.cookie },
     });
@@ -520,7 +521,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       await beforeSummaryRes.json(),
     );
     expect(
-      beforeSummary.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
+      beforeSummary.alerts.some((a) => a.alertId.startsWith("partner-upstream-")),
     ).toBe(false);
     const baselineUpstreamScope3 = beforeSummary.esg.upstreamScope3Tco2e;
 
@@ -716,7 +717,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
 
     // Org A receives anonymized hidden-upstream secondary-sanction alert referencing ONLY aTier1
     const hiddenSanctionAlert = afterSummary.alerts.find(
-      (a) => a.category === "SECONDARY_SANCTION",
+      (a) => a.alertId === `partner-upstream-${aTier1.facilityId}`,
     );
     expect(hiddenSanctionAlert).toBeDefined();
     expect(hiddenSanctionAlert?.confidence).toBe("NETWORK_VERIFIED");
@@ -1329,7 +1330,8 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         fromFacilityId: aTier1BId,
         toFacilityId: aOwnId,
         materialCategory: "Modules",
-        transportMode: "SEA",
+        // Keep clean fixture lanes off the demo Baltic sanctions corridor.
+        transportMode: "AIR",
         volumeSharePct: 100,
         economicAttributionRatio: 0.5,
       }),
@@ -1381,7 +1383,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         fromFacilityId: bTier1CId,
         toFacilityId: bOwnNorthId,
         materialCategory: "Clean Subcomponents",
-        transportMode: "SEA",
+        transportMode: "AIR",
         volumeSharePct: 100,
         economicAttributionRatio: 1,
         riskStatus: "GREEN",
@@ -1428,7 +1430,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         fromFacilityId: cTier1AId,
         toFacilityId: cOwnId,
         materialCategory: "Recycled Enclosures",
-        transportMode: "SEA",
+        transportMode: "AIR",
         volumeSharePct: 100,
       }),
     });

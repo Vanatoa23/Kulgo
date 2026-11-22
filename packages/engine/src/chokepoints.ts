@@ -284,7 +284,7 @@ export function isSignalActive(signal: RiskSignal, nowIso?: string): boolean {
 export interface FacilitySignalMatch {
   facilityId: string;
   signalId: string;
-  matchType: "POLYGON" | "COUNTRY" | "REGION";
+  matchType: "POLYGON" | "COUNTRY" | "REGION" | "SECTOR";
   severity: RiskStatus;
 }
 
@@ -307,10 +307,10 @@ export interface AnonymizedPartnerRegionAlert {
 
 /**
  * Layer 1: Match active RiskSignals against Tier-1 facilities via WKT polygon
- * intersection, countryCode, or regionCode.
+ * intersection, countryCode, regionCode, or sector.
  */
 export function matchFacilityRiskSignals(
-  facilities: Pick<Facility, "facilityId" | "lat" | "lng" | "countryCode" | "regionCode">[],
+  facilities: (Pick<Facility, "facilityId" | "lat" | "lng" | "countryCode" | "regionCode"> & Partial<Pick<Facility, "sector">>)[],
   signals: RiskSignal[],
   nowIso?: string,
 ): FacilitySignalMatch[] {
@@ -350,6 +350,16 @@ export function matchFacilityRiskSignals(
           facilityId: facility.facilityId,
           signalId: signal.signalId,
           matchType: "REGION",
+          severity: signal.severity,
+        });
+        continue;
+      }
+
+      if (facility.sector && signal.affectedSectors.includes(facility.sector)) {
+        matches.push({
+          facilityId: facility.facilityId,
+          signalId: signal.signalId,
+          matchType: "SECTOR",
           severity: signal.severity,
         });
       }
@@ -402,6 +412,41 @@ export function matchLaneRiskSignals(
   }
 
   return matches;
+}
+
+/**
+ * Shared lane relevance for analytics and finance, including hidden partner
+ * evaluation. Each signal contributes once across all matching layers.
+ */
+export function matchNetworkRiskSignals(
+  lanes: readonly SupplyLane[],
+  facilities: readonly Facility[],
+  signals: readonly RiskSignal[],
+  nowIso: string,
+): Map<string, RiskSignal[]> {
+  const activeSignals = signals.filter((s) => isSignalActive(s, nowIso));
+  const facilitiesById = new Map(facilities.map((f) => [f.facilityId, f]));
+  const facilityMatches = matchFacilityRiskSignals([...facilities], activeSignals, nowIso);
+  const laneMatches = matchLaneRiskSignals([...lanes], facilitiesById, activeSignals, nowIso);
+  const byFacility = new Map<string, Set<string>>();
+  const byLane = new Map<string, Set<string>>();
+  for (const match of facilityMatches) {
+    const ids = byFacility.get(match.facilityId) ?? new Set<string>();
+    ids.add(match.signalId);
+    byFacility.set(match.facilityId, ids);
+  }
+  for (const match of laneMatches) {
+    const ids = byLane.get(match.laneId) ?? new Set<string>();
+    ids.add(match.signalId);
+    byLane.set(match.laneId, ids);
+  }
+  return new Map(lanes.map((lane) => [
+    lane.laneId,
+    activeSignals.filter((signal) =>
+      byFacility.get(lane.fromFacilityId)?.has(signal.signalId) ||
+      byLane.get(lane.laneId)?.has(signal.signalId),
+    ),
+  ]));
 }
 
 /**
