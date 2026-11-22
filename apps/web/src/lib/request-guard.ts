@@ -10,6 +10,8 @@ export interface RequestTicket {
 
 export interface RequestGuard {
   begin(): RequestTicket;
+  /** Ticket for the current generation without superseding earlier tickets. */
+  capture(): RequestTicket;
   invalidate(): void;
 }
 
@@ -18,6 +20,10 @@ export function createRequestGuard(): RequestGuard {
   return {
     begin() {
       const mine = ++generation;
+      return { isCurrent: () => mine === generation };
+    },
+    capture() {
+      const mine = generation;
       return { isCurrent: () => mine === generation };
     },
     invalidate() {

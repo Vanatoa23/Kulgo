@@ -68,3 +68,49 @@ describe("request guard", () => {
     expect(state.network).toBe("new");
   });
 });
+
+describe("mutations", () => {
+  /** Mirrors App: mutations bind to the session and invalidate older loads. */
+  function setup() {
+    const session = createRequestGuard();
+    const network = createRequestGuard();
+    const state = { network: "" };
+    const load = async (p: Promise<string>) => {
+      const t = network.begin();
+      const v = await p;
+      if (t.isCurrent()) state.network = v;
+    };
+    const mutate = async (p: Promise<string>) => {
+      const s = session.capture();
+      const v = await p;
+      if (!s.isCurrent()) return;
+      network.invalidate();
+      state.network = v;
+    };
+    return { session, state, load, mutate };
+  }
+
+  it("A's delayed seedDemo cannot replace B's network after logout/login", async () => {
+    const { session, state, load, mutate } = setup();
+    const seedA = deferred<string>();
+    const loadB = deferred<string>();
+    const pSeed = mutate(seedA.promise);
+    session.invalidate(); // logout + login as B
+    const pLoad = load(loadB.promise);
+    loadB.resolve("B");
+    await pLoad;
+    seedA.resolve("A-seeded");
+    await pSeed;
+    expect(state.network).toBe("B");
+  });
+
+  it("an older refresh cannot erase a successful mutation", async () => {
+    const { state, load, mutate } = setup();
+    const refresh = deferred<string>();
+    const pRefresh = load(refresh.promise);
+    await mutate(Promise.resolve("with-new-facility"));
+    refresh.resolve("stale-without-facility");
+    await pRefresh;
+    expect(state.network).toBe("with-new-facility");
+  });
+});

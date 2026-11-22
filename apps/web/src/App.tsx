@@ -13,7 +13,7 @@ import type {
   WorkspaceNetworkResponse,
 } from "@kulgo/shared";
 import { AlertCircle, Globe2, Loader2, X } from "lucide-react";
-import { createRequestGuard } from "./lib/request-guard";
+import { createRequestGuard, type RequestTicket } from "./lib/request-guard";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AcceptInviteModal } from "./components/AcceptInviteModal.js";
 import { AlternativeDirectoryModal } from "./components/AlternativeDirectoryModal.js";
@@ -87,7 +87,9 @@ export function App() {
   const [simulatorOpen, setSimulatorOpen] = useState(false);
 
   // Sub-Project 1 Live Disruption Alerts state
-  const [alertFeed, setAlertFeed] = useState<LiveAlertFeedResponse | null>(null);
+  const [alertFeed, setAlertFeed] = useState<LiveAlertFeedResponse | null>(
+    null,
+  );
   const [loadingAlerts, setLoadingAlerts] = useState(false);
   const [sweepingAlerts, setSweepingAlerts] = useState(false);
 
@@ -136,38 +138,42 @@ export function App() {
   const [bannerError, setBannerError] = useState<string | null>(null);
 
   const networkGuard = useMemo(() => createRequestGuard(), []);
+  const sessionGuard = useMemo(() => createRequestGuard(), []);
   const alertGuard = useMemo(() => createRequestGuard(), []);
 
-  const loadWorkspaceNetwork = useCallback(async (shouldFit: boolean) => {
-    // Latest-wins: a newer load or a session change supersedes this one.
-    const ticket = networkGuard.begin();
-    setLoadingNetwork(true);
-    try {
-      const [data, invites] = await Promise.all([
-        getNetwork(),
-        listInvites().catch(() => [] as Invitation[]),
-      ]);
-      if (!ticket.isCurrent()) return;
-      setNetwork(data);
-      setInvitations(invites);
-      if (shouldFit && data.facilities.length > 0) {
-        setFitTrigger((n) => n + 1);
+  const loadWorkspaceNetwork = useCallback(
+    async (shouldFit: boolean) => {
+      // Latest-wins: a newer load or a session change supersedes this one.
+      const ticket = networkGuard.begin();
+      setLoadingNetwork(true);
+      try {
+        const [data, invites] = await Promise.all([
+          getNetwork(),
+          listInvites().catch(() => [] as Invitation[]),
+        ]);
+        if (!ticket.isCurrent()) return;
+        setNetwork(data);
+        setInvitations(invites);
+        if (shouldFit && data.facilities.length > 0) {
+          setFitTrigger((n) => n + 1);
+        }
+      } catch (err) {
+        if (!ticket.isCurrent()) return;
+        if (err instanceof ApiError && err.status === 401) {
+          setSession(null);
+        } else {
+          setBannerError(
+            err instanceof Error
+              ? err.message
+              : "Failed to load supply network.",
+          );
+        }
+      } finally {
+        if (ticket.isCurrent()) setLoadingNetwork(false);
       }
-    } catch (err) {
-      if (!ticket.isCurrent()) return;
-      if (err instanceof ApiError && err.status === 401) {
-        setSession(null);
-      } else {
-        setBannerError(
-          err instanceof Error
-            ? err.message
-            : "Failed to load supply network.",
-        );
-      }
-    } finally {
-      if (ticket.isCurrent()) setLoadingNetwork(false);
-    }
-  }, [networkGuard]);
+    },
+    [networkGuard],
+  );
 
   // Session bootstrap via /api/v1/auth/me
   useEffect(() => {
@@ -276,6 +282,7 @@ export function App() {
 
   const resetTenantState = () => {
     // Reject any in-flight loads from the previous session/account.
+    sessionGuard.invalidate();
     networkGuard.invalidate();
     alertGuard.invalidate();
     setNetwork(EMPTY_NETWORK);
@@ -329,10 +336,14 @@ export function App() {
   };
 
   const handleSeedDemo = async () => {
+    const sessionTicket = sessionGuard.capture();
     setSeedingDemo(true);
     setBannerError(null);
     try {
       const seeded = await seedDemo();
+      if (!sessionTicket.isCurrent()) return;
+      networkGuard.invalidate();
+      setLoadingNetwork(false);
       setNetwork(seeded);
       setActiveProductId(null);
       setActiveInputId(null);
@@ -350,12 +361,28 @@ export function App() {
     }
   };
 
-  const runMutation = async (fn: () => Promise<void>) => {
+  /**
+   * Runs a mutation bound to the session it started in. `commit` applies the
+   * result only if the session is unchanged, and invalidates any older
+   * in-flight workspace loads so they cannot overwrite the mutation result.
+   */
+  const makeCommit = (session: RequestTicket) => (apply: () => void) => {
+    if (!session.isCurrent()) return;
+    networkGuard.invalidate();
+    setLoadingNetwork(false);
+    apply();
+  };
+
+  const runMutation = async (
+    fn: (commit: (apply: () => void) => void) => Promise<void>,
+  ) => {
+    const sessionTicket = sessionGuard.capture();
     setBusy(true);
     setBannerError(null);
     try {
-      await fn();
+      await fn(makeCommit(sessionTicket));
     } catch (err) {
+      if (!sessionTicket.isCurrent()) return;
       if (err instanceof ApiError && err.status === 401) {
         setSession(null);
         return;
@@ -369,145 +396,170 @@ export function App() {
   };
 
   const handleCreateFacility = (input: CreateFacilityInput) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       const created = await createFacility(input);
-      setNetwork((prev) => ({
-        ...prev,
-        facilities: [...prev.facilities, created],
-      }));
-      setSelectedFacilityId(created.facilityId);
-      setMapMode("inspect");
-      setPickedCoords(null);
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          facilities: [...prev.facilities, created],
+        }));
+        setSelectedFacilityId(created.facilityId);
+        setMapMode("inspect");
+        setPickedCoords(null);
+      });
     });
 
   const handleUpdateFacility = (
     facilityId: string,
     input: UpdateFacilityInput,
   ) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       const updated = await updateFacility(facilityId, input);
-      setNetwork((prev) => ({
-        ...prev,
-        facilities: prev.facilities.map((f) =>
-          f.facilityId === facilityId ? updated : f,
-        ),
-      }));
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          facilities: prev.facilities.map((f) =>
+            f.facilityId === facilityId ? updated : f,
+          ),
+        }));
+        if (refiningFacilityId === facilityId) {
+          setRefiningFacilityId(null);
+        }
+        setMapMode("inspect");
+        setPickedCoords(null);
+      });
       if (input.lat !== undefined || input.lng !== undefined) {
         const refreshed = await getNetwork();
-        setNetwork(refreshed);
+        commit(() => setNetwork(refreshed));
       }
-      if (refiningFacilityId === facilityId) {
-        setRefiningFacilityId(null);
-      }
-      setMapMode("inspect");
-      setPickedCoords(null);
     });
 
   const handleDeleteFacility = (facilityId: string) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       await deleteFacility(facilityId);
-      setNetwork((prev) => ({
-        ...prev,
-        facilities: prev.facilities.filter((f) => f.facilityId !== facilityId),
-        lanes: prev.lanes.filter(
-          (l) =>
-            l.fromFacilityId !== facilityId && l.toFacilityId !== facilityId,
-        ),
-      }));
-      if (selectedFacilityId === facilityId) {
-        setSelectedFacilityId(null);
-      }
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          facilities: prev.facilities.filter(
+            (f) => f.facilityId !== facilityId,
+          ),
+          lanes: prev.lanes.filter(
+            (l) =>
+              l.fromFacilityId !== facilityId && l.toFacilityId !== facilityId,
+          ),
+        }));
+        if (selectedFacilityId === facilityId) {
+          setSelectedFacilityId(null);
+        }
+      });
     });
 
   const handleCreateLane = (input: CreateSupplyLaneInput) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       const created = await createLane(input);
-      setNetwork((prev) => ({
-        ...prev,
-        lanes: [...prev.lanes, created],
-      }));
-      setSelectedLaneId(created.laneId);
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          lanes: [...prev.lanes, created],
+        }));
+        setSelectedLaneId(created.laneId);
+      });
     });
 
   const handleUpdateLane = (laneId: string, input: UpdateSupplyLaneInput) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       const updated = await updateLane(laneId, input);
-      setNetwork((prev) => ({
-        ...prev,
-        lanes: prev.lanes.map((l) => (l.laneId === laneId ? updated : l)),
-      }));
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          lanes: prev.lanes.map((l) => (l.laneId === laneId ? updated : l)),
+        }));
+      });
     });
 
   const handleDeleteLane = (laneId: string) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       await deleteLane(laneId);
-      setNetwork((prev) => ({
-        ...prev,
-        lanes: prev.lanes.filter((l) => l.laneId !== laneId),
-      }));
-      if (selectedLaneId === laneId) {
-        setSelectedLaneId(null);
-      }
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          lanes: prev.lanes.filter((l) => l.laneId !== laneId),
+        }));
+        if (selectedLaneId === laneId) {
+          setSelectedLaneId(null);
+        }
+      });
     });
 
   const handleCreateProduct = (input: CreateProductInput) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       const created = await createProduct(input);
-      setNetwork((prev) => ({
-        ...prev,
-        products: [...prev.products, created],
-      }));
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          products: [...prev.products, created],
+        }));
+      });
     });
 
   const handleDeleteProduct = (productId: string) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       await deleteProduct(productId);
-      setNetwork((prev) => ({
-        ...prev,
-        products: prev.products.filter((p) => p.productId !== productId),
-        inputs: prev.inputs.map((i) =>
-          i.productId === productId ? { ...i, productId: null } : i,
-        ),
-      }));
-      if (activeProductId === productId) {
-        setActiveProductId(null);
-      }
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          products: prev.products.filter((p) => p.productId !== productId),
+          inputs: prev.inputs.map((i) =>
+            i.productId === productId ? { ...i, productId: null } : i,
+          ),
+        }));
+        if (activeProductId === productId) {
+          setActiveProductId(null);
+        }
+      });
     });
 
   const handleCreateSupplyInput = (input: CreateSupplyInputInput) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       const created = await createSupplyInput(input);
-      setNetwork((prev) => ({
-        ...prev,
-        inputs: [...prev.inputs, created],
-      }));
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          inputs: [...prev.inputs, created],
+        }));
+      });
     });
 
   const handleDeleteSupplyInput = (inputId: string) =>
-    runMutation(async () => {
+    runMutation(async (commit) => {
       await deleteSupplyInput(inputId);
-      setNetwork((prev) => ({
-        ...prev,
-        inputs: prev.inputs.filter((i) => i.inputId !== inputId),
-        lanes: prev.lanes.map((l) =>
-          l.inputId === inputId ? { ...l, inputId: null } : l,
-        ),
-      }));
-      if (activeInputId === inputId) {
-        setActiveInputId(null);
-      }
+      commit(() => {
+        setNetwork((prev) => ({
+          ...prev,
+          inputs: prev.inputs.filter((i) => i.inputId !== inputId),
+          lanes: prev.lanes.map((l) =>
+            l.inputId === inputId ? { ...l, inputId: null } : l,
+          ),
+        }));
+        if (activeInputId === inputId) {
+          setActiveInputId(null);
+        }
+      });
     });
 
   const handleCreateInvite = async (
     input: CreateInviteInput,
   ): Promise<CreateInviteResponse | null> => {
+    const sessionTicket = sessionGuard.capture();
     setBusy(true);
     setBannerError(null);
     try {
       const result = await createInvite(input);
+      if (!sessionTicket.isCurrent()) return null;
       setInvitations((prev) => [result.invitation, ...prev]);
       return result;
     } catch (err) {
+      if (!sessionTicket.isCurrent()) return null;
       if (err instanceof ApiError && err.status === 401) {
         setSession(null);
         return null;
