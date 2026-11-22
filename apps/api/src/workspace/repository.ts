@@ -46,6 +46,13 @@ export class WorkspaceValidationError extends Error {
   }
 }
 
+export class WorkspaceConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceConflictError";
+  }
+}
+
 export class WorkspaceNotFoundError extends Error {
   constructor(message: string) {
     super(message);
@@ -2333,9 +2340,15 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
              FROM ContractLine WHERE contractId = :contractId AND ownerOrgId = :orgId`,
             { contractId: targetContractId, orgId: safeOrgId },
           );
+          const existingLines = lineRows.map(mapContractLineRow);
+          if (!contractPayloadMatchesExisting(input, existingContract, existingLines)) {
+            throw new WorkspaceConflictError(
+              "Idempotency key was already used for a different contract payload",
+            );
+          }
           return {
             contract: existingContract,
-            lines: lineRows.map(mapContractLineRow),
+            lines: existingLines,
             deduplicated: true,
           };
         }
@@ -2561,6 +2574,56 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         createdLines.push(line);
       }
 
+      // Double-counting guardrail: archive any active ESTIMATE contract on the same lane(s)
+      if (
+        (contract.contractType === "FRAMEWORK" ||
+          contract.contractType === "SPOT_PO") &&
+        createdLines.length > 0
+      ) {
+        const affectedLaneIds = new Set(createdLines.map((l) => l.laneId));
+        const allOrgLines = await tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT contractId, laneId FROM ContractLine WHERE ownerOrgId = :orgId`,
+          { orgId: safeOrgId },
+        );
+        const siblingContractIds = new Set(
+          allOrgLines
+            .filter(
+              (r) =>
+                affectedLaneIds.has(String(r.laneId)) &&
+                String(r.contractId) !== contract.contractId,
+            )
+            .map((r) => String(r.contractId)),
+        );
+        for (const siblingId of siblingContractIds) {
+          const siblingRows = await tx.query<Record<string, unknown>>(
+            "sql",
+            `SELECT contractId, contractType, isManuallyArchived
+             FROM Contract WHERE contractId = :contractId AND ownerOrgId = :orgId LIMIT 1`,
+            { contractId: siblingId, orgId: safeOrgId },
+          );
+          const sibling = siblingRows[0];
+          if (
+            sibling &&
+            String(sibling.contractType) === "ESTIMATE" &&
+            !Boolean(sibling.isManuallyArchived)
+          ) {
+            await tx.command(
+              "sql",
+              `UPDATE Contract SET
+                isManuallyArchived = true,
+                archiveEffectiveDate = :archiveEffectiveDate
+               WHERE contractId = :contractId AND ownerOrgId = :orgId`,
+              {
+                archiveEffectiveDate: contract.startDate,
+                contractId: siblingId,
+                orgId: safeOrgId,
+              },
+            );
+          }
+        }
+      }
+
       return {
         contract,
         lines: createdLines,
@@ -2575,7 +2638,14 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
   ): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }> {
     const safeOrgId = assertOrgId(orgId);
     return this.runInTransaction(async (tx) => {
-      const [laneRows, contractRows, lineRows] = await Promise.all([
+      const [facilityRows, laneRows] = await Promise.all([
+        tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT facilityId, ownerOrgId, name, kind, relationshipRole, countryCode, lat, lng,
+                  locationPrecision, isOwnFacility, tier, sector, regionCode, notes
+           FROM Facility WHERE ownerOrgId = :orgId`,
+          { orgId: safeOrgId },
+        ),
         tx.query<Record<string, unknown>>(
           "sql",
           `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
@@ -2587,29 +2657,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
            FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId`,
           { orgId: safeOrgId },
         ),
-        tx.query<Record<string, unknown>>(
-          "sql",
-          `SELECT contractId, ownerOrgId, supplierFacilityId, title, contractType,
-                  pricingModel, expiryBehavior, confidence, startDate, endDate,
-                  noticePeriodDays, nonRenewalNoticeGiven, archiveEffectiveDate,
-                  isManuallyArchived, incoterms, notes
-           FROM Contract WHERE ownerOrgId = :orgId`,
-          { orgId: safeOrgId },
-        ),
-        tx.query<Record<string, unknown>>(
-          "sql",
-          `SELECT contractLineId, contractId, ownerOrgId, laneId, inputId, cadence,
-                  committedVolume, unit, committedSpend, unitPrice, currency,
-                  startDateOverride, endDateOverride
-           FROM ContractLine WHERE ownerOrgId = :orgId`,
-          { orgId: safeOrgId },
-        ),
       ]);
 
-      const { updatedLanes, updatedContractLines } = computeAtomicSplitMutations(
+      const { updatedLanes } = computeAtomicSplitMutations(
+        facilityRows.map(mapFacilityRow),
         laneRows.map(mapSupplyLaneRow),
-        contractRows.map(mapContractRow),
-        lineRows.map(mapContractLineRow),
         updates,
       );
 
@@ -2633,33 +2685,95 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         );
       }
 
-      for (const line of updatedContractLines) {
-        await tx.command(
-          "sql",
-          `UPDATE ContractLine SET
-            committedVolume = :committedVolume,
-            committedSpend = :committedSpend
-           WHERE contractLineId = :contractLineId AND ownerOrgId = :orgId`,
-          {
-            committedVolume: line.committedVolume,
-            committedSpend: line.committedSpend,
-            contractLineId: line.contractLineId,
-            orgId: safeOrgId,
-          },
-        );
-      }
-
-      return { lanes: updatedLanes, contractLines: updatedContractLines };
+      // Signed ContractLines are intentionally preserved untouched; the engine applies
+      // allocationSplitPct to derived active quantities across the split group.
+      return { lanes: updatedLanes, contractLines: [] };
     });
   }
 }
 
+function contractPayloadMatchesExisting(
+  input: CreateContractWithLinesAtomicInput,
+  existingContract: Contract,
+  existingLines: readonly ContractLine[],
+): boolean {
+  const defaultExpiry =
+    input.contract.contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER";
+  const expectedExpiry = input.contract.expiryBehavior ?? defaultExpiry;
+
+  if (
+    existingContract.supplierFacilityId !== input.contract.supplierFacilityId ||
+    existingContract.title !== input.contract.title ||
+    existingContract.contractType !== input.contract.contractType ||
+    existingContract.pricingModel !== input.contract.pricingModel ||
+    existingContract.expiryBehavior !== expectedExpiry ||
+    existingContract.confidence !== input.contract.confidence ||
+    existingContract.startDate !== input.contract.startDate ||
+    (existingContract.endDate ?? null) !== (input.contract.endDate ?? null) ||
+    existingContract.noticePeriodDays !== input.contract.noticePeriodDays ||
+    existingContract.nonRenewalNoticeGiven !== input.contract.nonRenewalNoticeGiven ||
+    (existingContract.incoterms ?? null) !== (input.contract.incoterms ?? null) ||
+    (existingContract.notes ?? null) !== (input.contract.notes ?? null)
+  ) {
+    return false;
+  }
+
+  if (existingLines.length !== input.lines.length) {
+    return false;
+  }
+
+  const normalizeLine = (l: {
+    laneId?: string;
+    inputId?: string | null;
+    cadence?: string;
+    committedVolume?: number | null;
+    unit?: string;
+    committedSpend?: number | null;
+    unitPrice?: number | null;
+    currency?: string;
+    startDateOverride?: string | null;
+    endDateOverride?: string | null;
+  }) =>
+    JSON.stringify([
+      l.laneId ?? "",
+      l.cadence ?? "",
+      l.committedVolume ?? null,
+      l.unit ?? "",
+      l.committedSpend ?? null,
+      l.unitPrice ?? null,
+      (l.currency ?? "EUR").toUpperCase(),
+      l.startDateOverride ?? null,
+      l.endDateOverride ?? null,
+    ]);
+
+  const existingSorted = existingLines.map(normalizeLine).sort();
+  const incomingSorted = input.lines.map(normalizeLine).sort();
+  for (let i = 0; i < existingSorted.length; i += 1) {
+    if (existingSorted[i] !== incomingSorted[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getAllocationGroupKey(
+  lane: SupplyLane,
+  facilitiesById: ReadonlyMap<string, Facility>,
+): string {
+  const dir = resolveLaneDirection(
+    lane,
+    facilitiesById.get(lane.fromFacilityId),
+    facilitiesById.get(lane.toFacilityId),
+  );
+  const materialKey = lane.inputId ?? lane.materialCategory.trim().toLowerCase();
+  return `${lane.fromFacilityId}::${dir}::${materialKey}`;
+}
+
 function computeAtomicSplitMutations(
+  allFacilities: readonly Facility[],
   allLanes: readonly SupplyLane[],
-  allContracts: readonly Contract[],
-  allContractLines: readonly ContractLine[],
   updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
-): { updatedLanes: SupplyLane[]; updatedContractLines: ContractLine[] } {
+): { updatedLanes: SupplyLane[] } {
   if (updates.length < 2) {
     throw new WorkspaceValidationError(
       "Allocation splits require at least 2 sibling lanes",
@@ -2681,6 +2795,7 @@ function computeAtomicSplitMutations(
     throw new WorkspaceValidationError("Allocation splits must sum to 100%");
   }
 
+  const facilitiesById = new Map(allFacilities.map((f) => [f.facilityId, f]));
   const laneById = new Map(allLanes.map((l) => [l.laneId, l]));
   const targetLanes: SupplyLane[] = [];
   for (const u of updates) {
@@ -2693,10 +2808,27 @@ function computeAtomicSplitMutations(
     targetLanes.push(lane);
   }
 
-  const originId = targetLanes[0]!.fromFacilityId;
-  if (!targetLanes.every((l) => l.fromFacilityId === originId)) {
+  const expectedGroupKey = getAllocationGroupKey(targetLanes[0]!, facilitiesById);
+  if (
+    !targetLanes.every(
+      (l) => getAllocationGroupKey(l, facilitiesById) === expectedGroupKey,
+    )
+  ) {
     throw new WorkspaceValidationError(
-      "All lanes in an allocation split must share the same origin facility",
+      "All lanes in an allocation split must share the same origin facility, material, and direction",
+    );
+  }
+
+  // Validate full membership against the complete allocation group in the database
+  const fullGroupLanes = allLanes.filter(
+    (l) => getAllocationGroupKey(l, facilitiesById) === expectedGroupKey,
+  );
+  if (
+    fullGroupLanes.length !== targetLanes.length ||
+    !fullGroupLanes.every((l) => seen.has(l.laneId))
+  ) {
+    throw new WorkspaceValidationError(
+      `Allocation split must include all ${fullGroupLanes.length} sibling lanes in this group; refresh and try again`,
     );
   }
 
@@ -2743,90 +2875,7 @@ function computeAtomicSplitMutations(
     });
   });
 
-  // Also proportionally scale active (non-archived) contract lines on these sibling lanes
-  // so contract-backed derived quantities immediately stay consistent with the new split.
-  const activeContractIds = new Set(
-    allContracts.filter((c) => !c.isManuallyArchived).map((c) => c.contractId),
-  );
-  const siblingLines = allContractLines.filter(
-    (cl) => seen.has(cl.laneId) && activeContractIds.has(cl.contractId),
-  );
-
-  const updatedContractLines: ContractLine[] = [];
-  if (siblingLines.length > 0) {
-    // Group active contract lines by lane so each lane's total active contract quantity
-    // is redistributed according to the new split percentage while preserving per-lane ratios.
-    const linesWithVol = siblingLines.filter(
-      (cl) => cl.committedVolume !== null && cl.committedVolume > 0,
-    );
-    const canScaleContractVol =
-      linesWithVol.length > 0 &&
-      areUnitsCompatible(linesWithVol.map((cl) => cl.unit));
-    const totalContractCanonicalVol = canScaleContractVol
-      ? linesWithVol.reduce(
-          (sum, cl) => sum + toCanonicalQuantity(cl.committedVolume!, cl.unit),
-          0,
-        )
-      : 0;
-
-    const currencies = new Set(siblingLines.map((cl) => cl.currency.toUpperCase()));
-    const canScaleContractSpend = currencies.size === 1;
-    const totalContractSpend = canScaleContractSpend
-      ? siblingLines.reduce((sum, cl) => sum + (cl.committedSpend ?? 0), 0)
-      : 0;
-
-    // Group lines by laneId so multi-contract lanes scale proportionally within the lane
-    const linesByLane = new Map<string, ContractLine[]>();
-    for (const cl of siblingLines) {
-      const list = linesByLane.get(cl.laneId) ?? [];
-      list.push(cl);
-      linesByLane.set(cl.laneId, list);
-    }
-
-    for (const [laneId, laneLines] of linesByLane) {
-      const pct = pctByLaneId.get(laneId) ?? 0;
-      const laneCurrentCanonicalVol = canScaleContractVol
-        ? laneLines.reduce(
-            (s, cl) =>
-              s + (cl.committedVolume ? toCanonicalQuantity(cl.committedVolume, cl.unit) : 0),
-            0,
-          )
-        : 0;
-      const laneCurrentSpend = canScaleContractSpend
-        ? laneLines.reduce((s, cl) => s + (cl.committedSpend ?? 0), 0)
-        : 0;
-
-      const laneTargetCanonicalVol = (totalContractCanonicalVol * pct) / 100;
-      const laneTargetSpend = (totalContractSpend * pct) / 100;
-
-      for (const cl of laneLines) {
-        let nextVol = cl.committedVolume;
-        if (canScaleContractVol && totalContractCanonicalVol > 0 && cl.committedVolume !== null) {
-          const shareWithinLane =
-            laneCurrentCanonicalVol > 0
-              ? toCanonicalQuantity(cl.committedVolume, cl.unit) / laneCurrentCanonicalVol
-              : 1 / laneLines.length;
-          nextVol = fromCanonicalQuantity(laneTargetCanonicalVol * shareWithinLane, cl.unit);
-        }
-        let nextSpend = cl.committedSpend;
-        if (canScaleContractSpend && totalContractSpend > 0 && cl.committedSpend !== null) {
-          const shareWithinLane =
-            laneCurrentSpend > 0 ? cl.committedSpend / laneCurrentSpend : 1 / laneLines.length;
-          nextSpend = Number((laneTargetSpend * shareWithinLane).toFixed(2));
-        }
-
-        updatedContractLines.push(
-          ContractLineSchema.parse({
-            ...cl,
-            committedVolume: nextVol,
-            committedSpend: nextSpend,
-          }),
-        );
-      }
-    }
-  }
-
-  return { updatedLanes, updatedContractLines };
+  return { updatedLanes };
 }
 
 interface StoredFacilityRecord {
@@ -3888,6 +3937,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
               l.ownerOrgId === safeOrgId && l.contractId === targetContractId,
           )
           .map((l) => ({ ...l }));
+        if (!contractPayloadMatchesExisting(input, existing, existingLines)) {
+          throw new WorkspaceConflictError(
+            "Idempotency key was already used for a different contract payload",
+          );
+        }
         return {
           contract: { ...existing },
           lines: existingLines,
@@ -4046,6 +4100,40 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       this.contractLines.set(line.contractLineId, line);
     }
 
+    // Double-counting guardrail: archive any active ESTIMATE contract on the same lane(s)
+    if (
+      (contract.contractType === "FRAMEWORK" ||
+        contract.contractType === "SPOT_PO") &&
+      createdLines.length > 0
+    ) {
+      const affectedLaneIds = new Set(createdLines.map((l) => l.laneId));
+      const siblingContractIds = new Set(
+        Array.from(this.contractLines.values())
+          .filter(
+            (l) =>
+              l.ownerOrgId === safeOrgId &&
+              affectedLaneIds.has(l.laneId) &&
+              l.contractId !== contract.contractId,
+          )
+          .map((l) => l.contractId),
+      );
+      for (const siblingId of siblingContractIds) {
+        const sibling = this.contracts.get(siblingId);
+        if (
+          sibling &&
+          sibling.ownerOrgId === safeOrgId &&
+          sibling.contractType === "ESTIMATE" &&
+          !sibling.isManuallyArchived
+        ) {
+          this.contracts.set(siblingId, {
+            ...sibling,
+            isManuallyArchived: true,
+            archiveEffectiveDate: contract.startDate,
+          });
+        }
+      }
+    }
+
     return {
       contract: { ...contract },
       lines: createdLines.map((l) => ({ ...l })),
@@ -4065,33 +4153,26 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
   ): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }> {
     const safeOrgId = assertOrgId(orgId);
+    const orgFacilities = Array.from(this.facilities.values())
+      .map((r) => r.facility)
+      .filter((f) => f.ownerOrgId === safeOrgId);
     const orgLanes = Array.from(this.lanes.values()).filter(
       (l) => l.ownerOrgId === safeOrgId,
     );
-    const orgContracts = Array.from(this.contracts.values()).filter(
-      (c) => c.ownerOrgId === safeOrgId,
-    );
-    const orgContractLines = Array.from(this.contractLines.values()).filter(
-      (cl) => cl.ownerOrgId === safeOrgId,
-    );
 
-    const { updatedLanes, updatedContractLines } = computeAtomicSplitMutations(
+    const { updatedLanes } = computeAtomicSplitMutations(
+      orgFacilities,
       orgLanes,
-      orgContracts,
-      orgContractLines,
       updates,
     );
 
     for (const lane of updatedLanes) {
       this.lanes.set(lane.laneId, lane);
     }
-    for (const line of updatedContractLines) {
-      this.contractLines.set(line.contractLineId, line);
-    }
 
     return {
       lanes: updatedLanes.map((l) => ({ ...l })),
-      contractLines: updatedContractLines.map((cl) => ({ ...cl })),
+      contractLines: [],
     };
   }
 }

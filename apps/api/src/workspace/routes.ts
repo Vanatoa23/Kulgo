@@ -30,6 +30,7 @@ import {
   serializeNetworkToCsv,
 } from "./import-export.js";
 import {
+  WorkspaceConflictError,
   WorkspaceValidationError,
   type WorkspaceRepository,
 } from "./repository.js";
@@ -521,9 +522,13 @@ export function createWorkspaceRoutes({
     }
 
     try {
+      const normalizedSplits = parsed.data.splits.map((s) => ({
+        laneId: s.laneId!,
+        allocationSplitPct: s.allocationSplitPct!,
+      }));
       const result = await workspaceRepo.applyAllocationSplitsAtomic(
         orgId,
-        parsed.data.splits,
+        normalizedSplits,
       );
       return c.json(result, 200);
     } catch (err) {
@@ -670,6 +675,9 @@ export function createWorkspaceRoutes({
         result.deduplicated ? 200 : 201,
       );
     } catch (err) {
+      if (err instanceof WorkspaceConflictError) {
+        return c.json({ error: err.message }, 409);
+      }
       if (err instanceof WorkspaceValidationError) {
         return c.json({ error: err.message }, 400);
       }

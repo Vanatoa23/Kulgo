@@ -5,7 +5,7 @@ import type {
   SupplyLane,
 } from "@kulgo/shared";
 import { Archive, CalendarPlus, FileText, Plus } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useState } from "react";
 import {
   createContract,
   updateContract,
@@ -75,6 +75,24 @@ export function LaneContractsDrawerSection({
         : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
     );
   };
+
+  // Rotate the idempotency key whenever the user edits any draft field so an edited
+  // resubmission never reuses an already-committed key, while an unchanged retry does.
+  useEffect(() => {
+    rotateIdempotencyKey();
+  }, [
+    lane.laneId,
+    title,
+    contractType,
+    pricingModel,
+    expiryBehavior,
+    cadence,
+    startDate,
+    endDate,
+    noticePeriodDays,
+    volume,
+    spend,
+  ]);
 
   const laneLines = contractLines.filter((l) => l.laneId === lane.laneId);
   const contractById = new Map(contracts.map((c) => [c.contractId, c]));

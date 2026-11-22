@@ -750,6 +750,136 @@ export function deriveNetworkCommercials(
     });
   }
 
+  // Apply allocationSplitPct to derived active quantities across sibling split groups
+  // (same origin facility, direction, and material) WITHOUT mutating signed ContractLines.
+  const splitGroups = new Map<string, SupplyLane[]>();
+  for (const lane of lanes) {
+    const dir = lane.direction ?? "UPSTREAM";
+    const matKey = lane.inputId ?? lane.materialCategory.trim().toLowerCase();
+    const key = `${lane.fromFacilityId}::${dir}::${matKey}`;
+    const arr = splitGroups.get(key) ?? [];
+    arr.push(lane);
+    splitGroups.set(key, arr);
+  }
+
+  for (const groupLanes of splitGroups.values()) {
+    if (groupLanes.length < 2) continue;
+    if (
+      !groupLanes.every(
+        (l) =>
+          l.allocationSplitPct !== null &&
+          l.allocationSplitPct !== undefined &&
+          Number.isFinite(l.allocationSplitPct),
+      )
+    ) {
+      continue;
+    }
+    const splitSum = groupLanes.reduce(
+      (s, l) => s + (l.allocationSplitPct ?? 0),
+      0,
+    );
+    if (Math.abs(splitSum - 100) > 0.5) continue;
+
+    const rawEntries = groupLanes
+      .map((l) => rawLaneMap.get(l.laneId))
+      .filter((r): r is NonNullable<typeof r> => r !== undefined);
+    const nonLapsed = rawEntries.filter((r) => r.state !== "LAPSED_UNCONTRACTED");
+    if (nonLapsed.length === 0) continue;
+
+    // Pool volume in a common reference unit (the first lane's baseUnit)
+    const refUnit = nonLapsed[0]!.baseUnit;
+    let canPoolVolume = true;
+    let anyVolume = false;
+    let pooledVolInRef = 0;
+    let pooledCBothVolInRef = 0;
+    let pooledHoldoverVolInRef = 0;
+    let pooledAtRiskRunRateVolInRef = 0;
+    let pooledTotalRunRateVolInRef = 0;
+
+    for (const r of nonLapsed) {
+      if (r.hasUnitConflict) {
+        canPoolVolume = false;
+        break;
+      }
+      const conv = toBaseUnit(1, r.baseUnit, refUnit);
+      if (conv.unitConflict || conv.value === null) {
+        canPoolVolume = false;
+        break;
+      }
+      const factor = conv.value;
+      if (r.activeVolume !== null) {
+        anyVolume = true;
+        pooledVolInRef += r.activeVolume * factor;
+      }
+      pooledCBothVolInRef += r.cBothVolume * factor;
+      pooledHoldoverVolInRef += r.assumedHoldoverVolume * factor;
+      pooledAtRiskRunRateVolInRef += r.atRiskRunRateVolume * factor;
+      pooledTotalRunRateVolInRef += r.totalRunRateVolume * factor;
+    }
+
+    const anySpend = nonLapsed.some((r) => r.activeSpendEur !== null);
+    const pooledSpend = nonLapsed.reduce((s, r) => s + (r.activeSpendEur ?? 0), 0);
+    const pooledCBothSpend = nonLapsed.reduce((s, r) => s + r.cBothSpendEur, 0);
+    const pooledSpendOnlyExcluded = nonLapsed.reduce(
+      (s, r) => s + r.spendOnlyExcludedEur,
+      0,
+    );
+    const pooledAtRiskRunRateSpend = nonLapsed.reduce(
+      (s, r) => s + r.atRiskRunRateSpend,
+      0,
+    );
+    const pooledTotalRunRateSpend = nonLapsed.reduce(
+      (s, r) => s + r.totalRunRateSpend,
+      0,
+    );
+
+    const groupContractIds = new Set<string>();
+    const groupConfidences = new Set<ContractConfidence>();
+    let groupHasActiveContract = false;
+    let groupHasHoldover = false;
+    for (const r of nonLapsed) {
+      if (r.state === "ACTIVE" || r.state === "HOLDOVER") {
+        groupHasActiveContract = true;
+      }
+      if (r.state === "HOLDOVER") {
+        groupHasHoldover = true;
+      }
+      for (const cid of r.activeContractIds) groupContractIds.add(cid);
+      for (const conf of r.activeConfidences) groupConfidences.add(conf);
+    }
+
+    for (const r of rawEntries) {
+      if (r.state === "LAPSED_UNCONTRACTED") continue;
+      const frac = (r.lane.allocationSplitPct ?? 0) / 100;
+
+      if (canPoolVolume && anyVolume) {
+        const backConv = toBaseUnit(1, refUnit, r.baseUnit);
+        const invFactor = backConv.value ?? 1;
+        r.activeVolume = pooledVolInRef * frac * invFactor;
+        r.cBothVolume = pooledCBothVolInRef * frac * invFactor;
+        r.assumedHoldoverVolume = pooledHoldoverVolInRef * frac * invFactor;
+        r.atRiskRunRateVolume = pooledAtRiskRunRateVolInRef * frac * invFactor;
+        r.totalRunRateVolume = pooledTotalRunRateVolInRef * frac * invFactor;
+      }
+      if (anySpend) {
+        r.activeSpendEur = pooledSpend * frac;
+        r.cBothSpendEur = pooledCBothSpend * frac;
+        r.spendOnlyExcludedEur = pooledSpendOnlyExcluded * frac;
+        r.atRiskRunRateSpend = pooledAtRiskRunRateSpend * frac;
+        r.totalRunRateSpend = pooledTotalRunRateSpend * frac;
+      }
+      if (r.state === "LEVEL_0_UNPRICED" && groupHasActiveContract && frac > 0) {
+        r.state = groupHasHoldover ? "HOLDOVER" : "ACTIVE";
+        for (const cid of groupContractIds) r.activeContractIds.add(cid);
+        for (const conf of groupConfidences) {
+          if (!r.activeConfidences.includes(conf)) {
+            r.activeConfidences.push(conf);
+          }
+        }
+      }
+    }
+  }
+
   // Group lanes by material inputId to derive shares, uncontracted demand, and renewal cliffs
   const materialSummaries = new Map<string, MaterialCommercialDerivation>();
   const lanesByInput = new Map<string, string[]>();

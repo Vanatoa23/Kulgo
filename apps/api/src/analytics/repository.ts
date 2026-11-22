@@ -56,6 +56,45 @@ function filterSourcingLanes(
   );
 }
 
+function attachDownstreamLaneCommercials<
+  T extends { laneCommercials?: ReturnType<typeof deriveNetworkCommercials>["laneSummaries"] extends Map<string, infer V> ? V[] : never },
+>(
+  financialRisk: T,
+  lanes: readonly SupplyLane[],
+  facilities: readonly Facility[],
+  inputs: Parameters<typeof deriveNetworkCommercials>[1],
+  contracts: Parameters<typeof deriveNetworkCommercials>[2],
+  contractLines: Parameters<typeof deriveNetworkCommercials>[3],
+  options: { asOfDate: string; viewMode: FinancialViewMode },
+): T {
+  const facById = new Map(facilities.map((f) => [f.facilityId, f]));
+  const downstreamLanes = lanes.filter(
+    (lane) =>
+      resolveLaneDirection(
+        lane,
+        facById.get(lane.fromFacilityId),
+        facById.get(lane.toFacilityId),
+      ) === "DOWNSTREAM",
+  );
+  if (downstreamLanes.length === 0) {
+    return financialRisk;
+  }
+  const downstreamCommercials = deriveNetworkCommercials(
+    downstreamLanes,
+    inputs,
+    contracts,
+    contractLines,
+    options,
+  );
+  return {
+    ...financialRisk,
+    laneCommercials: [
+      ...(financialRisk.laneCommercials ?? []),
+      ...downstreamCommercials.laneSummaries.values(),
+    ],
+  };
+}
+
 export class AnalyticsValidationError extends Error {
   constructor(message: string) {
     super(message);
@@ -264,22 +303,30 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       { asOfDate: isoDate, viewMode },
     );
 
-    const financialRisk = computeFinancialRiskSummary({
-      products: network.products,
-      inputs: network.inputs,
-      facilities: network.facilities,
-      lanes: network.lanes,
-      contracts: network.contracts,
-      contractLines: network.contractLines,
-      riskSignals,
-      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
-        network.lanes,
-        partnerHiddenSummaries,
-      ),
-      commercials,
-      asOfDate: isoDate,
-      viewMode,
-    });
+    const financialRisk = attachDownstreamLaneCommercials(
+      computeFinancialRiskSummary({
+        products: network.products,
+        inputs: network.inputs,
+        facilities: network.facilities,
+        lanes: network.lanes,
+        contracts: network.contracts,
+        contractLines: network.contractLines,
+        riskSignals,
+        hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+          network.lanes,
+          partnerHiddenSummaries,
+        ),
+        commercials,
+        asOfDate: isoDate,
+        viewMode,
+      }),
+      network.lanes,
+      network.facilities,
+      network.inputs,
+      network.contracts ?? [],
+      network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode },
+    );
 
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
@@ -389,22 +436,30 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       { asOfDate: isoDate, viewMode },
     );
 
-    const financialRisk = computeFinancialRiskSummary({
-      products: network.products,
-      inputs: network.inputs,
-      facilities: network.facilities,
-      lanes: network.lanes,
-      contracts: network.contracts,
-      contractLines: network.contractLines,
-      riskSignals,
-      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
-        network.lanes,
-        partnerHiddenSummaries,
-      ),
-      commercials,
-      asOfDate: isoDate,
-      viewMode,
-    });
+    const financialRisk = attachDownstreamLaneCommercials(
+      computeFinancialRiskSummary({
+        products: network.products,
+        inputs: network.inputs,
+        facilities: network.facilities,
+        lanes: network.lanes,
+        contracts: network.contracts,
+        contractLines: network.contractLines,
+        riskSignals,
+        hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+          network.lanes,
+          partnerHiddenSummaries,
+        ),
+        commercials,
+        asOfDate: isoDate,
+        viewMode,
+      }),
+      network.lanes,
+      network.facilities,
+      network.inputs,
+      network.contracts ?? [],
+      network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode },
+    );
 
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
