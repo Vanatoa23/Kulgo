@@ -302,7 +302,7 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
     await page.unroute("**/api/v1/workspace/facilities");
 
     // --- #47A: Prevent duplicate Base Agreements on invalid date / failed save + retry ---
-    await page.getByRole("button", { name: /Riga Baltic Polymers/i }).click();
+    await page.getByTestId("hub-column-supplier").getByRole("button", { name: /Riga Baltic Polymers/i }).click();
     const inspector = page.getByTestId("node-inspector-drawer");
     await expect(inspector).toBeVisible();
 
@@ -318,6 +318,8 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
     // request, including after a real commit whose response never reaches the browser.
     const contractRequests: Array<Record<string, unknown>> = [];
     let contractPostFailures = 0;
+    let committedContractId = "";
+    let committedLineId = "";
     await page.route("**/api/v1/workspace/contracts", async (route) => {
       if (route.request().method() !== "POST") {
         await route.continue();
@@ -335,9 +337,17 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
         });
         return;
       }
+      if (attempt === 4) {
+        await route.fulfill({ status: 409, contentType: "application/json",
+          body: JSON.stringify({ error: "Idempotency key already belongs to another request" }) });
+        return;
+      }
       if (attempt === 2) {
         const response = await route.fetch();
         expect(response.status()).toBe(201);
+        const saved = await response.json();
+        committedContractId = saved.contract.contractId;
+        committedLineId = saved.lines[0].contractLineId;
         await route.abort("failed");
         return;
       }
@@ -367,6 +377,33 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
     await expect(inspector.getByRole("button", { name: "Retry Previous Save" })).toBeEnabled();
     await expect(volInput).toBeDisabled();
     await expect(inspector.getByLabel("Contract title")).toBeDisabled();
+    const routeToggle = inspector.getByRole("button", { name: /Toggle route Riga Baltic Polymers/ });
+    await routeToggle.click();
+    await expect(volInput).toHaveCount(0);
+    await routeToggle.click();
+    await expect(volInput).toHaveValue("30");
+    await expect(volInput).toBeDisabled();
+
+    await inspector.getByRole("button", { name: "Close inspector" }).click();
+    await page.getByTestId("hub-column-supplier").getByRole("button", { name: /Riga Baltic Polymers/i }).click();
+    await expect(volInput).toHaveValue("30");
+    await expect(volInput).toBeDisabled();
+
+    await page.getByTestId("nav-dashboard").click();
+    await page.getByTestId("nav-hub").click();
+    await page.getByTestId("hub-column-supplier").getByRole("button", { name: /Riga Baltic Polymers/i }).click();
+    await expect(volInput).toHaveValue("30");
+    await expect(volInput).toBeDisabled();
+    await expect(spendInput).toHaveValue("85000");
+
+    // Another user can edit the committed records while this client is resolving
+    // the original save. Its original replay must still succeed without overwriting edits.
+    expect((await page.request.patch(`/api/v1/workspace/contracts/${committedContractId}`, {
+      data: { title: "Edited Spot Top-Up" },
+    })).status()).toBe(200);
+    expect((await page.request.patch(`/api/v1/workspace/contract-lines/${committedLineId}`, {
+      data: { committedVolume: 42 },
+    })).status()).toBe(200);
     await inspector.getByRole("button", { name: "Retry Previous Save" }).click();
     await expect(
       inspector.getByText("Base Agreement", { exact: true }),
@@ -374,12 +411,25 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
       timeout: 10_000,
     });
     await expect(
-      inspector.getByText("Spot Top-Up", { exact: true }),
+      inspector.getByText("Edited Spot Top-Up", { exact: true }),
     ).toHaveCount(1);
     expect(contractRequests).toHaveLength(4);
     expect(contractRequests[1]).toEqual(contractRequests[2]);
     expect(contractRequests[2]).toEqual(contractRequests[3]);
     expect(contractRequests[0]!.idempotencyKey).not.toBe(contractRequests[1]!.idempotencyKey);
+    // A genuine key conflict offers a refresh/review action, rather than an
+    // infinite retry loop or an automatic new-key submission.
+    await inspector.getByTestId("add-contract-topup-btn").click();
+    await volInput.fill("10");
+    await inspector.getByRole("button", { name: "Save Contract" }).click();
+    await expect(inspector.getByRole("button", { name: "Retry Previous Save" })).toBeDisabled();
+    await inspector.getByRole("button", { name: "Review Saved Contracts" }).click();
+    await expect(volInput).toHaveCount(0);
+    expect(contractRequests).toHaveLength(5);
+    await inspector.getByTestId("add-contract-topup-btn").click();
+    await expect(volInput).toBeEnabled();
+    await expect(volInput).toHaveValue("");
+    await expect(inspector.getByText("Edited Spot Top-Up", { exact: true })).toHaveCount(1);
     await page.unroute("**/api/v1/workspace/contracts");
   });
 });

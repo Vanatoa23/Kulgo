@@ -193,6 +193,8 @@ export function toEur(
 export interface ContractDerivationOptions {
   asOfDate: string;
   facilities?: readonly Facility[];
+  /** Source quantities for simulations that will allocate their edited inputs later. */
+  applyAllocationSplits?: boolean;
   viewMode?: FinancialViewMode;
   windowStart?: string;
   windowEndExclusive?: string;
@@ -770,7 +772,7 @@ export function deriveNetworkCommercials(
     splitGroups.set(key, arr);
   }
 
-  for (const groupLanes of splitGroups.values()) {
+  for (const groupLanes of options.applyAllocationSplits === false ? [] : splitGroups.values()) {
     if (groupLanes.length < 2) continue;
     if (
       !groupLanes.every(

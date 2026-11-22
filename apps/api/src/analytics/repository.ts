@@ -637,6 +637,12 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       network.contractLines ?? [],
       { asOfDate: isoDate, viewMode, facilities: network.facilities },
     );
+    // Simulation edits feed into derivation again. Start with unallocated sources,
+    // otherwise an allocated lane is pooled alongside its siblings a second time.
+    const baselineSourceCommercials = deriveNetworkCommercials(
+      baselineSourcingLanes, network.inputs, network.contracts ?? [], network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode, facilities: network.facilities, applyAllocationSplits: false },
+    );
     const baselineScale =
       viewMode === "RUN_RATE"
         ? 1
@@ -668,7 +674,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       const hasCommercialChange =
         volumeShareChanged || volumeChanged || spendChanged;
 
-      const baseComm = baselineCommercials.laneSummaries.get(lane.laneId);
+      const baseComm = baselineSourceCommercials.laneSummaries.get(lane.laneId);
       const isLapsedBaseline =
         baseComm?.laneCommercialState === "LAPSED_UNCONTRACTED";
       const addsExplicitCommercials =

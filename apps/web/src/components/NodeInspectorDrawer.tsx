@@ -1,3 +1,4 @@
+import { allocationPreviewPool, allocationPreviewVolume } from "../lib/allocation-preview.js";
 import {
   resolveFacilityRole,
   resolveLaneDirection,
@@ -677,24 +678,7 @@ export function NodeInspectorDrawer({
                 0,
               );
               const isValid = Math.abs(totalPct - 100) <= 0.01;
-              const unitFactor = (u: string) =>
-                u === "TONNES" ? 1000 : u === "KG" ? 1 : null;
-              const allMass = group.lanes.every(
-                (l) => unitFactor(l.volumeUnit) !== null,
-              );
-              const allSameUnit =
-                new Set(group.lanes.map((l) => l.volumeUnit)).size === 1;
-              const canPreviewVol = allSameUnit || allMass;
-              const totalCanonicalVol = canPreviewVol
-                ? group.lanes.reduce((sum, l) => {
-                    const vol =
-                      derivedByLaneId.get(l.laneId)?.activeVolume ??
-                      l.annualVolume ??
-                      0;
-                    const factor = allMass ? (unitFactor(l.volumeUnit) ?? 1) : 1;
-                    return sum + vol * factor;
-                  }, 0)
-                : 0;
+              const previewPool = allocationPreviewPool(group.lanes, derivedByLaneId);
 
               return (
                 <div
@@ -739,11 +723,7 @@ export function NodeInspectorDrawer({
                     {group.lanes.map((lane, idx) => {
                       const dest = facilitiesById.get(lane.toFacilityId);
                       const pct = Number(splitDrafts[lane.laneId]) || 0;
-                      const factor = allMass ? (unitFactor(lane.volumeUnit) ?? 1) : 1;
-                      const derivedVol =
-                        canPreviewVol && totalCanonicalVol > 0
-                          ? ((totalCanonicalVol * pct) / 100 / factor).toFixed(1)
-                          : null;
+                      const derivedVol = allocationPreviewVolume(previewPool, pct, lane.volumeUnit);
                       return (
                         <div
                           key={lane.laneId}
@@ -994,6 +974,8 @@ export function NodeInspectorDrawer({
                   >
                     <button
                       type="button"
+                      aria-expanded={isExpanded}
+                      aria-label={`Toggle route ${fromFac?.name ?? "Origin"} to ${toFac?.name ?? "Destination"}`}
                       onClick={() =>
                         setExpandedLaneId(isExpanded ? null : lane.laneId)
                       }

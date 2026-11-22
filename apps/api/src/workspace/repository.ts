@@ -2295,7 +2295,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           `SELECT contractId, ownerOrgId, supplierFacilityId, title, contractType,
                   pricingModel, expiryBehavior, confidence, startDate, endDate,
                   noticePeriodDays, nonRenewalNoticeGiven, archiveEffectiveDate,
-                  isManuallyArchived, incoterms, notes
+                  isManuallyArchived, incoterms, notes, idempotencyRequestJson
            FROM Contract WHERE contractId = :contractId AND ownerOrgId = :orgId LIMIT 1`,
           { contractId: targetContractId, orgId: safeOrgId },
         );
@@ -2315,7 +2315,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
             "SELECT laneId, inputId FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId",
             { orgId: safeOrgId },
           );
-          if (!contractPayloadMatchesExisting(input, existingContract, existingLines,
+          if (!contractRequestMatches(input, existingRows[0].idempotencyRequestJson,
+            existingContract, existingLines,
             new Map(laneInputs.map((lane) => [lane.laneId, lane.inputId])))) {
             throw new WorkspaceConflictError(
               "Idempotency key was already used for a different contract payload",
@@ -2511,8 +2512,13 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           startDate = :startDate, endDate = :endDate,
           noticePeriodDays = :noticePeriodDays, nonRenewalNoticeGiven = :nonRenewalNoticeGiven,
           archiveEffectiveDate = :archiveEffectiveDate, isManuallyArchived = :isManuallyArchived,
-          incoterms = :incoterms, notes = :notes`,
-        { ...contract },
+          incoterms = :incoterms, notes = :notes,
+          idempotencyRequestJson = :idempotencyRequestJson`,
+        { ...contract, idempotencyRequestJson: trimmedIdem
+          ? contractRequestSnapshot(input, contract, new Map(
+              Array.from(laneById.values()).map((lane) => [lane.laneId, lane.inputId]),
+            ))
+          : null },
       );
 
       const createdLines: ContractLine[] = [];
@@ -2663,10 +2669,42 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
   }
 }
 
+// Private immutable replay metadata, deliberately excluded from the public Contract schema.
+function contractRequestSnapshot(
+  input: CreateContractWithLinesAtomicInput, contract: Contract,
+  laneInputs: ReadonlyMap<string, string | null>,
+): string {
+  return JSON.stringify({
+    contract,
+    lines: input.lines.map((line) => ({ ...line, inputId: line.inputId ?? laneInputs.get(line.laneId) ?? null })),
+    laneInputs: Array.from(laneInputs).filter(([id]) => input.lines.some((line) => line.laneId === id)),
+    preserveLegacyBaseForLaneId: input.preserveLegacyBaseForLaneId ?? null,
+  });
+}
+
+function contractRequestMatches(
+  input: CreateContractWithLinesAtomicInput, snapshot: unknown,
+  currentContract: Contract, currentLines: readonly ContractLine[],
+  laneInputs: ReadonlyMap<string, string | null>,
+): boolean {
+  if (typeof snapshot === "string" && snapshot) {
+    const original = JSON.parse(snapshot) as {
+      contract: Contract;
+      lines: Array<Omit<CreateContractLineInput, "contractId">>;
+      laneInputs: Array<[string, string | null]>;
+      preserveLegacyBaseForLaneId: string | null;
+    };
+    return (input.preserveLegacyBaseForLaneId ?? null) === original.preserveLegacyBaseForLaneId &&
+      contractPayloadMatchesExisting(input, original.contract, original.lines, new Map(original.laneInputs));
+  }
+  // Older records have no original snapshot. Keep their conservative conflict behavior.
+  return contractPayloadMatchesExisting(input, currentContract, currentLines, laneInputs);
+}
+
 function contractPayloadMatchesExisting(
   input: CreateContractWithLinesAtomicInput,
   existingContract: Contract,
-  existingLines: readonly ContractLine[],
+  existingLines: ReadonlyArray<Omit<CreateContractLineInput, "contractId">>,
   laneInputs: ReadonlyMap<string, string | null>,
 ): boolean {
   const defaultExpiry =
@@ -2839,6 +2877,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
   private readonly facilities = new Map<string, StoredFacilityRecord>();
   private readonly lanes = new Map<string, SupplyLane>();
   private readonly contracts = new Map<string, Contract>();
+  private readonly contractRequests = new Map<string, string>();
   private readonly contractLines = new Map<string, ContractLine>();
   private onFacilityDeleted?: (
     orgId: string,
@@ -3887,7 +3926,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
         const laneInputs = new Map(Array.from(this.lanes.values())
           .filter((lane) => lane.ownerOrgId === safeOrgId)
           .map((lane) => [lane.laneId, lane.inputId] as const));
-        if (!contractPayloadMatchesExisting(input, existing, existingLines, laneInputs)) {
+        if (!contractRequestMatches(input, this.contractRequests.get(targetContractId), existing, existingLines, laneInputs)) {
           throw new WorkspaceConflictError(
             "Idempotency key was already used for a different contract payload",
           );
@@ -4046,6 +4085,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       }
     }
     this.contracts.set(contract.contractId, contract);
+    if (trimmedIdem) {
+      this.contractRequests.set(contract.contractId, contractRequestSnapshot(input, contract,
+        new Map(input.lines.map((line) => [line.laneId, this.lanes.get(line.laneId)!.inputId])),
+      ));
+    }
     for (const line of createdLines) {
       this.contractLines.set(line.contractLineId, line);
     }

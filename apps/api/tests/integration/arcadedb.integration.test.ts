@@ -56,7 +56,7 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
   const workspaceRepo = new ArcadeDbWorkspaceRepository(db);
   const runId = randomUUID().slice(0, 8);
 
-  commercialRegressionCases(() => new ArcadeDbWorkspaceRepository(db));
+  commercialRegressionCases(() => new ArcadeDbWorkspaceRepository(db), () => new ArcadeDbWorkspaceRepository(db));
 
   beforeAll(async () => {
     await bootstrapSchema(db);

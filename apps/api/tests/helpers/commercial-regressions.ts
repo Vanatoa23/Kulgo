@@ -7,7 +7,7 @@ import {
 import { describe, expect, it } from "vitest";
 import { WorkspaceConflictError, type WorkspaceRepository } from "../../src/workspace/repository.js";
 
-export function commercialRegressionCases(createRepo: () => WorkspaceRepository) {
+export function commercialRegressionCases(createRepo: () => WorkspaceRepository, reopenRepo?: () => WorkspaceRepository) {
   async function fixture() {
     const repo = createRepo();
     const orgId = randomUUID();
@@ -83,11 +83,23 @@ export function commercialRegressionCases(createRepo: () => WorkspaceRepository)
       await expect(repo.createContractWithLinesAtomic(orgId, {
         ...payload, lines: [{ ...payload.lines[0]!, inputId: other.inputId }],
       })).rejects.toBeInstanceOf(WorkspaceConflictError);
-      // Omission must resolve against the current lane, not blindly reuse the stored input.
+      // An unchanged retry resolves defaults against the original request, even after the lane changes.
       await repo.updateLane(orgId, lanes[0]!.laneId, { inputId: other.inputId });
-      await expect(repo.createContractWithLinesAtomic(orgId, payload))
-        .rejects.toBeInstanceOf(WorkspaceConflictError);
-      expect(await repo.listContractLines(orgId)).toEqual(created.lines);
+      expect((await repo.createContractWithLinesAtomic(orgId, payload)).deduplicated).toBe(true);
+      await repo.updateContract(orgId, created.contract.contractId, { title: "Edited by another user" });
+      await repo.updateContractLine(orgId, created.lines[0]!.contractLineId, {
+        committedVolume: 250, inputId: other.inputId,
+      });
+      // A fresh repository instance proves replay metadata survives application restarts.
+      const replayRepo = reopenRepo?.() ?? repo;
+      const retry = await replayRepo.createContractWithLinesAtomic(orgId, payload);
+      expect(retry.deduplicated).toBe(true);
+      expect(retry.contract.title).toBe("Edited by another user");
+      expect(retry.lines[0]!.committedVolume).toBe(250);
+      await expect(replayRepo.createContractWithLinesAtomic(orgId, {
+        ...payload, contract: { ...payload.contract, title: "Edited by another user" },
+      })).rejects.toBeInstanceOf(WorkspaceConflictError);
+      expect(await repo.listContractLines(orgId)).toHaveLength(1);
       expect(await repo.listContracts(orgId)).toHaveLength(1);
     });
   });

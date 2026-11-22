@@ -211,6 +211,7 @@ export const KULGO_SCHEMA_STATEMENTS: readonly string[] = [
   "CREATE PROPERTY Contract.isManuallyArchived IF NOT EXISTS BOOLEAN",
   "CREATE PROPERTY Contract.incoterms IF NOT EXISTS STRING",
   "CREATE PROPERTY Contract.notes IF NOT EXISTS STRING",
+  "CREATE PROPERTY Contract.idempotencyRequestJson IF NOT EXISTS STRING",
   "CREATE INDEX IF NOT EXISTS ON Contract (contractId) UNIQUE",
   "CREATE INDEX IF NOT EXISTS ON Contract (ownerOrgId) NOTUNIQUE",
   "CREATE INDEX IF NOT EXISTS ON Contract (supplierFacilityId) NOTUNIQUE",

@@ -1,3 +1,4 @@
+import { PendingContractSavesProvider } from "./lib/pending-contract-saves.js";
 import type {
   AnalyticsSummary,
   AuthMeResponse,
@@ -638,6 +639,7 @@ export function App() {
   ).length;
 
   return (
+    <PendingContractSavesProvider key={`${session.organization.orgId}:${session.user.userId}`}>
     <div className="h-screen w-screen flex overflow-hidden bg-slate-950 text-slate-100">
       {/* Slim Persistent Left Icon-Rail */}
       <AppShellNav
@@ -978,5 +980,6 @@ export function App() {
         }}
       />
     </div>
+    </PendingContractSavesProvider>
   );
 }
