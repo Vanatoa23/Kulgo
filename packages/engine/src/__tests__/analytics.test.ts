@@ -868,5 +868,58 @@ describe("evaluateNetworkAnalytics & simulateNetworkAnalytics", () => {
       result.baseline.esg.upstreamScope3Tco2e * 3,
     );
   });
+
+  it("excludes CLIENT facilities and DOWNSTREAM lanes from upstream HHI and Scope 3 Cat 1", () => {
+    const baseline = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: LANES,
+      riskSignals: [],
+      asOfDate,
+    });
+
+    const clientId = "99999999-9999-4999-8999-999999999991";
+    const downstreamLaneId = "99999999-9999-4999-8999-999999999992";
+    const withClient = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: [
+        ...FACILITIES,
+        {
+          ...FACILITIES[0]!,
+          facilityId: clientId,
+          name: "Helsinki Client Oy",
+          kind: "CUSTOMER",
+          isOwnFacility: false,
+          relationshipRole: "CLIENT",
+          countryCode: "FI",
+        },
+      ],
+      lanes: [
+        ...LANES,
+        {
+          ...LANES[0]!,
+          laneId: downstreamLaneId,
+          fromFacilityId: FACILITIES[0]!.facilityId,
+          toFacilityId: clientId,
+          direction: "DOWNSTREAM",
+          inputId: null,
+          materialCategory: "Finished Goods",
+          volumeSharePct: 100,
+          annualVolume: 500,
+          annualSpendEur: 9_000_000,
+        },
+      ],
+      riskSignals: [],
+      asOfDate,
+    });
+
+    expect(withClient.resilienceScore).toBe(baseline.resilienceScore);
+    expect(withClient.hhiMetrics).toEqual(baseline.hhiMetrics);
+    expect(withClient.esg.upstreamScope3Tco2e).toBe(
+      baseline.esg.upstreamScope3Tco2e,
+    );
+  });
 });
 

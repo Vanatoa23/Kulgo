@@ -1,7 +1,7 @@
 import { expect, test } from "@playwright/test";
 
-test.describe("Kulgo Browser E2E Smoke Suite", () => {
-  test("register → demo → Map/Graph → What-If Simulator → Org ESG & CSRD → OWNER Audit Log → MEMBER read-only RBAC", async ({
+test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (#47)", () => {
+  test("4-Page UX flow: Hub 30/70 split → Map [Suppliers|Both|Clients] + Line HUD + Simulator → Dashboard KPIs & Exports → Settings RBAC & Audit Log", async ({
     page,
   }) => {
     const suffix = Date.now();
@@ -22,126 +22,177 @@ test.describe("Kulgo Browser E2E Smoke Suite", () => {
       .getByRole("button", { name: "Create Private Workspace" })
       .click();
 
-    // Verify authenticated workspace header
-    await expect(page.getByText("Estonia Smoke Mfg AS")).toBeVisible();
-
-    // 2. Load Estonia Product X Demo
-    await page
-      .getByRole("button", { name: "Load Estonia Product X Demo" })
-      .click();
-    await expect(
-      page.getByRole("button", { name: "Product X", exact: true }),
-    ).toBeVisible({
+    await expect(page.getByText("Estonia Smoke Mfg AS")).toBeVisible({
       timeout: 15_000,
     });
-    await expect(page.getByText(/Resilience:/)).toBeVisible();
 
-    // 3. Switch between Map View and Logical Graph
+    // 2. Load Estonia Product X Demo on Page 1 (Network Hub)
+    await page
+      .getByRole("button", { name: "Load Estonia Product X Demo" })
+      .first()
+      .click();
+
+    await expect(page.getByTestId("hub-column-supplier")).toContainText(
+      "Tartu Precision Metalworks",
+      { timeout: 15_000 },
+    );
+    await expect(page.getByTestId("hub-column-own")).toContainText(
+      "Tallinn HQ & Assembly Plant",
+    );
+    await expect(page.getByTestId("hub-column-own")).toContainText(
+      "Tartu Distribution Warehouse",
+    );
+    await expect(page.getByTestId("hub-column-client")).toContainText(
+      "Helsinki Industrial Systems Oy",
+    );
+
+    // 3. Open Tartu Precision Metalworks Inspector Drawer & test 70/30 → 60/40 allocation split
+    await page
+      .getByRole("button", { name: /Tartu Precision Metalworks/i })
+      .click();
+    const inspector = page.getByTestId("node-inspector-drawer");
+    await expect(inspector).toBeVisible();
+    await expect(inspector.getByTestId("allocation-splits-section")).toBeVisible();
+    await expect(inspector.getByTestId("split-total-badge")).toContainText(
+      "Total: 100%",
+    );
+
+    const tallinnSplitInput = inspector.getByLabel(
+      /Split percentage for Tallinn HQ/i,
+    );
+    const tartuSplitInput = inspector.getByLabel(
+      /Split percentage for Tartu Distribution Warehouse/i,
+    );
+    await tallinnSplitInput.fill("60");
+    await expect(inspector.getByTestId("split-total-badge")).toContainText(
+      "Total: 90%",
+    );
+    await expect(
+      inspector.getByRole("button", { name: "Save Split" }),
+    ).toBeDisabled();
+
+    await tartuSplitInput.fill("40");
+    await expect(inspector.getByTestId("split-total-badge")).toContainText(
+      "Total: 100%",
+    );
+    await inspector.getByRole("button", { name: "Save Split" }).click();
+    await expect(
+      inspector.getByText("Destination allocation split updated to 100%."),
+    ).toBeVisible({ timeout: 10_000 });
+
+    // 4. Switch to Page 2 — Strategy-Game Supply Map
+    await page.getByTestId("nav-map").click();
+    await expect(page.getByTestId("map-flow-toggle")).toBeVisible({
+      timeout: 10_000,
+    });
+
+    // Test [Suppliers | Both | Clients] HUD toggle
+    await page.getByTestId("map-flow-clients").click();
+    await expect(page.getByLabel("Inspect route on map")).toContainText(
+      "Helsinki Industrial Systems Oy",
+    );
+    await page.getByTestId("map-flow-suppliers").click();
+    await expect(page.getByLabel("Inspect route on map")).toContainText(
+      "Tartu Precision Metalworks",
+    );
+    await page.getByTestId("map-flow-both").click();
+
+    // Select a route to open the Click-on-Line Tactical HUD card
+    const routeSelect = page.getByLabel("Inspect route on map");
+    const firstOptionVal = await routeSelect
+      .locator("option")
+      .nth(1)
+      .getAttribute("value");
+    expect(firstOptionVal).toBeTruthy();
+    await routeSelect.selectOption(firstOptionVal!);
+    await expect(page.getByTestId("map-line-hud-card")).toBeVisible();
+
+    // Toggle Logical Graph and back to Map View
     await page.getByRole("button", { name: "Logical Graph" }).click();
     await expect(page.locator(".react-flow")).toBeVisible({ timeout: 10_000 });
-
     await page.getByRole("button", { name: "Map View" }).click();
     await expect(page.locator(".react-flow")).toHaveCount(0);
 
-    // 4. Open What-If Simulator drawer and run a scenario simulation
+    // Open What-If Simulator from Map HUD and verify +14d safety stock EAL delta
     await page.getByRole("button", { name: "What-If Simulator" }).click();
     const simulatorDialog = page.getByRole("dialog", {
       name: "What-If Supply Chain Simulator",
     });
     await expect(simulatorDialog).toBeVisible();
-    await simulatorDialog
-      .getByRole("button", { name: "De-risk RED Lanes" })
-      .click();
-    await expect(simulatorDialog.getByText("Resilience Score")).toBeVisible({
+    await page.getByTestId("preset-add-14d-stock").click();
+    await expect(page.getByTestId("whatif-financial-deltas")).toBeVisible({
       timeout: 10_000,
     });
-    await expect(simulatorDialog.getByText("Transport Scope 3")).toBeVisible();
     await simulatorDialog
       .getByRole("button", { name: "Close What-If Simulator" })
       .click();
-    await expect(simulatorDialog).toHaveCount(0);
 
-    // 5. Open Org ESG Settings, verify Team Members, and update Scope 1 & 2
-    await page.getByRole("button", { name: "Org ESG" }).click();
-    const orgDialog = page.getByRole("dialog", {
-      name: /Org ESG, Directory & Team Settings/i,
-    });
-    await expect(orgDialog).toBeVisible();
-    await expect(
-      orgDialog.getByRole("heading", { name: "Team Members" }),
-    ).toBeVisible();
-    await expect(orgDialog.getByText(ownerEmail)).toBeVisible();
-
-    await orgDialog.getByLabel(/Scope 1 Emissions/i).fill("350");
-    await orgDialog.getByLabel(/Scope 2 Emissions/i).fill("125");
-    await orgDialog.getByRole("button", { name: "Save Org Settings" }).click();
-
-    await expect(
-      orgDialog.getByText(/Organization ESG & directory settings saved/i),
-    ).toBeVisible();
-    await orgDialog
-      .getByRole("button", { name: "Close organization settings" })
-      .click();
-    await expect(orgDialog).toHaveCount(0);
-
-    // 6. Open Import / Export modal and verify CSRD Executive Report preview
-    await page.getByRole("button", { name: "Import / Export" }).click();
-    const importExportDialog = page.getByRole("dialog", {
-      name: /Import, Export & CSRD Report/i,
-    });
-    await expect(importExportDialog).toBeVisible();
-
-    await importExportDialog
-      .getByRole("button", { name: /Export & CSRD Report/i })
-      .click();
-    await importExportDialog
-      .getByRole("button", { name: "Download CSRD Report" })
-      .click();
-
-    await expect(
-      importExportDialog.getByText("CSRD Executive Summary Preview"),
-    ).toBeVisible({ timeout: 10_000 });
-    await expect(
-      importExportDialog.getByText("REPORTED / REPORTED"),
-    ).toBeVisible();
-    await importExportDialog
-      .getByRole("button", { name: /Close/i })
-      .first()
-      .click();
-    await expect(importExportDialog).toHaveCount(0);
-
-    // 7. Re-open Org Settings as OWNER: verify Audit Log entries & add a MEMBER
-    await page.getByRole("button", { name: "Org ESG" }).click();
-    await expect(orgDialog).toBeVisible();
-    await expect(
-      orgDialog.getByRole("heading", { name: "Audit Log" }),
-    ).toBeVisible();
-
-    const auditList = orgDialog.getByRole("list", {
-      name: "Compliance audit events",
-    });
-    await expect(auditList).toBeVisible({ timeout: 10_000 });
-    await expect(auditList.getByText("ORG_PROFILE_UPDATED")).toBeVisible();
-    await expect(auditList.getByText("CSRD_REPORT_EXPORTED")).toBeVisible();
-
-    await orgDialog.getByLabel("New member email").fill(memberEmail);
-    await orgDialog.getByLabel("New member password").fill(memberPassword);
-    await orgDialog.getByLabel("New member role").selectOption("MEMBER");
-    await orgDialog.getByRole("button", { name: "Add Member" }).click();
-
-    await expect(
-      orgDialog.getByText(`Added ${memberEmail} as MEMBER.`),
-    ).toBeVisible({ timeout: 10_000 });
-    await expect(auditList.getByText("MEMBER_ADDED")).toBeVisible({
+    // 5. Switch to Page 3 — Executive Dashboard
+    await page.getByTestId("nav-dashboard").click();
+    await expect(page.getByTestId("dashboard-kpi-strip")).toBeVisible({
       timeout: 10_000,
     });
+    await expect(page.getByText("Resilience Score")).toBeVisible();
+    await expect(page.getByText("Expected Annual Loss")).toBeVisible();
+    await expect(page.getByText("Total Carbon Footprint")).toBeVisible();
 
-    await orgDialog
-      .getByRole("button", { name: "Close organization settings" })
-      .click();
-    await expect(orgDialog).toHaveCount(0);
+    // Toggle Time View (Current Run-Rate vs Period Window T)
+    await page.getByTestId("time-view-period-window").click();
+    await page.getByTestId("time-view-run-rate").click();
 
-    // 8. Log out and sign in as the newly added MEMBER
+    // Verify Financial Risk, ESG & Compliance sub-tabs
+    await page.getByTestId("dashboard-tab-financial").click();
+    await expect(page.getByText("Worst-Case Tail VaR (95%)")).toBeVisible();
+    await page.getByTestId("dashboard-tab-esg").click();
+    await expect(page.getByText("Scope 3 Cat 1 (Purchased)")).toBeVisible();
+    await page.getByTestId("dashboard-tab-compliance").click();
+    await expect(
+      page.getByText("Regional Compliance Readiness Checklist"),
+    ).toBeVisible();
+
+    // Verify Export Reports dropdown (CSV & PDF downloads)
+    await page.getByTestId("export-reports-btn").click();
+    const csvDownloadPromise = page.waitForEvent("download");
+    await page.getByRole("menuitem", { name: /Auditor CSV Ledger/i }).click();
+    const csvDownload = await csvDownloadPromise;
+    expect(csvDownload.suggestedFilename()).toContain("kulgo-esg-ledger");
+
+    await page.getByTestId("export-reports-btn").click();
+    const pdfDownloadPromise = page.waitForEvent("download");
+    await page.getByRole("menuitem", { name: /Board \/ Bank-Ready PDF/i }).click();
+    const pdfDownload = await pdfDownloadPromise;
+    expect(pdfDownload.suggestedFilename()).toContain(".pdf");
+
+    // 6. Switch to Page 4 — Settings (Org ESG, Team RBAC & Audit Log)
+    await page.getByTestId("nav-settings").click();
+    await page.getByLabel(/Scope 1 Emissions/i).fill("350");
+    await page.getByLabel(/Scope 2 Emissions/i).fill("125");
+    await page.getByRole("button", { name: "Save Org Settings" }).click();
+    await expect(
+      page.getByText(/Organization ESG & directory settings saved/i),
+    ).toBeVisible({ timeout: 10_000 });
+
+    // Add a MEMBER in Team tab
+    await page.getByTestId("settings-tab-team").click();
+    await page.getByLabel("New member email").fill(memberEmail);
+    await page.getByLabel("New member password").fill(memberPassword);
+    await page.getByLabel("New member role").selectOption("MEMBER");
+    await page.getByRole("button", { name: "Add Member" }).click();
+    await expect(
+      page.getByText(`Added ${memberEmail} as MEMBER.`),
+    ).toBeVisible({ timeout: 10_000 });
+
+    // Verify Audit Log tab as OWNER
+    await page.getByTestId("settings-tab-audit").click();
+    const auditList = page.getByRole("list", {
+      name: "Compliance audit events",
+    });
+    await expect(auditList.getByText("ORG_PROFILE_UPDATED")).toBeVisible({
+      timeout: 10_000,
+    });
+    await expect(auditList.getByText("MEMBER_ADDED")).toBeVisible();
+
+    // 7. Log out and sign in as MEMBER -> verify read-only org settings & hidden Audit Log
     await page.getByRole("button", { name: "Logout" }).click();
     await expect(
       page.getByRole("button", { name: "Sign In to Workspace" }),
@@ -150,205 +201,154 @@ test.describe("Kulgo Browser E2E Smoke Suite", () => {
     await page.locator("#auth-email").fill(memberEmail);
     await page.locator("#auth-password").fill(memberPassword);
     await page.getByRole("button", { name: "Sign In to Workspace" }).click();
-
-    await expect(page.getByText("Estonia Smoke Mfg AS")).toBeVisible({
+    await expect(
+      page.getByText("Estonia Smoke Mfg AS", { exact: true }),
+    ).toBeVisible({
       timeout: 10_000,
     });
 
-    // 9. Confirm Org Settings shows read-only MEMBER notice, Save is disabled, and Audit Log is hidden
-    await page.getByRole("button", { name: "Org ESG" }).click();
-    await expect(orgDialog).toBeVisible();
+    await page.getByTestId("nav-settings").click();
+    await expect(page.getByTestId("member-readonly-notice")).toBeVisible();
     await expect(
-      orgDialog.getByText(/You are signed in as a MEMBER/i),
-    ).toBeVisible();
-    await expect(
-      orgDialog.getByRole("button", { name: "Save Org Settings" }),
+      page.getByRole("button", { name: "Save Org Settings" }),
     ).toBeDisabled();
-    await expect(
-      orgDialog.getByRole("heading", { name: "Audit Log" }),
-    ).toHaveCount(0);
+    await expect(page.getByTestId("settings-tab-audit")).toHaveCount(0);
   });
 
-  test("displays matched live RiskSignals in Alerts panel, supports acknowledge, and saves alert channel preferences", async ({
+  test("Issue #47 regression: preserves form drafts on rejected/network-failed saves and prevents duplicate Base Agreements on contract retry", async ({
     page,
   }) => {
-    const unique = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    const email = `alerts-e2e-${unique}@kulgo.ee`;
+    const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const email = `reg47-${suffix}@estonia-mfg.ee`;
 
     await page.goto("/");
     await page.getByRole("tab", { name: "Create Workspace" }).click();
     await page.locator("#auth-email").fill(email);
-    await page.locator("#auth-password").fill("AlertsE2ePassword2026!");
-    await page.locator("#auth-org-name").fill("Baltic Alerts E2E OÜ");
+    await page.locator("#auth-password").fill("Regression47Test2026!");
+    await page.locator("#auth-org-name").fill("Estonia Reg47 OU");
     await page.locator("#auth-country").fill("EE");
     await page.locator("#auth-sector").fill("Electronics");
     await page
       .getByRole("button", { name: "Create Private Workspace" })
       .click();
-
-    await expect(page.getByText("Baltic Alerts E2E OÜ")).toBeVisible({
+    await expect(page.getByText("Estonia Reg47 OU")).toBeVisible({
       timeout: 15_000,
     });
 
-    // Seed demo network so Latvia sanctions corridor & Asia->EU lanes match active RiskSignals
+    // Load demo so we have legacy lanes with annualVolume / annualSpendEur
     await page
       .getByRole("button", { name: "Load Estonia Product X Demo" })
-      .click();
-    await expect(
-      page.getByRole("button", { name: "Product X", exact: true }),
-    ).toBeVisible({ timeout: 15_000 });
-
-    // Open Alerts tab
-    await page.getByRole("button", { name: "Alerts" }).click();
-    const latviaCard = page.getByTestId("alert-card-sig-latvia-sanctions-01");
-    await expect(latviaCard).toBeVisible({ timeout: 10_000 });
-    await expect(latviaCard.getByText("Unacknowledged")).toBeVisible();
-
-    // Acknowledge the live disruption signal
-    await latviaCard.getByRole("button", { name: "Acknowledge" }).click();
-    await expect(latviaCard.getByText("✓ Acknowledged")).toBeVisible({
-      timeout: 10_000,
-    });
-
-    // Configure Alert Notification Channels in OrgSettingsModal
-    await page.getByRole("button", { name: "Channels" }).click();
-    const orgDialog = page.getByRole("dialog", {
-      name: /Org ESG, Directory & Team Settings/i,
-    });
-    await expect(orgDialog).toBeVisible();
-    await orgDialog
-      .getByPlaceholder("ops@company.eu, risk@company.eu")
-      .fill("ops@baltic-e2e.eu");
-    await orgDialog.getByRole("button", { name: "Save Alert Channels" }).click();
-    await expect(
-      orgDialog.getByText("Alert notification channels saved."),
-    ).toBeVisible({ timeout: 10_000 });
-  });
-
-  test("Financial Risk & Provisions card, Run-Rate vs Next 12M toggle, and What-If +14d Safety Stock EAL delta", async ({
-    page,
-  }) => {
-    const unique = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    const email = `fin-e2e-${unique}@kulgo.ee`;
-
-    await page.goto("/");
-    await page.getByRole("tab", { name: "Create Workspace" }).click();
-    await page.locator("#auth-email").fill(email);
-    await page.locator("#auth-password").fill("FinancialE2ePassword2026!");
-    await page.locator("#auth-org-name").fill("Tallinn Financial E2E OÜ");
-    await page.locator("#auth-country").fill("EE");
-    await page.locator("#auth-sector").fill("Electronics");
-    await page
-      .getByRole("button", { name: "Create Private Workspace" })
-      .click();
-
-    await expect(page.getByText("Tallinn Financial E2E OÜ")).toBeVisible({
-      timeout: 15_000,
-    });
-
-    await page
-      .getByRole("button", { name: "Load Estonia Product X Demo" })
-      .click();
-    await expect(
-      page.getByRole("button", { name: "Product X", exact: true }),
-    ).toBeVisible({ timeout: 15_000 });
-
-    // Open ESG/Risk analytics tab (demo seed switches to Overview/Refine)
-    await page.getByRole("button", { name: "ESG/Risk" }).click();
-
-    // Financial Risk & Provisions card renders on Analytics tab
-    const finCard = page.getByTestId("financial-risk-card");
-    await expect(finCard).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId("financial-base-eal")).toContainText("€");
-    await expect(page.getByTestId("financial-confidence-badge")).toBeVisible();
-
-    // Toggle Run-Rate vs Next 12M window
-    await page.getByTestId("view-mode-run-rate").click();
-    await expect(page.getByTestId("financial-base-eal")).toContainText("€");
-    await page.getByTestId("view-mode-period-window").click();
-
-    // Open What-If Simulator and test +14d Safety Stock EAL/ROI delta
-    await page
-      .getByRole("button", { name: "What-If Simulator" })
       .first()
       .click();
-    await page.getByTestId("preset-add-14d-stock").click();
-    await expect(page.getByTestId("whatif-financial-deltas")).toBeVisible({
+    await expect(page.getByTestId("hub-column-supplier")).toContainText(
+      "Riga Baltic Polymers",
+      { timeout: 15_000 },
+    );
+
+    // --- #47B: Form draft preservation on 400 rejection & network error ---
+    await page.getByTestId("add-supplier-btn").click();
+    const nameInput = page.getByLabel("SUPPLIER name");
+    const sectorInput = page.getByLabel("SUPPLIER sector");
+    await nameInput.fill("Resilient Draft Supplier GmbH");
+    await sectorInput.fill("Precision Optics");
+
+    let failCount = 0;
+    await page.route("**/api/v1/workspace/facilities", async (route) => {
+      if (route.request().method() === "POST" && failCount === 0) {
+        failCount += 1;
+        await route.fulfill({
+          status: 400,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Simulated server validation error" }),
+        });
+        return;
+      }
+      if (route.request().method() === "POST" && failCount === 1) {
+        failCount += 1;
+        await route.abort("failed");
+        return;
+      }
+      await route.continue();
+    });
+
+    // Attempt 1: 400 rejection -> draft MUST remain intact
+    await page
+      .getByTestId("hub-column-supplier")
+      .getByRole("button", { name: "Save" })
+      .click();
+    await expect(
+      page.getByText("Simulated server validation error"),
+    ).toBeVisible();
+    await expect(nameInput).toHaveValue("Resilient Draft Supplier GmbH");
+    await expect(sectorInput).toHaveValue("Precision Optics");
+
+    // Attempt 2: Network failure -> draft MUST STILL remain intact
+    await page
+      .getByTestId("hub-column-supplier")
+      .getByRole("button", { name: "Save" })
+      .click();
+    await expect(nameInput).toHaveValue("Resilient Draft Supplier GmbH");
+    await expect(sectorInput).toHaveValue("Precision Optics");
+
+    // Attempt 3: Succeeds -> supplier appears in column and form closes
+    await page
+      .getByTestId("hub-column-supplier")
+      .getByRole("button", { name: "Save" })
+      .click();
+    await expect(page.getByTestId("hub-column-supplier")).toContainText(
+      "Resilient Draft Supplier GmbH",
+      { timeout: 10_000 },
+    );
+    await page.unroute("**/api/v1/workspace/facilities");
+
+    // --- #47A: Prevent duplicate Base Agreements on invalid date / failed save + retry ---
+    await page.getByRole("button", { name: /Riga Baltic Polymers/i }).click();
+    const inspector = page.getByTestId("node-inspector-drawer");
+    await expect(inspector).toBeVisible();
+
+    await inspector.getByTestId("add-contract-topup-btn").click();
+    const volInput = inspector.getByLabel("Committed volume");
+    const spendInput = inspector.getByLabel("Committed spend");
+    const startInput = inspector.getByLabel("Contract start date");
+
+    await volInput.fill("25");
+    await spendInput.fill("85000");
+
+    // Fail the first POST /contracts with 500 to simulate partial/transient server error
+    let contractPostFailures = 0;
+    await page.route("**/api/v1/workspace/contracts", async (route) => {
+      if (route.request().method() === "POST" && contractPostFailures === 0) {
+        contractPostFailures += 1;
+        await route.fulfill({
+          status: 500,
+          contentType: "application/json",
+          body: JSON.stringify({ error: "Simulated transient contract failure" }),
+        });
+        return;
+      }
+      await route.continue();
+    });
+
+    await startInput.fill("2026-07-01");
+    await inspector.getByRole("button", { name: "Save Contract" }).click();
+
+    // Draft MUST be preserved after failure
+    await expect(
+      inspector.getByText("Simulated transient contract failure"),
+    ).toBeVisible();
+    await expect(volInput).toHaveValue("25");
+    await expect(spendInput).toHaveValue("85000");
+
+    // Retry succeeds -> exactly ONE Base Agreement and ONE Spot Top-Up
+    await inspector.getByRole("button", { name: "Save Contract" }).click();
+    await expect(
+      inspector.getByText("Base Agreement", { exact: true }),
+    ).toHaveCount(1, {
       timeout: 10_000,
     });
-    await expect(page.getByTestId("whatif-eal-delta")).toContainText("€");
-  });
-
-  test("ESG & Multi-Region Compliance: market-based pack switching, PCAF score display, and CSV/PDF export", async ({
-    page,
-  }) => {
-    const unique = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
-    const email = `esg-e2e-${unique}@kulgo.ee`;
-
-    await page.goto("/");
-    await page.getByRole("tab", { name: "Create Workspace" }).click();
-    await page.locator("#auth-email").fill(email);
-    await page.locator("#auth-password").fill("EsgCompliance2026!");
-    await page.locator("#auth-org-name").fill("Tallinn ESG E2E OÜ");
-    await page.locator("#auth-country").fill("EE");
-    await page.locator("#auth-sector").fill("Manufacturing");
-    await page
-      .getByRole("button", { name: "Create Private Workspace" })
-      .click();
-
-    await expect(page.getByText("Tallinn ESG E2E OÜ")).toBeVisible({
-      timeout: 15_000,
-    });
-
-    await page
-      .getByRole("button", { name: "Load Estonia Product X Demo" })
-      .click();
     await expect(
-      page.getByRole("button", { name: "Product X", exact: true }),
-    ).toBeVisible({ timeout: 15_000 });
-
-    // Open Org Settings -> enable US & UK Target Export Markets + Save
-    await page.getByRole("button", { name: "Org ESG" }).click();
-    const orgDialog = page.getByRole("dialog", {
-      name: /Org ESG, Directory & Team Settings/i,
-    });
-    await expect(orgDialog).toBeVisible();
-    await orgDialog.getByTestId("target-market-US").click();
-    await orgDialog.getByTestId("target-market-UK").click();
-    await orgDialog.getByRole("button", { name: "Save Org Settings" }).click();
-    await expect(
-      orgDialog.getByText(/Organization ESG & directory settings saved/i),
-    ).toBeVisible({ timeout: 10_000 });
-    await orgDialog
-      .getByRole("button", { name: "Close organization settings" })
-      .click();
-
-    // Open ESG/Risk analytics tab and verify PCAF score + EU/US/UK compliance packs
-    await page.getByRole("button", { name: "ESG/Risk" }).click();
-    const esgPanel = page.getByTestId("esg-compliance-panel");
-    await expect(esgPanel).toBeVisible({ timeout: 10_000 });
-    await expect(page.getByTestId("pcaf-weighted-score")).toContainText("/ 5.0");
-    const packs = page.getByTestId("active-compliance-packs");
-    await expect(packs).toContainText("EU");
-    await expect(packs).toContainText("US");
-    await expect(packs).toContainText("UK");
-
-    // Verify CSV Ledger export downloads a CSV file
-    const csvDownloadPromise = page.waitForEvent("download");
-    await page.getByTestId("export-esg-csv-btn").click();
-    const csvDownload = await csvDownloadPromise;
-    expect(csvDownload.suggestedFilename()).toContain("kulgo-esg-ledger");
-    expect(csvDownload.suggestedFilename()).toContain(".csv");
-
-    // Verify PDF Executive Summary export downloads a PDF file
-    const pdfDownloadPromise = page.waitForEvent("download");
-    await page.getByTestId("export-esg-pdf-btn").click();
-    const pdfDownload = await pdfDownloadPromise;
-    expect(pdfDownload.suggestedFilename()).toContain("kulgo-esg-executive-summary");
-    expect(pdfDownload.suggestedFilename()).toContain(".pdf");
+      inspector.getByText("Spot Top-Up", { exact: true }),
+    ).toHaveCount(1);
+    await page.unroute("**/api/v1/workspace/contracts");
   });
 });
-
-
-
-
