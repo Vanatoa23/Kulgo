@@ -9,6 +9,7 @@ import {
 } from "@kulgo/shared";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "../src/app.js";
+import { parseCsvRecords } from "../src/workspace/import-export.js";
 
 /**
  * Mandatory Privacy Boundary Test Suite.
@@ -522,7 +523,6 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(
       beforeSummary.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
     ).toBe(false);
-    const baselineUpstreamScope3 = beforeSummary.esg.upstreamScope3Tco2e;
 
     // 2. Org B sets private revenue and maps its own private upstream network with hidden Tier-2 supplier Org C (in sanctioned RU)
     const bOrgPatchRes = await app.request("/api/v1/auth/organization", {
@@ -724,9 +724,16 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       aTier1.facilityId,
     ]);
 
-    // Org A's Scope 3 upstream rolled up Org B's hidden Tier-2 emissions
-    expect(afterSummary.esg.upstreamScope3Tco2e).toBeGreaterThan(
-      baselineUpstreamScope3,
+    // Verification replaces a physical proxy with proportional partner intensity;
+    // the corrected partner total can be lower than the original proxy.
+    const partnerSummaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgB.cookie },
+    });
+    expect(partnerSummaryRes.status).toBe(200);
+    const partnerSummary = AnalyticsSummarySchema.parse(await partnerSummaryRes.json());
+    const intensity = Math.round(partnerSummary.esg.totalTco2e / 812345 * 1_000_000) / 1_000_000;
+    expect(afterSummary.esg.upstreamScope3Tco2e).toBe(
+      Math.round(Math.min(partnerSummary.esg.totalTco2e, 750000 * intensity) * 100) / 100,
     );
     expect(afterSummary.verifiedCoveragePct).toBe(100);
     expect(afterSummary.confidence).toBe("NETWORK_VERIFIED");
@@ -1779,6 +1786,108 @@ describe("Privacy Boundary Contract (Sub-Project 2 Financial Risk & Contracts)",
 });
 
 describe("Privacy Boundary Contract (Sub-Project 3 ESG Ledger & Partner Economic Intensity)", () => {
+  it.each([
+    { revenue: null, spend: null, reconciled: false },
+    { revenue: null, spend: 5000, reconciled: false },
+    { revenue: 12345678, spend: null, reconciled: false },
+    { revenue: null, spend: null, reconciled: true },
+    { revenue: 12345678, spend: null, reconciled: true },
+  ])("keeps summary, report and ledgers proportional with missing inputs: %j (#37)", async ({ revenue, spend, reconciled }) => {
+    const app = createTestApp();
+    const buyer = await registerOrg(app, "buyer-missing@example.ee", "Buyer Missing Inputs");
+    const partner = await registerOrg(app, "partner-missing@example.ee", "Private Partner");
+    type FacilityResponse = { facility: { facilityId: string } };
+    async function post<T = unknown>(cookie: string, path: string, body: object, status = 201): Promise<T> {
+      const res = await app.request(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(status);
+      return res.json() as Promise<T>;
+    }
+    async function patch(cookie: string, path: string, body: object) {
+      const res = await app.request(path, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(200);
+    }
+    const location = { kind: "FACTORY", countryCode: "EE", lat: 59.437, lng: 24.7536 };
+    const { facility: own } = await post<FacilityResponse>(buyer.cookie, "/api/v1/workspace/facilities", {
+      ...location, name: "Buyer Plant", isOwnFacility: true,
+    });
+    const { facility: supplier } = await post<FacilityResponse>(buyer.cookie, "/api/v1/workspace/facilities", {
+      ...location, name: "Buyer Supplier Node", sector: "Metals", isOwnFacility: false,
+    });
+    const { facility: fulfilling } = await post<FacilityResponse>(partner.cookie, "/api/v1/workspace/facilities", {
+      ...location, name: "Private Fulfilling Plant", isOwnFacility: true,
+      estimatedScope12Tco2e: 5432,
+    });
+    // Two unvolumed lanes share a facility; Level-0 must emit one baseline only.
+    for (const materialCategory of ["Component A", "Component B"]) {
+      await post(buyer.cookie, "/api/v1/workspace/lanes", {
+        fromFacilityId: supplier.facilityId, toFacilityId: own.facilityId,
+        materialCategory, transportMode: "ROAD", volumeSharePct: 50,
+        annualSpendEur: spend,
+      });
+    }
+    const headers = { Cookie: buyer.cookie };
+    const before = AnalyticsSummarySchema.parse(await (await app.request("/api/v1/analytics/summary", { headers })).json());
+    await patch(buyer.cookie, `/api/v1/workspace/facilities/${supplier.facilityId}`, {
+      estimatedScope12Tco2e: 1000,
+    });
+    await patch(partner.cookie, "/api/v1/auth/organization", {
+      scope1Tco2e: 8765, scope2Tco2e: 0, annualRevenueEur: revenue,
+    });
+    const { inviteToken } = await post<{ inviteToken: string }>(buyer.cookie, "/api/v1/invites", {
+      targetFacilityId: supplier.facilityId, inviteeEmail: "partner-missing@example.ee",
+    });
+    await post(partner.cookie, `/api/v1/invites/${inviteToken}/accept`, {
+      ...(reconciled ? { fulfilledByFacilityId: fulfilling.facilityId } : {}),
+    }, 200);
+
+    const paths = ["/api/v1/analytics/summary", "/api/v1/analytics/report",
+      "/api/v1/analytics/esg-ledger?format=json", "/api/v1/analytics/esg-ledger?format=csv"];
+    const texts: string[] = [];
+    for (const path of paths) {
+      const res = await app.request(path, { headers });
+      expect(res.status).toBe(200);
+      texts.push(await res.text());
+    }
+    const summary = AnalyticsSummarySchema.parse(JSON.parse(texts[0]!));
+    const report = ExecutiveReportSchema.parse(JSON.parse(texts[1]!));
+    const ledger = EsgLedgerResponseSchema.parse(JSON.parse(texts[2]!));
+    const entries = ledger.entries.filter((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(summary.esg.upstreamScope3Tco2e).toBe(before.esg.upstreamScope3Tco2e);
+    expect(report.analytics.esg).toEqual(summary.esg);
+    expect(entries.reduce((sum, e) => sum + e.tco2e, 0)).toBeCloseTo(summary.esg.upstreamScope3Tco2e, 2);
+    expect(ledger.totalTco2e).toBe(summary.esg.totalTco2e);
+    expect(report.csrdDisclosures.totalReportedTco2e).toBe(ledger.totalTco2e);
+    const method = spend === null ? "SECTOR_BASELINE" : "SPEND_EEIO";
+    expect(entries).toHaveLength(spend === null ? 1 : 2);
+    for (const entry of entries) {
+      expect(entry.attributionMethod).toBe(method);
+      expect(entry.pcafScore).toBeGreaterThanOrEqual(4);
+    }
+    expect(texts[3]).toContain(method);
+    const [csvHeaders, ...csvRows] = parseCsvRecords(texts[3]!);
+    const csvScopeIndex = csvHeaders!.indexOf("scope");
+    const csvTco2eIndex = csvHeaders!.indexOf("tco2e");
+    const csvCat1 = csvRows.filter((row) => row[csvScopeIndex] === "SCOPE_3_CAT_1");
+    expect(csvCat1).toHaveLength(entries.length);
+    expect(csvCat1.reduce((sum, row) => sum + Number(row[csvTco2eIndex]), 0))
+      .toBeCloseTo(summary.esg.upstreamScope3Tco2e, 2);
+    for (const text of texts) {
+      // Match numeric totals separately so random UUID fragments cannot cause false failures.
+      expect(text).not.toMatch(/(?<![\da-f-])(?:8765|5432|12345678)(?![\da-f-])/i);
+      for (const secret of [partner.orgId, fulfilling.facilityId, "Private Fulfilling Plant", "partnerInventoryKey"]) {
+        expect(text).not.toContain(secret);
+      }
+    }
+  });
+
   it("computes server-side ECONOMIC_INTENSITY attribution for a verified partner without ever leaking partner annualRevenueEur across summary, report, JSON/CSV ledger, or directory", async () => {
     const app = createTestApp();
 

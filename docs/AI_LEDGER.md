@@ -104,4 +104,12 @@
 - **Alternatives Considered & Rejected:** Storing commercial contract fields only as flat properties on `SUPPLIES_LANE` (cannot represent staggered contracts, spot top-ups, or period pro-ration); dividing spend by another supplier's average price to fabricate volume (circular bias); dropping expired base contracts to 0 overnight; all-or-nothing HHI fallback; attributing 100% of a partner's corporate Scope 1/2/3 to every buyer; exposing partner `annualRevenueEur` to buyers.
 - **References:** `docs/DECISIONS.md` (ADR-004 to ADR-007), `docs/PRIVACY_CONTRACT.md`, `docs/specs/SUBPROJECT_2_FINANCIAL_RISK.md`, `docs/specs/SUBPROJECT_3_ESG_COMPLIANCE.md`, `packages/engine/src/hhi.ts`, `packages/engine/src/esg.ts`, `packages/engine/src/analytics.ts`, `apps/api/src/analytics/partner-resolver.ts`.
 
+## LEDGER-0010 — 2026-11-22 — Missing Scope 3 Attribution Inputs (#37)
+- **Category:** `Security/Privacy` / `Data/Research`
+- **Status:** `Active`
+- **Decision / Summary:** Verified issue #37 against main `d30b84e`, including PR #34 review fixes `0d77e10` and `28b1da7`. The private partner aggregate fallback was already removed, but the current engine still attributed an entire user-entered supplier Scope 1+2 estimate when allocation inputs were missing, and the exported legacy helper still returned its raw inventory. Both now use the existing public sector proxy with the provisional 8% buyer share. Current evaluation retains country adjustment, facility deduplication, PCAF 5 ledger provenance, and prompts for proportional inputs; private inventories are never fallback activity.
+- **Why (Rationale):** A supplier inventory alone does not identify a buyer's share. Preserve the newer PCF, economic intensity, allocation, physical/spend waterfall, shared caps, contract authority, cycle guards, and reconciled denominator scoping.
+- **Verification:** Regression cases reproduced full 1,000 tCO2e attribution before the fix. Engine and API coverage checks missing revenue/spend/PCF/allocation, multiple lanes, reconciled facilities, summary/report/JSON/CSV consistency, and zero private total or identity leakage.
+- **References:** GitHub issue #37; `docs/research/ESG_FACTOR_MATRIX_AND_COMPLIANCE.md`; `packages/engine/src/__tests__/esg.test.ts`; `packages/engine/src/__tests__/esg-compliance.test.ts`; `apps/api/tests/privacy-boundary.test.ts`.
+
 
