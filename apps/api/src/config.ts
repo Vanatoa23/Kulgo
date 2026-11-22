@@ -33,6 +33,11 @@ function isWeakProductionSecret(value: string, minLength: number): boolean {
   return false;
 }
 
+const optionalIntegrationKey = z.preprocess(
+  (value) => typeof value === "string" && value.trim() === "" ? undefined : value,
+  z.string().min(1).optional(),
+);
+
 const RawEnvSchema = z.object({
   PORT: z.coerce.number().int().min(1).max(65535).default(4000),
   NODE_ENV: z
@@ -65,12 +70,12 @@ const RawEnvSchema = z.object({
     .enum(["true", "false"])
     .optional()
     .transform((v) => v === "true"),
-  GEMINI_API_KEY: z.string().min(1).optional(),
-  GROQ_API_KEY: z.string().min(1).optional(),
-  OPENAI_API_KEY: z.string().min(1).optional(),
-  OPENROUTER_API_KEY: z.string().min(1).optional(),
-  RESEND_API_KEY: z.string().min(1).optional(),
-  BREVO_API_KEY: z.string().min(1).optional(),
+  GEMINI_API_KEY: optionalIntegrationKey,
+  GROQ_API_KEY: optionalIntegrationKey,
+  OPENAI_API_KEY: optionalIntegrationKey,
+  OPENROUTER_API_KEY: optionalIntegrationKey,
+  RESEND_API_KEY: optionalIntegrationKey,
+  BREVO_API_KEY: optionalIntegrationKey,
   ALERT_FROM_EMAIL: z.string().email().default("alerts@kulgo.eu"),
 });
 
