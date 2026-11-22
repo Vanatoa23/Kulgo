@@ -565,5 +565,243 @@ describe("Sub-Project 3 ESG & Multi-Region Compliance Engine", () => {
     expect(lapsedEntry?.attributionMethod).toBe("SECTOR_BASELINE");
     expect(lapsedEntry?.tco2e).not.toBe(546);
   });
+
+  it("enforces follow-up privacy & accounting invariants: no unscaled topology leak, shared partnerInventoryKey cap, LEVEL_0_UNPRICED authority, and partial Scope 2 coverage", () => {
+    const { facilities: baseFacilities, lanes: baseLanes } = makeTallinnFixture();
+    const baseOwn = baseFacilities[0]!;
+    const baseSup = baseFacilities[1]!;
+    const baseLane = baseLanes[0]!;
+
+    const own1: Facility = {
+      ...baseOwn,
+      facilityId: "20000000-0000-4000-8000-000000000031",
+      name: "Own Site A",
+      countryCode: "DE",
+      annualElectricityMwh: 100,
+      renewableElectricityPct: 0,
+      renewableInstrumentsVerified: false,
+      estimatedScope12Tco2e: null,
+    };
+    const own2: Facility = {
+      ...baseOwn,
+      facilityId: "20000000-0000-4000-8000-000000000032",
+      name: "Own Site B",
+      countryCode: "DE",
+      annualElectricityMwh: null,
+      renewableElectricityPct: null,
+      renewableInstrumentsVerified: false,
+      estimatedScope12Tco2e: 200,
+    };
+
+    // 1. Verified partner with NO allocation basis must NEVER leak raw total (8,765 tCO2e)
+    const unallocatedPartner: Facility = {
+      ...baseSup,
+      facilityId: "20000000-0000-4000-8000-000000000033",
+      name: "Confidential Partner Co",
+      countryCode: "FI",
+      isPartnerVerified: true,
+      sector: "Chemicals",
+      estimatedScope12Tco2e: null,
+    };
+    const unallocatedLane: SupplyLane = {
+      ...baseLane,
+      laneId: "30000000-0000-4000-8000-000000000031",
+      inputId: null,
+      fromFacilityId: unallocatedPartner.facilityId,
+      toFacilityId: own1.facilityId,
+      materialCategory: "Specialty Chemicals",
+      annualVolume: null,
+      annualSpendEur: null,
+      productEmissionFactorTco2ePerUnit: null,
+      economicAttributionRatio: null,
+    };
+
+    const hiddenMap = new Map<string, EsgPartnerAggregateInput>([
+      [
+        unallocatedPartner.facilityId,
+        {
+          hiddenUpstreamScope3Tco2e: 8_765,
+          partnerTotalEmissionsCapTco2e: 8_765,
+          partnerInventoryKey: "partner:org-secret:org",
+        },
+      ],
+    ]);
+
+    const res1 = evaluateEsgAndCompliance({
+      organization: {
+        orgId: ORG_ID,
+        name: "Partial Scope2 Org",
+        countryCode: "DE",
+        scope1Tco2e: 100,
+        scope2Tco2e: 500, // Org-wide Scope 2 MUST NOT be replaced by partial site electricity!
+      },
+      inputs: [],
+      facilities: [own1, own2, unallocatedPartner],
+      lanes: [unallocatedLane],
+      partnerHiddenSummaries: hiddenMap,
+    });
+
+    // P1 #1: Falls back to SECTOR_BASELINE; raw 8,765 never leaks
+    const cat1 = res1.ledgerEntries.find((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(cat1?.attributionMethod).toBe("SECTOR_BASELINE");
+    expect(JSON.stringify(res1)).not.toContain("8765");
+    expect(JSON.stringify(res1)).not.toContain("8,765");
+
+    // P2 #5a: Partial site electricity (1 of 2 sites) preserves org-wide Scope 2 (500 tCO2e)
+    expect(res1.summary.scope2LocationTco2e).toBe(500);
+
+    // P2 #5b: When org-wide scope2Tco2e is null, metered site + unmetered site estimate (0.6 * 200 = 120) are combined
+    const res1b = evaluateEsgAndCompliance({
+      organization: {
+        orgId: ORG_ID,
+        name: "Partial Scope2 No Org Override",
+        countryCode: "DE",
+        scope1Tco2e: 100,
+        scope2Tco2e: null,
+      },
+      inputs: [],
+      facilities: [own1, own2],
+      lanes: [],
+    });
+    expect(res1b.summary.scope2LocationTco2e).toBeGreaterThan(120);
+    expect(
+      res1b.ledgerEntries.some(
+        (e) => e.entryId === `scope2-loc-est-${own2.facilityId}` && e.tco2e === 120,
+      ),
+    ).toBe(true);
+
+    // 2. P1 #2: Two distinct buyer nodes linked to the SAME underlying partnerInventoryKey share one cap (1,000 tCO2e)
+    const nodeA: Facility = {
+      ...baseSup,
+      facilityId: "20000000-0000-4000-8000-000000000034",
+      name: "Shared Partner Node A",
+      countryCode: "DE",
+      isPartnerVerified: true,
+      estimatedScope12Tco2e: null,
+    };
+    const nodeB: Facility = {
+      ...baseSup,
+      facilityId: "20000000-0000-4000-8000-000000000035",
+      name: "Shared Partner Node B",
+      countryCode: "DE",
+      isPartnerVerified: true,
+      estimatedScope12Tco2e: null,
+    };
+    const laneA: SupplyLane = {
+      ...baseLane,
+      laneId: "30000000-0000-4000-8000-000000000032",
+      inputId: null,
+      fromFacilityId: nodeA.facilityId,
+      toFacilityId: own1.facilityId,
+      materialCategory: "Parts A",
+      economicAttributionRatio: 0.75,
+      productEmissionFactorTco2ePerUnit: null,
+    };
+    const laneB: SupplyLane = {
+      ...baseLane,
+      laneId: "30000000-0000-4000-8000-000000000033",
+      inputId: null,
+      fromFacilityId: nodeB.facilityId,
+      toFacilityId: own2.facilityId,
+      materialCategory: "Parts B",
+      economicAttributionRatio: 0.75,
+      productEmissionFactorTco2ePerUnit: null,
+    };
+    const sharedCapHidden = new Map<string, EsgPartnerAggregateInput>([
+      [
+        nodeA.facilityId,
+        {
+          hiddenUpstreamScope3Tco2e: 1_000,
+          partnerTotalEmissionsCapTco2e: 1_000,
+          partnerInventoryKey: "partner:org-shared-123:org",
+        },
+      ],
+      [
+        nodeB.facilityId,
+        {
+          hiddenUpstreamScope3Tco2e: 1_000,
+          partnerTotalEmissionsCapTco2e: 1_000,
+          partnerInventoryKey: "partner:org-shared-123:org",
+        },
+      ],
+    ]);
+
+    const res2 = evaluateEsgAndCompliance({
+      organization: {
+        orgId: ORG_ID,
+        name: "Multi-Node Buyer",
+        countryCode: "DE",
+        scope1Tco2e: 0,
+        scope2Tco2e: 0,
+      },
+      inputs: [],
+      facilities: [own1, own2, nodeA, nodeB],
+      lanes: [laneA, laneB],
+      partnerHiddenSummaries: sharedCapHidden,
+    });
+    // 75% + 75% across two buyer nodes for one partner MUST cap at 1,000 tCO2e (750 + 250)
+    expect(res2.summary.upstreamScope3Tco2e).toBe(1_000);
+
+    // 3. P2 #3: LEVEL_0_UNPRICED derived commercial summary (e.g. future/archived contract) must NOT revive stale legacy volume
+    const futureContractLane: SupplyLane = {
+      ...baseLane,
+      laneId: "30000000-0000-4000-8000-000000000034",
+      inputId: null,
+      fromFacilityId: nodeA.facilityId,
+      toFacilityId: own1.facilityId,
+      materialCategory: "Steel",
+      annualVolume: 300,
+      volumeUnit: "TONNES",
+      annualSpendEur: 250_000,
+      productEmissionFactorTco2ePerUnit: null,
+      economicAttributionRatio: null,
+    };
+    const level0UnpricedMap = new Map([
+      [
+        futureContractLane.laneId,
+        {
+          laneId: futureContractLane.laneId,
+          viewMode: "PERIOD_WINDOW" as const,
+          asOfDate: "2026-11-22",
+          windowStart: "2026-11-22",
+          windowEndExclusive: "2027-11-22",
+          laneCommercialState: "LEVEL_0_UNPRICED" as const,
+          activeVolume: null,
+          baseUnit: "TONNES",
+          activeSpendEur: null,
+          weightedAvgUnitPrice: null,
+          spendOnlyExcludedEur: 0,
+          cBothSpendCoveragePct: null,
+          knownMappedSharePct: null,
+          totalDemandSharePct: null,
+          weightingBasis: null,
+          nextExpirationDate: null,
+          nextNoticeDeadline: null,
+          atRiskVolumePct: 0,
+          assumedHoldoverVolume: 0,
+          hasUnitConflict: false,
+          missingFxCurrencies: [],
+          activeContractCount: 0,
+          confidenceBadge: "CONTRACTED" as const,
+        },
+      ],
+    ]);
+    const res3 = evaluateEsgAndCompliance({
+      organization: {
+        orgId: ORG_ID,
+        name: "Future Contract Org",
+        countryCode: "DE",
+        scope1Tco2e: 0,
+        scope2Tco2e: 0,
+      },
+      inputs: [],
+      facilities: [own1, { ...nodeA, isPartnerVerified: false }],
+      lanes: [futureContractLane],
+      laneCommercialsByLaneId: level0UnpricedMap,
+    });
+    const futureEntry = res3.ledgerEntries.find((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(futureEntry?.attributionMethod).toBe("SECTOR_BASELINE");
+  });
 });
+
 

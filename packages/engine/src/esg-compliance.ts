@@ -457,6 +457,8 @@ export interface EsgPartnerAggregateInput {
   economicAttributionRatio?: number | null;
   /** Optional server-side cap for verified partner total emissions (never serialized). */
   partnerTotalEmissionsCapTco2e?: number | null;
+  /** Optional server-side opaque key identifying the underlying partner inventory pool. */
+  partnerInventoryKey?: string | null;
 }
 
 export interface EvaluateEsgAndComplianceInput {
@@ -581,7 +583,21 @@ export function evaluateEsgAndCompliance(
   }
 
   // Scope 2 Dual (Location-Based + Market-Based)
-  if (ownFacilitiesWithElectricity.length > 0) {
+  // Only replace organization-wide Scope 2 with site-level electricity calculations when:
+  //   (a) all own facilities have metered electricity (complete site coverage), OR
+  //   (b) organization-wide scope2Tco2e is not reported (null), in which case metered sites
+  //       use grid factors and unmetered sites still contribute 60% of their estimatedScope12Tco2e.
+  const hasOrgReportedScope2 =
+    input.organization.scope2Tco2e !== null &&
+    Number.isFinite(input.organization.scope2Tco2e);
+  const hasCompleteSiteElectricity =
+    ownFacilities.length > 0 &&
+    ownFacilitiesWithElectricity.length === ownFacilities.length;
+  const useSiteElectricityScope2 =
+    ownFacilitiesWithElectricity.length > 0 &&
+    (hasCompleteSiteElectricity || !hasOrgReportedScope2);
+
+  if (useSiteElectricityScope2) {
     let locTotal = 0;
     let mktTotal = 0;
     for (const fac of ownFacilitiesWithElectricity) {
@@ -662,8 +678,54 @@ export function evaluateEsgAndCompliance(
         networkVerified: Boolean(fac.renewableInstrumentsVerified),
       });
     }
-    scope2Location = round2(locTotal);
-    scope2Market = round2(mktTotal);
+
+    // Include estimated Scope 2 (60% of estimatedScope12Tco2e) for any unmetered own sites
+    // so partial electricity data never silently drops remaining facilities.
+    const meteredFacilityIds = new Set(
+      ownFacilitiesWithElectricity.map((f) => f.facilityId),
+    );
+    let unmeteredLocTotal = 0;
+    for (const fac of ownFacilities) {
+      if (meteredFacilityIds.has(fac.facilityId)) continue;
+      const estScope2 = round2(finiteNonNegative(fac.estimatedScope12Tco2e) * 0.6);
+      if (estScope2 <= 0) continue;
+      unmeteredLocTotal += estScope2;
+      ledgerEntries.push({
+        entryId: `scope2-loc-est-${fac.facilityId}`,
+        scope: "SCOPE_2_LOCATION",
+        entityType: "OWN_FACILITY",
+        entityId: fac.facilityId,
+        entityName: fac.name,
+        countryCode: fac.countryCode,
+        sector: fac.sector,
+        materialCategory: "Purchased Electricity (Estimated Location-Based)",
+        materialArchetype: null,
+        cnCode: "2716",
+        cbamCategory: null,
+        matchConfidence: "SECTOR_FALLBACK",
+        activityValue: round2(finiteNonNegative(fac.estimatedScope12Tco2e)),
+        activityUnit: "tCO2e (Scope 1+2 combined)",
+        attributionMethod: "DIRECT_REPORTED",
+        factorId: "facility_scope12_split_40_60",
+        factorVersion: FACTOR_MATRIX_VERSION,
+        factorValue: 0.6,
+        factorUnit: "share",
+        sourceCitation: "Estimated 60% Scope 2 share for unmetered own facility",
+        licenseId: "ORG-REPORTED",
+        provenanceStatus: "ORG_REPORTED",
+        pcafScore: 3,
+        tco2e: estScope2,
+        formulaTrace: `${round2(finiteNonNegative(fac.estimatedScope12Tco2e))} tCO2e × 0.60 = ${estScope2} tCO2e`,
+        networkVerified: false,
+      });
+    }
+
+    scope2Location = round2(locTotal + unmeteredLocTotal);
+    scope2Market = hasCompleteSiteElectricity
+      ? round2(mktTotal)
+      : unmeteredLocTotal === 0
+        ? round2(mktTotal)
+        : null;
   } else {
     if (input.organization.scope2Tco2e !== null && Number.isFinite(input.organization.scope2Tco2e)) {
       scope2Location = round2(finiteNonNegative(input.organization.scope2Tco2e));
@@ -750,16 +812,20 @@ export function evaluateEsgAndCompliance(
   );
   const verifiedSupplierCount = activeSuppliers.filter((f) => f.isPartnerVerified).length;
 
-  // Track cumulative supplier cap per supplier facility (enforced across ECONOMIC_INTENSITY & ALLOCATION_RATIO)
-  const remainingPartnerCapByFacility = new Map<string, number>();
+  // Track cumulative supplier cap per underlying partner inventory pool
+  // (using hidden.partnerInventoryKey when available so multiple buyer nodes
+  // linked to the same partner inventory share a single 100% cap).
+  const remainingPartnerCapByKey = new Map<string, number>();
   for (const fac of activeSuppliers) {
     const hidden = input.partnerHiddenSummaries?.get(fac.facilityId);
+    const capKey = hidden?.partnerInventoryKey ?? fac.facilityId;
+    if (remainingPartnerCapByKey.has(capKey)) continue;
     const explicitCap = finitePositive(hidden?.partnerTotalEmissionsCapTco2e)
       ? hidden!.partnerTotalEmissionsCapTco2e!
       : finiteNonNegative(fac.estimatedScope12Tco2e) +
         finiteNonNegative(hidden?.hiddenUpstreamScope3Tco2e);
     if (explicitCap > 0) {
-      remainingPartnerCapByFacility.set(fac.facilityId, explicitCap);
+      remainingPartnerCapByKey.set(capKey, explicitCap);
     }
   }
 
@@ -787,15 +853,15 @@ export function evaluateEsgAndCompliance(
 
     const supplyInput = lane.inputId ? inputsById.get(lane.inputId) : undefined;
     const hidden = input.partnerHiddenSummaries?.get(supplier.facilityId);
+    const partnerCapKey = hidden?.partnerInventoryKey ?? supplier.facilityId;
     const derivedComm = input.laneCommercialsByLaneId?.get(lane.laneId);
     const incoterms = (input.incotermsByLaneId?.get(lane.laneId) ?? "").trim().toUpperCase();
 
-    // When a contract-derived commercial summary exists (other than LEVEL_0_UNPRICED),
-    // treat its derived activeVolume/activeSpendEur as authoritative so expired/archived
-    // contracts or unit conflicts never silently revive legacy lane fields.
-    const useDerivedCommercial =
-      derivedComm !== undefined &&
-      derivedComm.laneCommercialState !== "LEVEL_0_UNPRICED";
+    // When a contract-derived commercial summary exists, treat its derived
+    // activeVolume/activeSpendEur as authoritative (including LEVEL_0_UNPRICED,
+    // because contracts.ts already handles legacy fallback when a lane has no
+    // contract lines and uses LEVEL_0_UNPRICED for future/archived contracts).
+    const useDerivedCommercial = derivedComm !== undefined;
 
     const activeVolume = useDerivedCommercial
       ? finitePositive(derivedComm.activeVolume)
@@ -889,12 +955,12 @@ export function evaluateEsgAndCompliance(
     ) {
       method = "ECONOMIC_INTENSITY";
       const rawAttributed = activeSpendEur * partnerIntensity;
-      const capRemaining = remainingPartnerCapByFacility.get(supplier.facilityId);
+      const capRemaining = remainingPartnerCapByKey.get(partnerCapKey);
       const capped =
         capRemaining !== undefined ? Math.min(capRemaining, rawAttributed) : rawAttributed;
       if (capRemaining !== undefined) {
-        remainingPartnerCapByFacility.set(
-          supplier.facilityId,
+        remainingPartnerCapByKey.set(
+          partnerCapKey,
           Math.max(0, capRemaining - capped),
         );
       }
@@ -913,7 +979,7 @@ export function evaluateEsgAndCompliance(
       // Privacy invariant: NEVER print partner revenue or partner total emissions!
       formulaTrace = `€${round2(activeSpendEur)} × ${partnerIntensity.toFixed(6)} tCO2e/EUR (verified partner intensity) = ${cat1Tco2e} tCO2e`;
     }
-    // Priority 3: ALLOCATION_RATIO (0 < ratio <= 1 — PCAF 2, capped by shared supplier cap, zero raw pool leakage)
+    // Priority 3: ALLOCATION_RATIO (0 < ratio <= 1 — PCAF 2, capped by shared partner inventory cap, zero raw pool leakage)
     else if (
       finitePositive(explicitRatio) &&
       explicitRatio <= 1 &&
@@ -925,12 +991,12 @@ export function evaluateEsgAndCompliance(
         finiteNonNegative(supplier.estimatedScope12Tco2e) +
         finiteNonNegative(hidden?.hiddenUpstreamScope3Tco2e);
       const rawAllocated = rawPool * explicitRatio;
-      const capRemaining = remainingPartnerCapByFacility.get(supplier.facilityId);
+      const capRemaining = remainingPartnerCapByKey.get(partnerCapKey);
       const capped =
         capRemaining !== undefined ? Math.min(capRemaining, rawAllocated) : rawAllocated;
       if (capRemaining !== undefined) {
-        remainingPartnerCapByFacility.set(
-          supplier.facilityId,
+        remainingPartnerCapByKey.set(
+          partnerCapKey,
           Math.max(0, capRemaining - capped),
         );
       }
@@ -1035,52 +1101,14 @@ export function evaluateEsgAndCompliance(
           : `€${round2(activeSpendEur)} × ${kgPerEur} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`;
       }
     }
-    // Topology-only verified partner fallback (ONLY when neither PCF, intensity, ratio, physical volume, nor spend is available)
-    else if (
-      supplier.isPartnerVerified &&
-      hidden &&
-      (finitePositive(supplier.estimatedScope12Tco2e) ||
-        finitePositive(hidden.hiddenUpstreamScope3Tco2e))
-    ) {
-      if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
-        skipLedgerEmission = true;
-      } else {
-        level0BaselineEmittedForFacility.add(supplier.facilityId);
-        const capRemaining = remainingPartnerCapByFacility.get(supplier.facilityId);
-        const rawReconciled =
-          finiteNonNegative(supplier.estimatedScope12Tco2e) +
-          finiteNonNegative(hidden.hiddenUpstreamScope3Tco2e);
-        const capped =
-          capRemaining !== undefined ? Math.min(capRemaining, rawReconciled) : rawReconciled;
-        if (capRemaining !== undefined) {
-          remainingPartnerCapByFacility.set(
-            supplier.facilityId,
-            Math.max(0, capRemaining - capped),
-          );
-        }
-        const reconciledTotal = round2(capped);
-        unscaledReportedWarningCount += 1;
-        method = "ALLOCATION_RATIO";
-        cat1Tco2e = reconciledTotal;
-        pcafScore = 2;
-        factorId = `verified_partner_rollup_${supplier.facilityId.slice(0, 8)}`;
-        factorValue = 1;
-        factorUnit = "reconciled partner";
-        sourceCitation =
-          "Verified Kulgo Tier-1 Partner Reconciled Attribution (add PCF, spend, or partner revenue for proportional allocation)";
-        licenseId = "PARTNER-PRIMARY";
-        provenanceStatus = "PARTNER_PRIMARY";
-        matchConfidence = "PRIMARY_PARTNER";
-        // Privacy invariant: NEVER expose raw partner total in activityValue or formulaTrace
-        activityValue = null;
-        activityUnit = "reconciled partner";
-        formulaTrace =
-          "Verified partner reconciled attribution (add PCF or partner revenue for proportional allocation)";
-      }
-    }
     // Priority 6: SECTOR_BASELINE (Level-0 Country × Sector proxy scaled by buyer share prior — PCAF 5)
+    // Privacy invariant: when a verified partner has no PCF, intensity+spend, explicit allocation
+    // ratio, physical volume, or spend basis, NEVER attribute or expose its raw private footprint.
     else {
       method = "SECTOR_BASELINE";
+      if (supplier.isPartnerVerified && hidden) {
+        unscaledReportedWarningCount += 1;
+      }
       if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
         skipLedgerEmission = true;
       } else {

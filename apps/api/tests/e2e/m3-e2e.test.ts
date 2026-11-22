@@ -591,6 +591,7 @@ describe("Milestone 3 E2E — Partner Invitations, Hidden Tier-2+ Risk & Alterna
         materialCategory: "Alloys",
         transportMode: "SEA",
         volumeSharePct: 100,
+        economicAttributionRatio: 0.5,
       }),
     });
 
@@ -708,13 +709,13 @@ describe("Milestone 3 E2E — Partner Invitations, Hidden Tier-2+ Risk & Alterna
     );
     expect(acceptSecondInviteForVerifiedRes.status).toBe(409);
 
-    // 4. Verified partner's primary Scope 1+2 (180 + 70 = 250) rolls up into buyer's upstream Scope 3
+    // 4. Verified partner's primary Scope 1+2 (180 + 70 = 250) rolls up proportionally (50% = 125) into buyer's upstream Scope 3
     const summaryRes = await app.request("/api/v1/analytics/summary", {
       headers: { Cookie: buyer.cookie },
     });
     expect(summaryRes.status).toBe(200);
     const summary = AnalyticsSummarySchema.parse(await summaryRes.json());
-    expect(summary.esg.upstreamScope3Tco2e).toBe(250);
+    expect(summary.esg.upstreamScope3Tco2e).toBe(125);
 
     // 5. Deleting tier1Fac2Id revokes pending invB and prevents acceptance; deleting tier1Fac1Id cleans up partner link
     const delFac2Res = await app.request(

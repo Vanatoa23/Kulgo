@@ -1331,6 +1331,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         materialCategory: "Modules",
         transportMode: "SEA",
         volumeSharePct: 100,
+        economicAttributionRatio: 0.5,
       }),
     });
 
@@ -1382,6 +1383,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         materialCategory: "Clean Subcomponents",
         transportMode: "SEA",
         volumeSharePct: 100,
+        economicAttributionRatio: 1,
         riskStatus: "GREEN",
       }),
     });
@@ -1508,7 +1510,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     // Evaluate Org A's analytics:
     // 1. Cycle A -> B -> C -> A terminates cleanly without infinite recursion or double-counting Org A's 100 tCO2e.
     // 2. Because Org B bound fulfilledByFacilityId = bOwnNorthId, Plant South's sanctioned RU lane is NOT part of Plant North's subgraph,
-    //    and Org A's upstream Scope 3 equals Plant North (80) + Org C (50) = 130 tCO2e.
+    //    and Org A's 50% proportional share of Plant North (80) + Org C (50) = 65 tCO2e.
     const summaryARes = await app.request("/api/v1/analytics/summary", {
       headers: { Cookie: orgA.cookie },
     });
@@ -1517,7 +1519,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(
       summaryA.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
     ).toBe(false);
-    expect(summaryA.esg.upstreamScope3Tco2e).toBe(130);
+    expect(summaryA.esg.upstreamScope3Tco2e).toBe(65);
   });
 });
 

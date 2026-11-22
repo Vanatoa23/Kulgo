@@ -41,6 +41,13 @@ export interface HiddenPartnerAggregate {
   economicAttributionRatio?: number | null;
   /** Server-side cap for verified partner total emissions (never serialized). */
   partnerTotalEmissionsCapTco2e?: number | null;
+  /**
+   * Opaque server-side key identifying the underlying partner inventory pool
+   * (partner org or partner org + fulfilling facility) so cumulative caps apply
+   * across multiple buyer facility nodes linked to the same partner inventory.
+   * Never serialized to any API response or export.
+   */
+  partnerInventoryKey?: string | null;
 }
 
 export interface NetworkAnalyticsInput {
