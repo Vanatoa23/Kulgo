@@ -13,6 +13,7 @@ import type {
   WorkspaceNetworkResponse,
 } from "@kulgo/shared";
 import { AlertCircle, Globe2, Loader2, X } from "lucide-react";
+import { createRequestGuard } from "./lib/request-guard";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AcceptInviteModal } from "./components/AcceptInviteModal.js";
 import { AlternativeDirectoryModal } from "./components/AlternativeDirectoryModal.js";
@@ -134,19 +135,26 @@ export function App() {
   const [busy, setBusy] = useState(false);
   const [bannerError, setBannerError] = useState<string | null>(null);
 
+  const networkGuard = useMemo(() => createRequestGuard(), []);
+  const alertGuard = useMemo(() => createRequestGuard(), []);
+
   const loadWorkspaceNetwork = useCallback(async (shouldFit: boolean) => {
+    // Latest-wins: a newer load or a session change supersedes this one.
+    const ticket = networkGuard.begin();
     setLoadingNetwork(true);
     try {
       const [data, invites] = await Promise.all([
         getNetwork(),
         listInvites().catch(() => [] as Invitation[]),
       ]);
+      if (!ticket.isCurrent()) return;
       setNetwork(data);
       setInvitations(invites);
       if (shouldFit && data.facilities.length > 0) {
         setFitTrigger((n) => n + 1);
       }
     } catch (err) {
+      if (!ticket.isCurrent()) return;
       if (err instanceof ApiError && err.status === 401) {
         setSession(null);
       } else {
@@ -157,9 +165,9 @@ export function App() {
         );
       }
     } finally {
-      setLoadingNetwork(false);
+      if (ticket.isCurrent()) setLoadingNetwork(false);
     }
-  }, []);
+  }, [networkGuard]);
 
   // Session bootstrap via /api/v1/auth/me
   useEffect(() => {
@@ -228,16 +236,17 @@ export function App() {
   }, [session, network, activeProductId, activeInputId, financialViewMode]);
 
   const refreshAlertFeed = useCallback(async () => {
+    const ticket = alertGuard.begin();
     setLoadingAlerts(true);
     try {
       const feed = await getAlertFeed();
-      setAlertFeed(feed);
+      if (ticket.isCurrent()) setAlertFeed(feed);
     } catch {
       // Non-fatal; keep existing feed state
     } finally {
-      setLoadingAlerts(false);
+      if (ticket.isCurrent()) setLoadingAlerts(false);
     }
-  }, []);
+  }, [alertGuard]);
 
   useEffect(() => {
     if (!session) {
@@ -265,7 +274,22 @@ export function App() {
     }
   }, [loadWorkspaceNetwork, refreshAlertFeed]);
 
+  const resetTenantState = () => {
+    // Reject any in-flight loads from the previous session/account.
+    networkGuard.invalidate();
+    alertGuard.invalidate();
+    setNetwork(EMPTY_NETWORK);
+    setInvitations([]);
+    setAlertFeed(null);
+    setAnalytics(null);
+    setLoadingNetwork(false);
+    setLoadingAlerts(false);
+    setLoadingAnalytics(false);
+    setSweepingAlerts(false);
+  };
+
   const handleAuthenticated = (me: AuthMeResponse) => {
+    resetTenantState();
     setSession(me);
     setBannerError(null);
     void loadWorkspaceNetwork(true);
@@ -273,6 +297,8 @@ export function App() {
 
   const handleLogout = async () => {
     setLoggingOut(true);
+    // Invalidate immediately so nothing in flight can land during/after logout.
+    resetTenantState();
     try {
       await logout();
     } catch {
@@ -280,8 +306,7 @@ export function App() {
     } finally {
       setLoggingOut(false);
       setSession(null);
-      setNetwork(EMPTY_NETWORK);
-      setAnalytics(null);
+      resetTenantState();
       setSimulatorOpen(false);
       setActiveProductId(null);
       setActiveInputId(null);
