@@ -1,11 +1,15 @@
+import { commercialRegressionCases } from "./helpers/commercial-regressions.js";
 import { estimateLaneCo2eTonnes, haversineDistanceKm } from "@kulgo/engine";
 import { WorkspaceNetworkResponseSchema } from "@kulgo/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApp, createTestApp } from "../src/app.js";
 import { InMemoryAuthRepository } from "../src/auth/repository.js";
 import { loadConfig } from "../src/config.js";
 import type { ArcadeDbClient } from "../src/db/client.js";
-import { InMemoryWorkspaceRepository } from "../src/workspace/repository.js";
+import {
+  ArcadeDbWorkspaceRepository,
+  InMemoryWorkspaceRepository,
+} from "../src/workspace/repository.js";
 
 function extractCookie(res: Response): string {
   const header = res.headers.get("set-cookie") ?? "";
@@ -359,7 +363,21 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     );
     expect(filtered.inputs).toHaveLength(1);
     expect(filtered.lanes).toHaveLength(2);
-    expect(filtered.facilities).toHaveLength(3); // FI, DE, Tallinn HQ
+    expect(filtered.facilities).toHaveLength(4); // FI, DE, Tallinn HQ, Tartu Warehouse
+
+    // Verify 30/70 multi-warehouse allocation split & downstream clients in demo
+    const splitLanes = network1.lanes.filter(
+      (l) => l.direction === "UPSTREAM" && l.allocationSplitPct != null,
+    );
+    expect(splitLanes.map((l) => l.allocationSplitPct).sort()).toEqual([30, 70]);
+    const clientFacilities = network1.facilities.filter(
+      (f) => f.relationshipRole === "CLIENT",
+    );
+    expect(clientFacilities.length).toBeGreaterThanOrEqual(2);
+    const downstreamLanes = network1.lanes.filter(
+      (l) => l.direction === "DOWNSTREAM",
+    );
+    expect(downstreamLanes.length).toBeGreaterThanOrEqual(2);
   });
 
   it("preserves isOwnFacility when filtering network by a productId or inputId with zero lanes", async () => {
@@ -511,4 +529,872 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     await expect(repo.listProducts("")).rejects.toThrow();
     await expect(repo.listFacilities("   ")).rejects.toThrow();
   });
+
+  it("prevents orphaned or duplicate Base Agreements on invalid dates and retries (#47)", async () => {
+    const app = createTestApp();
+    const { cookie } = await registerAndGetCookie(
+      app,
+      "contracts-47@tallinn-mfg.ee",
+      "Estonia Contracts 47 OU",
+    );
+
+    const seedRes = await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+    expect(seedRes.status).toBe(201);
+    const network = WorkspaceNetworkResponseSchema.parse(await seedRes.json());
+    const legacyLane = network.lanes.find(
+      (l) => l.direction === "UPSTREAM" && (l.annualVolume ?? 0) > 0,
+    );
+    expect(legacyLane).toBeDefined();
+
+    // 1. Invalid empty startDate must reject cleanly and leave ZERO contracts written
+    const badRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        supplierFacilityId: legacyLane!.fromFacilityId,
+        title: "Spot Top-Up",
+        contractType: "SPOT_PO",
+        pricingModel: "FIXED",
+        expiryBehavior: "AUTO_ARCHIVE",
+        confidence: "CONTRACTED",
+        startDate: "",
+        endDate: "2027-06-01",
+        preserveLegacyBaseForLaneId: legacyLane!.laneId,
+        lines: [
+          {
+            laneId: legacyLane!.laneId,
+            inputId: legacyLane!.inputId,
+            cadence: "TOTAL_OVER_TERM",
+            committedVolume: 20,
+            unit: legacyLane!.volumeUnit,
+            committedSpend: 50000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(badRes.status).toBe(400);
+
+    const afterBadList = await app.request("/api/v1/workspace/contracts", {
+      headers: { Cookie: cookie },
+    });
+    const afterBadBody = (await afterBadList.json()) as {
+      contracts: unknown[];
+      contractLines: unknown[];
+    };
+    expect(afterBadBody.contracts).toHaveLength(0);
+    expect(afterBadBody.contractLines).toHaveLength(0);
+
+    // 2. Valid retry creates exactly ONE Base Agreement + ONE Spot Top-Up
+    const validPayload = {
+      supplierFacilityId: legacyLane!.fromFacilityId,
+      title: "Spot Top-Up",
+      contractType: "SPOT_PO",
+      pricingModel: "FIXED",
+      expiryBehavior: "AUTO_ARCHIVE",
+      confidence: "CONTRACTED",
+      startDate: "2026-06-01",
+      endDate: "2026-12-31",
+      preserveLegacyBaseForLaneId: legacyLane!.laneId,
+      lines: [
+        {
+          laneId: legacyLane!.laneId,
+          inputId: legacyLane!.inputId,
+          cadence: "TOTAL_OVER_TERM",
+          committedVolume: 20,
+          unit: legacyLane!.volumeUnit,
+          committedSpend: 50000,
+          currency: "EUR",
+        },
+      ],
+    };
+
+    const okRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify(validPayload),
+    });
+    expect(okRes.status).toBe(201);
+
+    // 3. A second request with preserveLegacyBaseForLaneId must NOT duplicate Base Agreement
+    const retryRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({ ...validPayload, title: "Spot Top-Up #2" }),
+    });
+    expect(retryRes.status).toBe(201);
+
+    const finalList = await app.request("/api/v1/workspace/contracts", {
+      headers: { Cookie: cookie },
+    });
+    const finalBody = (await finalList.json()) as {
+      contracts: Array<{ title: string; contractType: string }>;
+      contractLines: unknown[];
+    };
+    const baseAgreements = finalBody.contracts.filter(
+      (c) => c.title === "Base Agreement",
+    );
+    expect(baseAgreements).toHaveLength(1);
+    expect(finalBody.contracts).toHaveLength(3); // 1 Base + 2 Spot Top-Ups
+
+    // 4. Invalid supplierFacilityId must reject with 400 BEFORE creating any Base Agreement
+    const otherLegacyLane = network.lanes.find(
+      (l) =>
+        l.direction === "UPSTREAM" &&
+        l.laneId !== legacyLane!.laneId &&
+        (l.annualVolume ?? 0) > 0,
+    );
+    expect(otherLegacyLane).toBeDefined();
+    const badSupplierRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        ...validPayload,
+        supplierFacilityId: "00000000-0000-4000-8000-000000000099",
+        preserveLegacyBaseForLaneId: otherLegacyLane!.laneId,
+        lines: [
+          {
+            laneId: otherLegacyLane!.laneId,
+            inputId: otherLegacyLane!.inputId,
+            cadence: "TOTAL_OVER_TERM",
+            committedVolume: 10,
+            unit: otherLegacyLane!.volumeUnit,
+            committedSpend: 10000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(badSupplierRes.status).toBe(400);
+
+    // 5. Replaying a committed request with the same idempotencyKey deduplicates cleanly
+    const idemKey = "idem-lost-response-retry-001";
+    const firstIdem = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        ...validPayload,
+        title: "Idempotent Spot PO",
+        idempotencyKey: idemKey,
+      }),
+    });
+    expect(firstIdem.status).toBe(201);
+    const firstIdemBody = (await firstIdem.json()) as {
+      contract: { contractId: string };
+    };
+
+    const replayIdem = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        ...validPayload,
+        title: "Idempotent Spot PO",
+        idempotencyKey: idemKey,
+      }),
+    });
+    expect(replayIdem.status).toBe(200);
+    const replayIdemBody = (await replayIdem.json()) as {
+      contract: { contractId: string };
+    };
+    expect(replayIdemBody.contract.contractId).toBe(
+      firstIdemBody.contract.contractId,
+    );
+
+    const afterIdemList = await app.request("/api/v1/workspace/contracts", {
+      headers: { Cookie: cookie },
+    });
+    const afterIdemBody = (await afterIdemList.json()) as {
+      contracts: Array<{ title: string }>;
+    };
+    expect(
+      afterIdemBody.contracts.filter((c) => c.title === "Idempotent Spot PO"),
+    ).toHaveLength(1);
+    expect(
+      afterIdemBody.contracts.filter((c) => c.title === "Base Agreement"),
+    ).toHaveLength(1);
+  });
+
+  it("saves allocation percentages atomically while preserving legacy source quantities", async () => {
+    const app = createTestApp();
+    const { cookie } = await registerAndGetCookie(
+      app,
+      "splits-atomic@tallinn-mfg.ee",
+      "Estonia Splits OU",
+    );
+
+    const createFac = async (body: Record<string, unknown>) => {
+      const res = await app.request("/api/v1/workspace/facilities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { facility: { facilityId: string } }).facility;
+    };
+
+    const supplier = await createFac({
+      name: "Supplier Alpha",
+      kind: "FACTORY",
+      countryCode: "EE",
+      lat: 58.38,
+      lng: 26.72,
+      relationshipRole: "SUPPLIER",
+    });
+    const whA = await createFac({
+      name: "Tallinn WH",
+      kind: "WAREHOUSE",
+      countryCode: "EE",
+      lat: 59.43,
+      lng: 24.75,
+      relationshipRole: "OWN",
+    });
+    const whB = await createFac({
+      name: "Tartu WH",
+      kind: "WAREHOUSE",
+      countryCode: "EE",
+      lat: 58.37,
+      lng: 26.74,
+      relationshipRole: "OWN",
+    });
+
+    const createLaneReq = async (body: Record<string, unknown>) => {
+      const res = await app.request("/api/v1/workspace/lanes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { lane: { laneId: string } }).lane;
+    };
+
+    const laneTonnes = await createLaneReq({
+      fromFacilityId: supplier.facilityId,
+      toFacilityId: whA.facilityId,
+      materialCategory: "Copper",
+      transportMode: "ROAD",
+      volumeSharePct: 50,
+      allocationSplitPct: 50,
+      annualVolume: 1,
+      volumeUnit: "TONNES",
+      annualSpendEur: 5000,
+    });
+    const laneKg = await createLaneReq({
+      fromFacilityId: supplier.facilityId,
+      toFacilityId: whB.facilityId,
+      materialCategory: "Copper",
+      transportMode: "ROAD",
+      volumeSharePct: 50,
+      allocationSplitPct: 50,
+      annualVolume: 1000,
+      volumeUnit: "KG",
+      annualSpendEur: 5000,
+    });
+
+    // Rejects non-100% split atomically
+    const badSplit = await app.request("/api/v1/workspace/lanes/allocation-splits", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        splits: [
+          { laneId: laneTonnes.laneId, allocationSplitPct: 60 },
+          { laneId: laneKg.laneId, allocationSplitPct: 30 },
+        ],
+      }),
+    });
+    expect(badSplit.status).toBe(400);
+
+    // Save the split without rewriting the underlying quantities or units.
+    const okSplit = await app.request("/api/v1/workspace/lanes/allocation-splits", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        splits: [
+          { laneId: laneTonnes.laneId, allocationSplitPct: 60 },
+          { laneId: laneKg.laneId, allocationSplitPct: 40 },
+        ],
+      }),
+    });
+    expect(okSplit.status).toBe(200);
+    const splitBody = (await okSplit.json()) as {
+      lanes: Array<{
+        laneId: string;
+        allocationSplitPct: number;
+        annualVolume: number;
+        annualSpendEur: number;
+      }>;
+    };
+    const updatedTonnes = splitBody.lanes.find((l) => l.laneId === laneTonnes.laneId)!;
+    const updatedKg = splitBody.lanes.find((l) => l.laneId === laneKg.laneId)!;
+    expect(updatedTonnes.allocationSplitPct).toBe(60);
+    expect(updatedTonnes.annualVolume).toBe(1);
+    expect(updatedTonnes.annualSpendEur).toBe(5000);
+    expect(updatedKg.allocationSplitPct).toBe(40);
+    expect(updatedKg.annualVolume).toBe(1000);
+    expect(updatedKg.annualSpendEur).toBe(5000);
+  });
+
+  it("preserves relationshipRole, direction, and allocationSplitPct across CSV export/import round-trips", async () => {
+    const app = createTestApp();
+    const { cookie: sourceCookie } = await registerAndGetCookie(
+      app,
+      "csv-src@tallinn-mfg.ee",
+      "CSV Source OU",
+    );
+    const seedRes = await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: sourceCookie },
+    });
+    expect(seedRes.status).toBe(201);
+
+    const exportRes = await app.request("/api/v1/workspace/export?format=csv", {
+      headers: { Cookie: sourceCookie },
+    });
+    expect(exportRes.status).toBe(200);
+    const csvText = await exportRes.text();
+    expect(csvText).toContain("relationshipRole");
+    expect(csvText).toContain("direction");
+    expect(csvText).toContain("allocationSplitPct");
+
+    const { cookie: destCookie } = await registerAndGetCookie(
+      app,
+      "csv-dst@tallinn-mfg.ee",
+      "CSV Dest OU",
+    );
+    const importRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/csv", Cookie: destCookie },
+      body: csvText,
+    });
+    expect(importRes.status).toBe(200);
+
+    const netRes = await app.request("/api/v1/workspace/network", {
+      headers: { Cookie: destCookie },
+    });
+    const restored = WorkspaceNetworkResponseSchema.parse(await netRes.json());
+    expect(
+      restored.facilities.filter((f) => f.relationshipRole === "CLIENT").length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      restored.lanes.filter((l) => l.direction === "DOWNSTREAM").length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      restored.lanes
+        .filter((l) => l.direction === "UPSTREAM" && l.allocationSplitPct != null)
+        .map((l) => l.allocationSplitPct)
+        .sort(),
+    ).toEqual([30, 70]);
+  });
+
+  it("ArcadeDbWorkspaceRepository SELECT queries project relationshipRole, direction, and allocationSplitPct", async () => {
+    const seenSql: string[] = [];
+    const mockDb: ArcadeDbClient = {
+      healthCheck: vi.fn(async () => ({ connected: true, latencyMs: 1 })),
+      ensureDatabase: vi.fn(async () => undefined),
+      query: vi.fn(async (_lang: string, sql: string) => {
+        seenSql.push(sql);
+        return [];
+      }),
+      command: vi.fn(async () => []),
+    };
+    const repo = new ArcadeDbWorkspaceRepository(mockDb);
+    const orgId = "11111111-1111-4111-8111-111111111111";
+    const id = "22222222-2222-4222-8222-222222222222";
+    await repo.listFacilities(orgId);
+    await repo.updateFacility(orgId, id, { name: "Probe" });
+    await repo.listLanes(orgId);
+    await repo.updateLane(orgId, id, { leadTimeDays: 5 });
+
+    const facilityQueries = seenSql.filter((s) => s.includes("FROM Facility"));
+    const laneQueries = seenSql.filter((s) => s.includes("FROM SUPPLIES_LANE"));
+    expect(facilityQueries).toHaveLength(2);
+    for (const q of facilityQueries) {
+      expect(q).toContain("relationshipRole");
+    }
+    expect(laneQueries).toHaveLength(2);
+    for (const q of laneQueries) {
+      expect(q).toContain("direction");
+      expect(q).toContain("allocationSplitPct");
+    }
+  });
+
+  it("excludes DOWNSTREAM client delivery volumes from sourcing risk even when linked to the same inputId", async () => {
+    const app = createTestApp();
+    const { cookie } = await registerAndGetCookie(
+      app,
+      "downstream-risk@tallinn-mfg.ee",
+      "Downstream Risk OU",
+    );
+
+    // Create product + input with annualDemandQty = 100 TONNES
+    const prodRes = await app.request("/api/v1/workspace/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        name: "Widget",
+        sku: "WDG-1",
+        annualRevenueEur: 1_000_000,
+        grossMarginPct: 40,
+      }),
+    });
+    const { product } = (await prodRes.json()) as {
+      product: { productId: string };
+    };
+
+    const inputRes = await app.request("/api/v1/workspace/inputs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        productId: product.productId,
+        name: "Steel Coil",
+        category: "STEEL",
+        unit: "TONNES",
+        totalAnnualDemand: 100,
+        materialCriticality: 1,
+      }),
+    });
+    expect(inputRes.status).toBe(201);
+    const { input } = (await inputRes.json()) as {
+      input: { inputId: string };
+    };
+
+    const mkFac = async (
+      name: string,
+      isOwnFacility: boolean,
+      relationshipRole: "OWN" | "SUPPLIER" | "CLIENT",
+      lat: number,
+      lng: number,
+    ) => {
+      const res = await app.request("/api/v1/workspace/facilities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name,
+          kind: relationshipRole === "CLIENT" ? "WAREHOUSE" : "FACTORY",
+          isOwnFacility,
+          relationshipRole,
+          tier: relationshipRole === "SUPPLIER" ? 1 : 0,
+          countryCode: "EE",
+          lat,
+          lng,
+          locationPrecision: "SITE_VERIFIED",
+        }),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { facility: { facilityId: string } }).facility;
+    };
+
+    const ownFac = await mkFac("Own Plant", true, "OWN", 59.437, 24.7536);
+    const supFac = await mkFac("Upstream Supplier", false, "SUPPLIER", 58.378, 26.729);
+    const clientFac = await mkFac("Downstream Client", false, "CLIENT", 60.1699, 24.9384);
+
+    // Upstream lane covers only 40 TONNES out of 100 TONNES demand (60 TONNES uncontracted)
+    const upLaneRes = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        fromFacilityId: supFac.facilityId,
+        toFacilityId: ownFac.facilityId,
+        direction: "UPSTREAM",
+        inputId: input.inputId,
+        materialCategory: "STEEL",
+        transportMode: "ROAD",
+        annualVolume: 40,
+        volumeUnit: "TONNES",
+        annualSpendEur: 40_000,
+        leadTimeDays: 10,
+      }),
+    });
+    expect(upLaneRes.status).toBe(201);
+
+    const beforeRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: cookie },
+    });
+    expect(beforeRes.status).toBe(200);
+    const before = (await beforeRes.json()) as {
+      financialRisk: {
+        baseEur: number | null;
+        totalActiveSpendEur: number;
+        materials: Array<{
+          inputId: string;
+          mappedActiveVolume: number | null;
+          uncontractedDemand: number | null;
+        }>;
+      };
+    };
+
+    // Add a DOWNSTREAM client delivery lane of 60 TONNES linked to the SAME inputId
+    const dsLaneRes = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        fromFacilityId: ownFac.facilityId,
+        toFacilityId: clientFac.facilityId,
+        direction: "DOWNSTREAM",
+        inputId: input.inputId,
+        materialCategory: "STEEL",
+        transportMode: "ROAD",
+        annualVolume: 60,
+        volumeUnit: "TONNES",
+        annualSpendEur: 60_000,
+        leadTimeDays: 5,
+      }),
+    });
+    expect(dsLaneRes.status).toBe(201);
+
+    const afterRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: cookie },
+    });
+    expect(afterRes.status).toBe(200);
+    const after = (await afterRes.json()) as {
+      financialRisk: {
+        baseEur: number | null;
+        totalActiveSpendEur: number;
+        materials: Array<{
+          inputId: string;
+          mappedActiveVolume: number | null;
+          uncontractedDemand: number | null;
+        }>;
+      };
+    };
+
+    const beforeMat = before.financialRisk.materials.find(
+      (m) => m.inputId === input.inputId,
+    );
+    const afterMat = after.financialRisk.materials.find(
+      (m) => m.inputId === input.inputId,
+    );
+    expect(beforeMat?.mappedActiveVolume).toBeCloseTo(40, 4);
+    expect(afterMat?.mappedActiveVolume).toBeCloseTo(40, 4);
+    expect(beforeMat?.uncontractedDemand).toBeCloseTo(60, 4);
+    expect(afterMat?.uncontractedDemand).toBeCloseTo(60, 4);
+    expect(after.financialRisk.totalActiveSpendEur).toBeCloseTo(
+      before.financialRisk.totalActiveSpendEur,
+      2,
+    );
+    expect(after.financialRisk.baseEur).toBe(before.financialRisk.baseEur);
+
+    // Finding 6: downstream lane STILL receives time-aware commercial summary in laneCommercials
+    const dsContractRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        supplierFacilityId: ownFac.facilityId,
+        title: "Client Delivery SLA",
+        contractType: "FRAMEWORK",
+        pricingModel: "FIXED",
+        expiryBehavior: "HOLDOVER",
+        confidence: "CONTRACTED",
+        startDate: "2026-01-01",
+        endDate: "2026-12-31",
+        noticePeriodDays: 30,
+        nonRenewalNoticeGiven: false,
+        lines: [
+          {
+            laneId: ((await dsLaneRes.json()) as { lane: { laneId: string } }).lane.laneId,
+            inputId: input.inputId,
+            cadence: "PER_YEAR",
+            committedVolume: 120,
+            unit: "TONNES",
+            committedSpend: 120_000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(dsContractRes.status).toBe(201);
+
+    const runRateRes = await app.request(
+      "/api/v1/analytics/summary?viewMode=RUN_RATE",
+      { headers: { Cookie: cookie } },
+    );
+    expect(runRateRes.status).toBe(200);
+    const runRate = (await runRateRes.json()) as {
+      financialRisk: {
+        totalActiveSpendEur: number;
+        laneCommercials: Array<{
+          laneId: string;
+          activeVolume: number | null;
+          activeSpendEur: number | null;
+          viewMode: string;
+        }>;
+        materials: Array<{ inputId: string; uncontractedDemand: number | null }>;
+      };
+    };
+    const dsSummary = runRate.financialRisk.laneCommercials.find(
+      (lc) => lc.activeVolume !== null && Math.abs(lc.activeVolume - 120) < 0.01,
+    );
+    expect(dsSummary).toBeDefined();
+    expect(dsSummary?.viewMode).toBe("RUN_RATE");
+    expect(dsSummary?.activeSpendEur).toBeCloseTo(120_000, 2);
+    // Sourcing risk still excludes the downstream contract!
+    expect(
+      runRate.financialRisk.materials.find((m) => m.inputId === input.inputId)
+        ?.uncontractedDemand,
+    ).toBeCloseTo(60, 4);
+    expect(runRate.financialRisk.totalActiveSpendEur).toBeCloseTo(
+      before.financialRisk.totalActiveSpendEur,
+      2,
+    );
+  });
+
+  it("rejects edited idempotency replays with 409, archives superseded ESTIMATEs atomically, validates full split groups, and applies splits to derived quantities without mutating signed commitments", async () => {
+    const app = createTestApp();
+    const { cookie } = await registerAndGetCookie(
+      app,
+      "review-fixes-2@tallinn-mfg.ee",
+      "Review Fixes 2 OU",
+    );
+
+    const mkFac = async (name: string, role: "SUPPLIER" | "OWN", lat: number, lng: number) => {
+      const res = await app.request("/api/v1/workspace/facilities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name,
+          kind: "WAREHOUSE",
+          isOwnFacility: role === "OWN",
+          relationshipRole: role,
+          tier: role === "SUPPLIER" ? 1 : 0,
+          countryCode: "EE",
+          lat,
+          lng,
+          locationPrecision: "SITE_VERIFIED",
+        }),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { facility: { facilityId: string } }).facility;
+    };
+
+    const sup = await mkFac("Nordic Metals", "SUPPLIER", 58.38, 26.72);
+    const wh1 = await mkFac("WH 1", "OWN", 59.43, 24.75);
+    const wh2 = await mkFac("WH 2", "OWN", 58.37, 26.74);
+    const wh3 = await mkFac("WH 3", "OWN", 59.37, 28.19);
+
+    const mkLane = async (toFacilityId: string) => {
+      const res = await app.request("/api/v1/workspace/lanes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          fromFacilityId: sup.facilityId,
+          toFacilityId,
+          direction: "UPSTREAM",
+          materialCategory: "Aluminum",
+          transportMode: "ROAD",
+          annualVolume: 50,
+          volumeUnit: "TONNES",
+          annualSpendEur: 50_000,
+        }),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { lane: { laneId: string } }).lane;
+    };
+
+    const lane1 = await mkLane(wh1.facilityId);
+    const lane2 = await mkLane(wh2.facilityId);
+
+    // Finding 5: Create an ESTIMATE contract on lane1, then a formal FRAMEWORK contract -> ESTIMATE must be archived
+    const estRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        supplierFacilityId: sup.facilityId,
+        title: "Initial Estimate",
+        contractType: "ESTIMATE",
+        pricingModel: "FIXED",
+        expiryBehavior: "HOLDOVER",
+        confidence: "ESTIMATED",
+        startDate: "2026-01-01",
+        endDate: null,
+        noticePeriodDays: 30,
+        nonRenewalNoticeGiven: false,
+        lines: [
+          {
+            laneId: lane1.laneId,
+            cadence: "PER_YEAR",
+            committedVolume: 80,
+            unit: "TONNES",
+            committedSpend: 80_000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(estRes.status).toBe(201);
+    const { contract: estContract } = (await estRes.json()) as {
+      contract: { contractId: string };
+    };
+
+    // Finding 4: Create formal contract on lane1 (100 t/yr) with idempotencyKey
+    const idemKey = "idem-review-finding-4";
+    const c1Payload = {
+      supplierFacilityId: sup.facilityId,
+      title: "Annual Contract",
+      contractType: "FRAMEWORK",
+      pricingModel: "FIXED",
+      expiryBehavior: "HOLDOVER",
+      confidence: "CONTRACTED",
+      startDate: "2026-01-01",
+      endDate: "2026-12-31",
+      noticePeriodDays: 30,
+      nonRenewalNoticeGiven: false,
+      idempotencyKey: idemKey,
+      lines: [
+        {
+          laneId: lane1.laneId,
+          cadence: "PER_YEAR",
+          committedVolume: 100,
+          unit: "TONNES",
+          committedSpend: 100_000,
+          currency: "EUR",
+        },
+      ],
+    };
+    const c1Res = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify(c1Payload),
+    });
+    expect(c1Res.status).toBe(201);
+
+    // Exact replay -> 200 deduplicated
+    const replayOk = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify(c1Payload),
+    });
+    expect(replayOk.status).toBe(200);
+
+    // Edited replay with same idempotencyKey (200 units instead of 100) -> 409 Conflict
+    const replayEdited = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        ...c1Payload,
+        lines: [{ ...c1Payload.lines[0], committedVolume: 200 }],
+      }),
+    });
+    expect(replayEdited.status).toBe(409);
+
+    // Verify Finding 5: Initial ESTIMATE was persisted as manually archived
+    const contractsListRes = await app.request("/api/v1/workspace/contracts", {
+      headers: { Cookie: cookie },
+    });
+    const contractsList = (await contractsListRes.json()) as {
+      contracts: Array<{ contractId: string; isManuallyArchived: boolean }>;
+      contractLines: Array<{ laneId: string; committedVolume: number | null }>;
+    };
+    const archivedEst = contractsList.contracts.find(
+      (c) => c.contractId === estContract.contractId,
+    );
+    expect(archivedEst?.isManuallyArchived).toBe(true);
+
+    // Finding 2: Add a 2-year TOTAL_CONTRACT contract on lane2 (100 t over 2 years = 50 t/yr)
+    const c2Res = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        supplierFacilityId: sup.facilityId,
+        title: "Two-Year Total Contract",
+        contractType: "FRAMEWORK",
+        pricingModel: "FIXED",
+        expiryBehavior: "HOLDOVER",
+        confidence: "CONTRACTED",
+        startDate: "2026-01-01",
+        endDate: "2027-12-31",
+        noticePeriodDays: 30,
+        nonRenewalNoticeGiven: false,
+        lines: [
+          {
+            laneId: lane2.laneId,
+            cadence: "TOTAL_OVER_TERM",
+            committedVolume: 100,
+            unit: "TONNES",
+            committedSpend: 100_000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(c2Res.status).toBe(201);
+
+    // Apply 75/25 split on lane1 & lane2
+    const split7525 = await app.request("/api/v1/workspace/lanes/allocation-splits", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        splits: [
+          { laneId: lane1.laneId, allocationSplitPct: 75 },
+          { laneId: lane2.laneId, allocationSplitPct: 25 },
+        ],
+      }),
+    });
+    expect(split7525.status).toBe(200);
+
+    // Verify signed ContractLines were NOT rewritten (both remain 100)
+    const afterSplitContracts = (await (
+      await app.request("/api/v1/workspace/contracts", { headers: { Cookie: cookie } })
+    ).json()) as {
+      contractLines: Array<{ laneId: string; committedVolume: number | null }>;
+    };
+    const lane1FormalLine = afterSplitContracts.contractLines.find(
+      (l) => l.laneId === lane1.laneId && l.committedVolume === 100,
+    );
+    const lane2FormalLine = afterSplitContracts.contractLines.find(
+      (l) => l.laneId === lane2.laneId && l.committedVolume === 100,
+    );
+    expect(lane1FormalLine).toBeDefined();
+    expect(lane2FormalLine).toBeDefined();
+
+    // Verify derived active quantities sum to ~150 t/yr (112.5 + 37.5), NOT 175!
+    const summaryRes = await app.request(
+      "/api/v1/analytics/summary?viewMode=RUN_RATE",
+      { headers: { Cookie: cookie } },
+    );
+    expect(summaryRes.status).toBe(200);
+    const summaryBody = (await summaryRes.json()) as {
+      financialRisk: {
+        laneCommercials: Array<{ laneId: string; activeVolume: number | null }>;
+      };
+    };
+    const l1Derived = summaryBody.financialRisk.laneCommercials.find(
+      (l) => l.laneId === lane1.laneId,
+    );
+    const l2Derived = summaryBody.financialRisk.laneCommercials.find(
+      (l) => l.laneId === lane2.laneId,
+    );
+    expect((l1Derived?.activeVolume ?? 0) + (l2Derived?.activeVolume ?? 0)).toBeCloseTo(
+      150,
+      0,
+    );
+    expect(l1Derived?.activeVolume ?? 0).toBeCloseTo(112.5, 0);
+    expect(l2Derived?.activeVolume ?? 0).toBeCloseTo(37.5, 0);
+
+    // Finding 3: Add a 3rd sibling lane in the same group; submitting only 2 of 3 must fail with 400
+    await mkLane(wh3.facilityId);
+    const staleSplit = await app.request("/api/v1/workspace/lanes/allocation-splits", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        splits: [
+          { laneId: lane1.laneId, allocationSplitPct: 60 },
+          { laneId: lane2.laneId, allocationSplitPct: 40 },
+        ],
+      }),
+    });
+    expect(staleSplit.status).toBe(400);
+  });
 });
+
+commercialRegressionCases(() => new InMemoryWorkspaceRepository());

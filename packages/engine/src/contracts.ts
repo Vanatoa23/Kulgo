@@ -1,3 +1,4 @@
+import { resolveLaneDirection } from "@kulgo/shared";
 import type {
   Contract,
   ContractConfidence,
@@ -6,6 +7,7 @@ import type {
   DerivedLaneCommercialSummary,
   FinancialConfidenceBadge,
   FinancialViewMode,
+  Facility,
   HhiWeightingBasis,
   LaneCommercialState,
   SupplyInput,
@@ -190,6 +192,11 @@ export function toEur(
 
 export interface ContractDerivationOptions {
   asOfDate: string;
+  facilities?: readonly Facility[];
+  /** Source quantities for simulations that will allocate their edited inputs later. */
+  applyAllocationSplits?: boolean;
+  /** Per-destination What-If spend, applied after allocation and before material totals. */
+  annualSpendEurOverrides?: ReadonlyMap<string, number | null>;
   viewMode?: FinancialViewMode;
   windowStart?: string;
   windowEndExclusive?: string;
@@ -748,6 +755,181 @@ export function deriveNetworkCommercials(
       activeContractIds,
       activeConfidences,
     });
+  }
+
+  // Apply allocationSplitPct to derived active quantities across sibling split groups
+  // (same origin facility, direction, and material) WITHOUT mutating signed ContractLines.
+  const splitGroups = new Map<string, SupplyLane[]>();
+  const facilitiesById = new Map(options.facilities?.map((f) => [f.facilityId, f]));
+  for (const lane of lanes) {
+    const dir = resolveLaneDirection(
+      lane,
+      facilitiesById.get(lane.fromFacilityId),
+      facilitiesById.get(lane.toFacilityId),
+    );
+    const matKey = lane.inputId ?? lane.materialCategory.trim().toLowerCase();
+    const key = `${lane.fromFacilityId}::${dir}::${matKey}`;
+    const arr = splitGroups.get(key) ?? [];
+    arr.push(lane);
+    splitGroups.set(key, arr);
+  }
+
+  for (const groupLanes of options.applyAllocationSplits === false ? [] : splitGroups.values()) {
+    if (groupLanes.length < 2) continue;
+    if (
+      !groupLanes.every(
+        (l) =>
+          l.allocationSplitPct !== null &&
+          l.allocationSplitPct !== undefined &&
+          Number.isFinite(l.allocationSplitPct),
+      )
+    ) {
+      continue;
+    }
+    const splitSum = groupLanes.reduce(
+      (s, l) => s + (l.allocationSplitPct ?? 0),
+      0,
+    );
+    if (Math.abs(splitSum - 100) > 0.5) continue;
+
+    const rawEntries = groupLanes
+      .map((l) => rawLaneMap.get(l.laneId))
+      .filter((r): r is NonNullable<typeof r> => r !== undefined);
+    const nonLapsed = rawEntries.filter((r) => r.state !== "LAPSED_UNCONTRACTED");
+    if (nonLapsed.length === 0) continue;
+    // Lapsed destinations cannot receive active commercials. Normalize over the
+    // eligible destinations so their percentages cannot make the pool disappear.
+    const eligibleSplitSum = nonLapsed.reduce(
+      (sum, r) => sum + (r.lane.allocationSplitPct ?? 0), 0,
+    );
+    // With no eligible allocation, retain the original active quantities.
+    if (eligibleSplitSum <= 0) continue;
+
+    // Pool volume in a common reference unit (the first lane's baseUnit)
+    const refUnit = nonLapsed[0]!.baseUnit;
+    let canPoolVolume = true;
+    let anyVolume = false;
+    let pooledVolInRef = 0;
+    let pooledCBothVolInRef = 0;
+    let pooledHoldoverVolInRef = 0;
+    let pooledAtRiskRunRateVolInRef = 0;
+    let pooledTotalRunRateVolInRef = 0;
+
+    for (const r of nonLapsed) {
+      if (r.hasUnitConflict) {
+        canPoolVolume = false;
+        break;
+      }
+      const conv = toBaseUnit(1, r.baseUnit, refUnit);
+      if (conv.unitConflict || conv.value === null) {
+        canPoolVolume = false;
+        break;
+      }
+      const factor = conv.value;
+      if (r.activeVolume !== null) {
+        anyVolume = true;
+        pooledVolInRef += r.activeVolume * factor;
+      }
+      pooledCBothVolInRef += r.cBothVolume * factor;
+      pooledHoldoverVolInRef += r.assumedHoldoverVolume * factor;
+      pooledAtRiskRunRateVolInRef += r.atRiskRunRateVolume * factor;
+      pooledTotalRunRateVolInRef += r.totalRunRateVolume * factor;
+    }
+
+    const anySpend = nonLapsed.some((r) => r.activeSpendEur !== null);
+    const pooledSpend = nonLapsed.reduce((s, r) => s + (r.activeSpendEur ?? 0), 0);
+    const pooledCBothSpend = nonLapsed.reduce((s, r) => s + r.cBothSpendEur, 0);
+    const pooledSpendOnlyExcluded = nonLapsed.reduce(
+      (s, r) => s + r.spendOnlyExcludedEur,
+      0,
+    );
+    const pooledAtRiskRunRateSpend = nonLapsed.reduce(
+      (s, r) => s + r.atRiskRunRateSpend,
+      0,
+    );
+    const pooledTotalRunRateSpend = nonLapsed.reduce(
+      (s, r) => s + r.totalRunRateSpend,
+      0,
+    );
+
+    const groupContractIds = new Set<string>();
+    const groupConfidences = new Set<ContractConfidence>();
+    let groupHasActiveContract = false;
+    let groupHasHoldover = false;
+    for (const r of nonLapsed) {
+      if (r.state === "ACTIVE" || r.state === "HOLDOVER") {
+        groupHasActiveContract = true;
+      }
+      if (r.state === "HOLDOVER") {
+        groupHasHoldover = true;
+      }
+      for (const cid of r.activeContractIds) groupContractIds.add(cid);
+      for (const conf of r.activeConfidences) groupConfidences.add(conf);
+    }
+
+    for (const r of rawEntries) {
+      if (r.state === "LAPSED_UNCONTRACTED") continue;
+      const frac = (r.lane.allocationSplitPct ?? 0) / eligibleSplitSum;
+
+      if (canPoolVolume && anyVolume) {
+        const backConv = toBaseUnit(1, refUnit, r.baseUnit);
+        const invFactor = backConv.value ?? 1;
+        r.activeVolume = pooledVolInRef * frac * invFactor;
+        r.cBothVolume = pooledCBothVolInRef * frac * invFactor;
+        r.assumedHoldoverVolume = pooledHoldoverVolInRef * frac * invFactor;
+        r.atRiskRunRateVolume = pooledAtRiskRunRateVolInRef * frac * invFactor;
+        r.totalRunRateVolume = pooledTotalRunRateVolInRef * frac * invFactor;
+      }
+      if (anySpend) {
+        r.activeSpendEur = pooledSpend * frac;
+        r.cBothSpendEur = pooledCBothSpend * frac;
+        r.spendOnlyExcludedEur = pooledSpendOnlyExcluded * frac;
+        r.atRiskRunRateSpend = pooledAtRiskRunRateSpend * frac;
+        r.totalRunRateSpend = pooledTotalRunRateSpend * frac;
+      }
+      if (r.state === "LEVEL_0_UNPRICED" && groupHasActiveContract && frac > 0) {
+        r.state = groupHasHoldover ? "HOLDOVER" : "ACTIVE";
+        for (const cid of groupContractIds) r.activeContractIds.add(cid);
+        for (const conf of groupConfidences) {
+          if (!r.activeConfidences.includes(conf)) {
+            r.activeConfidences.push(conf);
+          }
+        }
+      }
+    }
+  }
+
+  // A scenario override names a destination, not an additional source for its
+  // allocation group. Recompute spend-dependent aggregates before deriving shares.
+  for (const [laneId, annualSpend] of options.annualSpendEurOverrides ?? []) {
+    const raw = rawLaneMap.get(laneId);
+    if (!raw || raw.state === "LAPSED_UNCONTRACTED") continue;
+    const nextSpend = annualSpend === null ? null
+      : annualSpend * (viewMode === "RUN_RATE" ? 1 : windowDays / DAY_COUNT_BASIS);
+    const previousSpend = raw.activeSpendEur;
+    if (nextSpend === previousSpend) continue;
+    if (previousSpend !== null && previousSpend > 0 && nextSpend !== null) {
+      const ratio = nextSpend / previousSpend;
+      raw.cBothSpendEur *= ratio;
+      raw.spendOnlyExcludedEur *= ratio;
+      raw.atRiskRunRateSpend *= ratio;
+      raw.totalRunRateSpend *= ratio;
+    } else {
+      const hasVolume = raw.activeVolume !== null && raw.activeVolume > 0;
+      raw.cBothVolume = nextSpend !== null && hasVolume ? raw.activeVolume! : 0;
+      raw.cBothSpendEur = hasVolume ? (nextSpend ?? 0) : 0;
+      raw.spendOnlyExcludedEur = hasVolume ? 0 : (nextSpend ?? 0);
+      const atRiskFraction = raw.totalRunRateVolume > 0
+        ? raw.atRiskRunRateVolume / raw.totalRunRateVolume
+        : raw.nextExpirationDay !== null && raw.nextExpirationDay - asOfDay <= lookaheadDays ? 1 : 0;
+      raw.totalRunRateSpend = annualSpend ?? 0;
+      raw.atRiskRunRateSpend = raw.totalRunRateSpend * atRiskFraction;
+    }
+    raw.activeSpendEur = nextSpend;
+    if (raw.state === "LEVEL_0_UNPRICED" && nextSpend !== null && nextSpend > 0) {
+      raw.state = "ACTIVE";
+      if (raw.activeConfidences.length === 0) raw.activeConfidences.push("ESTIMATED");
+    }
   }
 
   // Group lanes by material inputId to derive shares, uncontracted demand, and renewal cliffs

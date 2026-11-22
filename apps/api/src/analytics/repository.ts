@@ -16,11 +16,13 @@ import {
   FACTOR_MATRIX_VERSION,
   SimulateAnalyticsResponseSchema,
   VolumeUnitSchema,
+  resolveLaneDirection,
   type AnalyticsSummary,
   type Contract,
   type ContractLine,
   type EsgLedgerResponse,
   type ExecutiveReport,
+  type Facility,
   type FinancialViewMode,
   type Organization,
   type Product,
@@ -38,6 +40,60 @@ import {
 } from "../workspace/repository.js";
 import type { PartnerSummaryResolutionContext } from "./partner-resolver.js";
 import type { RiskSignalRepository } from "./risk-signals.js";
+
+function filterSourcingLanes(
+  lanes: readonly SupplyLane[],
+  facilities: readonly Facility[],
+): SupplyLane[] {
+  const facById = new Map(facilities.map((f) => [f.facilityId, f]));
+  return lanes.filter(
+    (lane) =>
+      resolveLaneDirection(
+        lane,
+        facById.get(lane.fromFacilityId),
+        facById.get(lane.toFacilityId),
+      ) !== "DOWNSTREAM",
+  );
+}
+
+function attachDownstreamLaneCommercials<
+  T extends { laneCommercials?: ReturnType<typeof deriveNetworkCommercials>["laneSummaries"] extends Map<string, infer V> ? V[] : never },
+>(
+  financialRisk: T,
+  lanes: readonly SupplyLane[],
+  facilities: readonly Facility[],
+  inputs: Parameters<typeof deriveNetworkCommercials>[1],
+  contracts: Parameters<typeof deriveNetworkCommercials>[2],
+  contractLines: Parameters<typeof deriveNetworkCommercials>[3],
+  options: { asOfDate: string; viewMode: FinancialViewMode },
+): T {
+  const facById = new Map(facilities.map((f) => [f.facilityId, f]));
+  const downstreamLanes = lanes.filter(
+    (lane) =>
+      resolveLaneDirection(
+        lane,
+        facById.get(lane.fromFacilityId),
+        facById.get(lane.toFacilityId),
+      ) === "DOWNSTREAM",
+  );
+  if (downstreamLanes.length === 0) {
+    return financialRisk;
+  }
+  const downstreamCommercials = deriveNetworkCommercials(
+    downstreamLanes,
+    inputs,
+    contracts,
+    contractLines,
+    { ...options, facilities },
+  );
+  return {
+    ...financialRisk,
+    laneCommercials: [
+      ...(financialRisk.laneCommercials ?? []),
+      ...downstreamCommercials.laneSummaries.values(),
+    ],
+  };
+}
 
 export class AnalyticsValidationError extends Error {
   constructor(message: string) {
@@ -238,30 +294,39 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
       : undefined;
 
+    const sourcingLanes = filterSourcingLanes(network.lanes, network.facilities);
     const commercials = deriveNetworkCommercials(
+      sourcingLanes,
+      network.inputs,
+      network.contracts ?? [],
+      network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
+    );
+
+    const financialRisk = attachDownstreamLaneCommercials(
+      computeFinancialRiskSummary({
+        products: network.products,
+        inputs: network.inputs,
+        facilities: network.facilities,
+        lanes: network.lanes,
+        contracts: network.contracts,
+        contractLines: network.contractLines,
+        riskSignals,
+        hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+          network.lanes,
+          partnerHiddenSummaries,
+        ),
+        commercials,
+        asOfDate: isoDate,
+        viewMode,
+      }),
       network.lanes,
+      network.facilities,
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
       { asOfDate: isoDate, viewMode },
     );
-
-    const financialRisk = computeFinancialRiskSummary({
-      products: network.products,
-      inputs: network.inputs,
-      facilities: network.facilities,
-      lanes: network.lanes,
-      contracts: network.contracts,
-      contractLines: network.contractLines,
-      riskSignals,
-      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
-        network.lanes,
-        partnerHiddenSummaries,
-      ),
-      commercials,
-      asOfDate: isoDate,
-      viewMode,
-    });
 
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
@@ -304,12 +369,13 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
       : undefined;
 
+    const sourcingLanes = filterSourcingLanes(network.lanes, network.facilities);
     const commercials = deriveNetworkCommercials(
-      network.lanes,
+      sourcingLanes,
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
-      { asOfDate: isoDate, viewMode },
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
     );
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
@@ -361,30 +427,39 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       throw new AnalyticsValidationError("Organization not found");
     }
 
+    const sourcingLanes = filterSourcingLanes(network.lanes, network.facilities);
     const commercials = deriveNetworkCommercials(
+      sourcingLanes,
+      network.inputs,
+      network.contracts ?? [],
+      network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
+    );
+
+    const financialRisk = attachDownstreamLaneCommercials(
+      computeFinancialRiskSummary({
+        products: network.products,
+        inputs: network.inputs,
+        facilities: network.facilities,
+        lanes: network.lanes,
+        contracts: network.contracts,
+        contractLines: network.contractLines,
+        riskSignals,
+        hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+          network.lanes,
+          partnerHiddenSummaries,
+        ),
+        commercials,
+        asOfDate: isoDate,
+        viewMode,
+      }),
       network.lanes,
+      network.facilities,
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
       { asOfDate: isoDate, viewMode },
     );
-
-    const financialRisk = computeFinancialRiskSummary({
-      products: network.products,
-      inputs: network.inputs,
-      facilities: network.facilities,
-      lanes: network.lanes,
-      contracts: network.contracts,
-      contractLines: network.contractLines,
-      riskSignals,
-      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
-        network.lanes,
-        partnerHiddenSummaries,
-      ),
-      commercials,
-      asOfDate: isoDate,
-      viewMode,
-    });
 
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
@@ -551,12 +626,22 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       );
     }
 
-    const baselineCommercials = deriveNetworkCommercials(
+    const baselineSourcingLanes = filterSourcingLanes(
       network.lanes,
+      network.facilities,
+    );
+    const baselineCommercials = deriveNetworkCommercials(
+      baselineSourcingLanes,
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
-      { asOfDate: isoDate, viewMode },
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
+    );
+    // Simulation edits feed into derivation again. Start with unallocated sources,
+    // otherwise an allocated lane is pooled alongside its siblings a second time.
+    const baselineSourceCommercials = deriveNetworkCommercials(
+      baselineSourcingLanes, network.inputs, network.contracts ?? [], network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode, facilities: network.facilities, applyAllocationSplits: false },
     );
     const baselineScale =
       viewMode === "RUN_RATE"
@@ -587,9 +672,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       const volumeChanged = change.annualVolume !== undefined;
       const spendChanged = change.annualSpendEur !== undefined;
       const hasCommercialChange =
-        volumeShareChanged || volumeChanged || spendChanged;
+        volumeShareChanged || volumeChanged;
 
-      const baseComm = baselineCommercials.laneSummaries.get(lane.laneId);
+      const baseComm = baselineSourceCommercials.laneSummaries.get(lane.laneId);
       const isLapsedBaseline =
         baseComm?.laneCommercialState === "LAPSED_UNCONTRACTED";
       const addsExplicitCommercials =
@@ -600,7 +685,8 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       // introduces positive simulated volume or spend, so a share-only edit cannot
       // relabel a lapsed lane as LEVEL_0_UNPRICED and revive it in HHI/SPOF.
       const shouldBypassContracts =
-        hasCommercialChange && (!isLapsedBaseline || addsExplicitCommercials);
+        (hasCommercialChange || (spendChanged && isLapsedBaseline && addsExplicitCommercials)) &&
+        (!isLapsedBaseline || addsExplicitCommercials);
 
       if (shouldBypassContracts) {
         commercialChangedLaneIds.add(lane.laneId);
@@ -680,9 +766,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       }
 
       let nextAnnualSpendEur = lane.annualSpendEur;
-      if (change.annualSpendEur !== undefined) {
-        nextAnnualSpendEur = change.annualSpendEur;
-      } else if (shouldBypassContracts) {
+      if (shouldBypassContracts) {
         nextAnnualSpendEur =
           volumeShareChanged && effectiveBaseSpend !== null
             ? Math.max(0, effectiveBaseSpend * ratio)
@@ -752,18 +836,27 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       viewMode,
     });
 
-    // For any lane whose volumeSharePct/annualVolume/annualSpendEur is being simulated,
-    // bypass unscaled contractLines on that lane so the simulated lane quantities take effect.
+    // Bypass commitments only for source quantity changes or explicitly revived lanes.
+    // Destination spend overrides are applied after allocation below.
     const simulatedContractLines = (network.contractLines ?? []).filter(
       (cl) => !commercialChangedLaneIds.has(cl.laneId),
     );
 
-    const simulatedCommercials = deriveNetworkCommercials(
+    const simulatedSourcingLanes = filterSourcingLanes(
       simulatedLanesWithContractBase,
+      network.facilities,
+    );
+    const simulatedCommercials = deriveNetworkCommercials(
+      simulatedSourcingLanes,
       network.inputs,
       network.contracts ?? [],
       simulatedContractLines,
-      { asOfDate: isoDate, viewMode },
+      {
+        asOfDate: isoDate, viewMode, facilities: network.facilities,
+        annualSpendEurOverrides: new Map(request.laneChanges
+          .filter((change) => change.annualSpendEur !== undefined)
+          .map((change) => [change.laneId, change.annualSpendEur!])),
+      },
     );
 
     const simulatedFinancialRisk = computeFinancialRiskSummary({

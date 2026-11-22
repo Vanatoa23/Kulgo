@@ -1,6 +1,7 @@
 import {
   FinancialRiskSummarySchema,
   FinancialSimulationDeltaSchema,
+  resolveLaneDirection,
   type Contract,
   type ContractLine,
   type DefectBufferRecommendation,
@@ -472,25 +473,46 @@ export function computeFinancialRiskSummary(
   const contractLines = input.contractLines ?? [];
   const riskSignals = input.riskSignals ?? [];
 
-  const commercials =
-    input.commercials ??
-    deriveNetworkCommercials(
-      input.lanes,
-      input.inputs,
-      contracts,
-      contractLines,
-      {
-        asOfDate: input.asOfDate,
-        viewMode: input.viewMode ?? "PERIOD_WINDOW",
-        windowStart: input.windowStart,
-        windowEndExclusive: input.windowEndExclusive,
-        fxRatesToEur: input.fxRatesToEur,
-      },
-    );
-
   const facilityById = new Map(input.facilities.map((f) => [f.facilityId, f]));
   const productById = new Map(input.products.map((p) => [p.productId, p]));
   const inputById = new Map(input.inputs.map((i) => [i.inputId, i]));
+
+  const sourcingLanes = input.lanes.filter(
+    (lane) =>
+      resolveLaneDirection(
+        lane,
+        facilityById.get(lane.fromFacilityId),
+        facilityById.get(lane.toFacilityId),
+      ) !== "DOWNSTREAM",
+  );
+
+  const hasDownstreamExcluded = sourcingLanes.length !== input.lanes.length;
+  const commercialsIncludeDownstream =
+    hasDownstreamExcluded &&
+    input.commercials !== undefined &&
+    input.lanes.some(
+      (lane) =>
+        !sourcingLanes.includes(lane) &&
+        input.commercials!.laneSummaries.has(lane.laneId),
+    );
+
+  const commercials =
+    input.commercials && !commercialsIncludeDownstream
+      ? input.commercials
+      : deriveNetworkCommercials(
+          sourcingLanes,
+          input.inputs,
+          contracts,
+          contractLines,
+          {
+            asOfDate: input.asOfDate,
+            facilities: input.facilities,
+            viewMode: input.viewMode ?? "PERIOD_WINDOW",
+            windowStart: input.windowStart,
+            windowEndExclusive: input.windowEndExclusive,
+            fxRatesToEur: input.fxRatesToEur,
+          },
+        );
 
   const horizonDays =
     commercials.viewMode === "RUN_RATE"
@@ -499,7 +521,7 @@ export function computeFinancialRiskSummary(
 
   // Determine per-lane live risk multiplier from matched RiskSignals if not overridden
   const signalsByLane = matchNetworkRiskSignals(
-    input.lanes, input.facilities, riskSignals, input.asOfDate,
+    sourcingLanes, input.facilities, riskSignals, input.asOfDate,
   );
   const resolveLaneLiveMultiplier = (lane: SupplyLane): number => {
     const override = input.liveRiskMultiplierByLaneId?.get(lane.laneId);
@@ -535,7 +557,7 @@ export function computeFinancialRiskSummary(
 
   // Count active non-lapsed lanes per material for warm-backup readiness
   const activeLanesByInput = new Map<string, SupplyLane[]>();
-  for (const lane of input.lanes) {
+  for (const lane of sourcingLanes) {
     const summary = commercials.laneSummaries.get(lane.laneId);
     if (summary?.laneCommercialState === "LAPSED_UNCONTRACTED") continue;
     if (lane.inputId) {
@@ -552,7 +574,7 @@ export function computeFinancialRiskSummary(
   let anyFormalContract = false;
   const orgMissingReasons = new Set<string>();
 
-  for (const lane of input.lanes) {
+  for (const lane of sourcingLanes) {
     const laneComm = commercials.laneSummaries.get(lane.laneId)!;
     if (laneComm.laneCommercialState === "LAPSED_UNCONTRACTED") continue;
 

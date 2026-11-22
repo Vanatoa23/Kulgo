@@ -1,3 +1,4 @@
+import { commercialRegressionCases } from "../helpers/commercial-regressions.js";
 import { createInvitationFixture, invitationConcurrencyCases } from "../invitation-concurrency-cases.js";
 import { ArcadeDbInvitationRepository } from "../../src/invites/repository.js";
 import { randomUUID } from "node:crypto";
@@ -54,6 +55,8 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
   const app = createApp({ config, db });
   const workspaceRepo = new ArcadeDbWorkspaceRepository(db);
   const runId = randomUUID().slice(0, 8);
+
+  commercialRegressionCases(() => new ArcadeDbWorkspaceRepository(db), () => new ArcadeDbWorkspaceRepository(db));
 
   beforeAll(async () => {
     await bootstrapSchema(db);

@@ -12,6 +12,54 @@ export const FacilityKindSchema = z.enum([
 ]);
 export type FacilityKind = z.infer<typeof FacilityKindSchema>;
 
+export const FacilityRelationshipRoleSchema = z.enum([
+  "SUPPLIER",
+  "OWN",
+  "CLIENT",
+]);
+export type FacilityRelationshipRole = z.infer<
+  typeof FacilityRelationshipRoleSchema
+>;
+
+export const LaneDirectionSchema = z.enum([
+  "UPSTREAM",
+  "INTERNAL",
+  "DOWNSTREAM",
+]);
+export type LaneDirection = z.infer<typeof LaneDirectionSchema>;
+
+export function resolveFacilityRole(facility: {
+  relationshipRole?: FacilityRelationshipRole;
+  isOwnFacility?: boolean;
+  kind?: FacilityKind;
+}): FacilityRelationshipRole {
+  if (facility.relationshipRole) return facility.relationshipRole;
+  if (facility.isOwnFacility) return "OWN";
+  if (facility.kind === "CUSTOMER") return "CLIENT";
+  return "SUPPLIER";
+}
+
+export function resolveLaneDirection(
+  lane: { direction?: LaneDirection },
+  fromFacility?: {
+    relationshipRole?: FacilityRelationshipRole;
+    isOwnFacility?: boolean;
+    kind?: FacilityKind;
+  },
+  toFacility?: {
+    relationshipRole?: FacilityRelationshipRole;
+    isOwnFacility?: boolean;
+    kind?: FacilityKind;
+  },
+): LaneDirection {
+  if (lane.direction) return lane.direction;
+  const fromRole = fromFacility ? resolveFacilityRole(fromFacility) : undefined;
+  const toRole = toFacility ? resolveFacilityRole(toFacility) : undefined;
+  if (toRole === "CLIENT") return "DOWNSTREAM";
+  if (fromRole === "OWN" && toRole === "OWN") return "INTERNAL";
+  return "UPSTREAM";
+}
+
 export const LocationPrecisionSchema = z.enum(["HQ_ESTIMATED", "SITE_VERIFIED"]);
 export type LocationPrecision = z.infer<typeof LocationPrecisionSchema>;
 
@@ -173,6 +221,7 @@ export const FacilitySchema = z
     lat: z.number().min(-90).max(90),
     lng: z.number().min(-180).max(180),
     isOwnFacility: z.boolean().default(false),
+    relationshipRole: FacilityRelationshipRoleSchema.optional(),
     isPartnerVerified: z.boolean().default(false),
     sector: z.string().max(100).nullable().default(null),
     esgBadges: z.array(z.string()).default([]),
@@ -193,6 +242,8 @@ export const SupplyLaneSchema = z
     ownerOrgId: z.string().uuid(),
     fromFacilityId: z.string().uuid(),
     toFacilityId: z.string().uuid(),
+    direction: LaneDirectionSchema.optional(),
+    allocationSplitPct: z.number().finite().min(0).max(100).nullable().optional(),
     inputId: z.string().uuid().nullable().default(null),
     materialCategory: z.string().min(1).max(100),
     transportMode: TransportModeSchema,
@@ -413,6 +464,7 @@ export const CreateFacilityInputSchema = z.object({
   lat: z.number().finite().min(-90).max(90),
   lng: z.number().finite().min(-180).max(180),
   isOwnFacility: z.boolean().default(false),
+  relationshipRole: FacilityRelationshipRoleSchema.optional(),
   sector: z.string().trim().max(100).nullable().optional(),
   esgBadges: z.array(z.string().trim().min(1).max(64)).optional(),
   estimatedScope12Tco2e: z.number().finite().nonnegative().nullable().optional(),
@@ -433,6 +485,7 @@ export const UpdateFacilityInputSchema = z.object({
   lat: z.number().finite().min(-90).max(90).optional(),
   lng: z.number().finite().min(-180).max(180).optional(),
   isOwnFacility: z.boolean().optional(),
+  relationshipRole: FacilityRelationshipRoleSchema.optional(),
   sector: z.string().trim().max(100).nullable().optional(),
   esgBadges: z.array(z.string().trim().min(1).max(64)).optional(),
   estimatedScope12Tco2e: z.number().finite().nonnegative().nullable().optional(),
@@ -447,6 +500,8 @@ export type UpdateFacilityInput = z.infer<typeof UpdateFacilityInputSchema>;
 export const CreateSupplyLaneInputSchema = z.object({
   fromFacilityId: z.string().uuid(),
   toFacilityId: z.string().uuid(),
+  direction: LaneDirectionSchema.optional(),
+  allocationSplitPct: z.number().finite().min(0).max(100).nullable().optional(),
   inputId: z.string().uuid().nullable().optional(),
   materialCategory: z.string().trim().min(1).max(80),
   transportMode: TransportModeSchema.default("ROAD"),
@@ -477,6 +532,8 @@ export type CreateSupplyLaneInput = z.infer<typeof CreateSupplyLaneInputSchema>;
 export const UpdateSupplyLaneInputSchema = z.object({
   fromFacilityId: z.string().uuid().optional(),
   toFacilityId: z.string().uuid().optional(),
+  direction: LaneDirectionSchema.optional(),
+  allocationSplitPct: z.number().finite().min(0).max(100).nullable().optional(),
   inputId: z.string().uuid().nullable().optional(),
   materialCategory: z.string().trim().min(1).max(80).optional(),
   transportMode: TransportModeSchema.optional(),
@@ -593,6 +650,8 @@ export const BulkImportLaneRowSchema = z.object({
   toFacilityId: z.string().uuid().optional(),
   fromFacilityRef: z.string().trim().min(1).max(160).optional(),
   toFacilityRef: z.string().trim().min(1).max(160).optional(),
+  direction: LaneDirectionSchema.optional(),
+  allocationSplitPct: z.number().finite().min(0).max(100).nullable().optional(),
   inputId: z.string().uuid().nullable().optional(),
   materialCategory: z.string().trim().min(1).max(80),
   transportMode: TransportModeSchema.default("ROAD"),

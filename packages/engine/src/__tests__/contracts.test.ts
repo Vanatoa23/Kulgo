@@ -1,3 +1,4 @@
+import { ContractSchema, ContractLineSchema, FacilitySchema } from "@kulgo/shared";
 import { describe, expect, it } from "vitest";
 import type {
   Contract,
@@ -406,5 +407,79 @@ describe("contracts derivation engine (Phase 1)", () => {
     expect(spot.committedVolume).toBe(3);
     expect(spot.committedSpend).toBe(4350);
     expect(spot.expiryBehavior).toBe("AUTO_ARCHIVE");
+  });
+});
+
+
+describe("Split destination eligibility and inferred directions", () => {
+  const contract = ContractSchema.parse({
+    contractId: C_BASE, ownerOrgId: ORG, supplierFacilityId: SUP_A,
+    title: "Active source", contractType: "FRAMEWORK",
+    startDate: "2026-01-01", endDate: null,
+  });
+  const lapsed = ContractSchema.parse({
+    ...contract, contractId: C_SPOT, title: "Expired destination",
+    contractType: "SPOT_PO", expiryBehavior: "AUTO_ARCHIVE",
+    startDate: "2025-01-01", endDate: "2025-12-31",
+  });
+  const lines = [contract, lapsed].map((c, i) => ContractLineSchema.parse({
+    contractLineId: i === 0 ? CL_1 : CL_2, contractId: c.contractId,
+    ownerOrgId: ORG, laneId: i === 0 ? LANE_1 : LANE_2, inputId: INPUT_1,
+    cadence: "PER_YEAR", committedVolume: 100, unit: "UNITS",
+    committedSpend: 1000, currency: "EUR",
+  }));
+
+  it.each(["RUN_RATE", "PERIOD_WINDOW"] as const)(
+    "retains active volume and spend when a destination lapses (%s)", (viewMode) => {
+      const lanes = [makeLane({ allocationSplitPct: 75 }),
+        makeLane({ laneId: LANE_2, allocationSplitPct: 25 })];
+      const result = deriveNetworkCommercials(lanes, [makeInput()],
+        [contract, lapsed], lines, {
+          asOfDate: "2026-01-01", viewMode,
+          windowStart: "2026-01-01", windowEndExclusive: "2027-01-01",
+        });
+      expect(result.laneSummaries.get(LANE_1)?.activeVolume).toBe(100);
+      expect(result.laneSummaries.get(LANE_1)?.activeSpendEur).toBe(1000);
+      expect(result.laneSummaries.get(LANE_2)?.laneCommercialState).toBe("LAPSED_UNCONTRACTED");
+      expect(result.materialSummaries.get(INPUT_1)?.mappedActiveVolume).toBe(100);
+      expect(result.materialSummaries.get(INPUT_1)?.mappedActiveSpendEur).toBe(1000);
+    },
+  );
+
+  it("retains the active source when all eligible destinations have zero allocation", () => {
+    const result = deriveNetworkCommercials([
+      makeLane({ allocationSplitPct: 0 }),
+      makeLane({ laneId: LANE_2, allocationSplitPct: 100 }),
+    ], [makeInput()], [contract, lapsed], lines, { asOfDate: "2026-01-01", viewMode: "RUN_RATE" });
+    expect(result.laneSummaries.get(LANE_1)?.activeVolume).toBe(100);
+    expect(result.laneSummaries.get(LANE_1)?.activeSpendEur).toBe(1000);
+  });
+
+  it.each(["INTERNAL", "DOWNSTREAM"] as const)(
+    "groups an older inferred direction with an explicit %s sibling", (direction) => {
+      const facilities = [SUP_A, FAC_OWN].map((facilityId, i) => FacilitySchema.parse({
+        facilityId, ownerOrgId: ORG, name: `Facility ${i}`, kind: "WAREHOUSE",
+        countryCode: "EE", lat: 59, lng: 25, isOwnFacility: true,
+        ...(i === 1 && direction === "DOWNSTREAM" ? { relationshipRole: "CLIENT" } : {}),
+      }));
+      const result = deriveNetworkCommercials([
+        makeLane({ allocationSplitPct: 75, annualVolume: 100, annualSpendEur: 1000 }),
+        makeLane({ laneId: LANE_2, direction, allocationSplitPct: 25 }),
+      ], [makeInput()], [], [], { asOfDate: "2026-01-01", viewMode: "RUN_RATE", facilities });
+      expect(result.laneSummaries.get(LANE_1)?.activeVolume).toBe(75);
+      expect(result.laneSummaries.get(LANE_2)?.activeVolume).toBe(25);
+      expect(result.laneSummaries.get(LANE_2)?.activeSpendEur).toBe(250);
+    },
+  );
+
+  it("pools compatible legacy mass units without changing source quantities", () => {
+    const lanes = [makeLane({ inputId: null, volumeUnit: "TONNES", annualVolume: 1, allocationSplitPct: 60 }),
+      makeLane({ laneId: LANE_2, inputId: null, volumeUnit: "KG", annualVolume: 1000, allocationSplitPct: 40 })];
+    const result = deriveNetworkCommercials(lanes, [], [], [], {
+      asOfDate: "2026-01-01", viewMode: "RUN_RATE",
+    });
+    expect(result.laneSummaries.get(LANE_1)?.activeVolume).toBe(1.2);
+    expect(result.laneSummaries.get(LANE_2)?.activeVolume).toBe(800);
+    expect(lanes.map((lane) => lane.annualVolume)).toEqual([1, 1000]);
   });
 });

@@ -1,3 +1,4 @@
+import { usePendingContractSave } from "../lib/pending-contract-saves.js";
 import type {
   Contract,
   ContractLine,
@@ -5,8 +6,9 @@ import type {
   SupplyLane,
 } from "@kulgo/shared";
 import { Archive, CalendarPlus, FileText, Plus } from "lucide-react";
-import { useState } from "react";
+import { useEffect, useRef, useState } from "react";
 import {
+  ApiError,
   createContract,
   updateContract,
 } from "../lib/api.js";
@@ -16,13 +18,21 @@ export interface LaneContractsDrawerSectionProps {
   contracts: readonly Contract[];
   contractLines: readonly ContractLine[];
   derivedSummary?: DerivedLaneCommercialSummary;
-  onChanged: () => Promise<void> | void;
+  onChanged: () => Promise<boolean>;
 }
 
 function addOneYearIso(isoDate: string | null): string {
   const base = isoDate ? new Date(`${isoDate}T00:00:00Z`) : new Date();
   base.setUTCFullYear(base.getUTCFullYear() + 1);
   return base.toISOString().slice(0, 10);
+}
+
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidIsoDate(value: string): boolean {
+  if (!ISO_DATE_RE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
 }
 
 export function LaneContractsDrawerSection({
@@ -32,23 +42,45 @@ export function LaneContractsDrawerSection({
   derivedSummary,
   onChanged,
 }: LaneContractsDrawerSectionProps) {
-  const [adding, setAdding] = useState(false);
+  const { pending, setPending } = usePendingContractSave(lane.laneId);
+  const restored = pending?.confirmed ? undefined : pending?.request;
+  const restoredLine = restored?.lines?.[0];
+  const [adding, setAdding] = useState(restored !== undefined);
   const [saving, setSaving] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const [title, setTitle] = useState("Spot Top-Up");
-  const [contractType, setContractType] = useState<"FRAMEWORK" | "SPOT_PO">(
-    "SPOT_PO",
-  );
+  const [title, setTitle] = useState(restored?.title ?? "Spot Top-Up");
+  const [contractType, setContractType] = useState<
+    "FRAMEWORK" | "SPOT_PO" | "ESTIMATE"
+  >(restored?.contractType ?? "SPOT_PO");
+  const [pricingModel, setPricingModel] = useState<"FIXED" | "INDEXED">(restored?.pricingModel ?? "FIXED");
+  const [expiryBehavior, setExpiryBehavior] = useState<
+    "HOLDOVER" | "AUTO_RENEW" | "AUTO_ARCHIVE"
+  >(restored?.expiryBehavior ?? "AUTO_ARCHIVE");
+  const [noticePeriodDays, setNoticePeriodDays] = useState(String(restored?.noticePeriodDays ?? 30));
   const [cadence, setCadence] = useState<"PER_YEAR" | "TOTAL_OVER_TERM">(
-    "TOTAL_OVER_TERM",
+    restoredLine?.cadence ?? "TOTAL_OVER_TERM",
   );
-  const [volume, setVolume] = useState("");
-  const [spend, setSpend] = useState("");
+  const [volume, setVolume] = useState(String(restoredLine?.committedVolume ?? ""));
+  const [spend, setSpend] = useState(String(restoredLine?.committedSpend ?? ""));
   const [startDate, setStartDate] = useState(() =>
-    new Date().toISOString().slice(0, 10),
+    restored?.startDate ?? new Date().toISOString().slice(0, 10),
   );
-  const [endDate, setEndDate] = useState(() => addOneYearIso(null));
+  const [endDate, setEndDate] = useState(() => restored ? (restored.endDate ?? "") : addOneYearIso(null));
+  const inFlight = useRef(false);
+  const awaitingConfirmation = pending !== undefined && !pending.confirmed;
+  const busy = saving || pending?.saving === true;
+
+  useEffect(() => {
+    if (!pending?.confirmed) return;
+    // A response may arrive after the submitting route view unmounts. Consume
+    // confirmation in whichever view is mounted, never unlock its stale draft.
+    setAdding(false);
+    setVolume("");
+    setSpend("");
+    setError(null);
+    setPending(null);
+  }, [pending?.confirmed, setPending]);
 
   const laneLines = contractLines.filter((l) => l.laneId === lane.laneId);
   const contractById = new Map(contracts.map((c) => [c.contractId, c]));
@@ -63,80 +95,120 @@ export function LaneContractsDrawerSection({
 
   const handleCreateContract = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSaving(true);
+    if (inFlight.current || pending?.saving || pending?.conflict) return;
     setError(null);
-    try {
-      const parsedVol = volume.trim() ? Number(volume) : null;
-      const parsedSpend = spend.trim() ? Number(spend) : null;
 
-      // If this is the very first formal contract on a lane that already had quick flat-form values,
-      // preserve the base entry as Contract #1 (FRAMEWORK) before adding the new top-up.
-      if (
+    const trimmedStart = startDate.trim();
+    const trimmedEnd = endDate.trim();
+    if (!isValidIsoDate(trimmedStart)) {
+      setError("Please enter a valid start date (YYYY-MM-DD).");
+      return;
+    }
+    if (trimmedEnd && !isValidIsoDate(trimmedEnd)) {
+      setError("Please enter a valid end date (YYYY-MM-DD) or leave it blank.");
+      return;
+    }
+    if (trimmedEnd && trimmedEnd < trimmedStart) {
+      setError("End date must be on or after the start date.");
+      return;
+    }
+
+    const parsedVol = volume.trim() ? Number(volume) : null;
+    if (parsedVol !== null && (!Number.isFinite(parsedVol) || parsedVol < 0)) {
+      setError("Volume must be a non-negative number.");
+      return;
+    }
+    const parsedSpend = spend.trim() ? Number(spend) : null;
+    if (
+      parsedSpend !== null &&
+      (!Number.isFinite(parsedSpend) || parsedSpend < 0)
+    ) {
+      setError("Spend must be a non-negative number.");
+      return;
+    }
+    const parsedNotice =
+      contractType === "FRAMEWORK" && noticePeriodDays.trim()
+        ? Math.max(0, Math.round(Number(noticePeriodDays) || 0))
+        : 0;
+
+    let submittedRequest = pending?.request;
+    inFlight.current = true;
+    setSaving(true);
+    try {
+      const shouldPreserveLegacyBase =
         laneContracts.length === 0 &&
         contractType === "SPOT_PO" &&
         ((lane.annualVolume !== null && lane.annualVolume > 0) ||
-          (lane.annualSpendEur !== null && lane.annualSpendEur > 0))
-      ) {
-        await createContract({
-          supplierFacilityId: lane.fromFacilityId,
-          title: "Base Agreement",
-          contractType: "FRAMEWORK",
-          pricingModel: "FIXED",
-          expiryBehavior: "HOLDOVER",
-          confidence: "ESTIMATED",
-          startDate: `${new Date().getUTCFullYear()}-01-01`,
-          endDate: null,
-          noticePeriodDays: 30,
-          nonRenewalNoticeGiven: false,
-          lines: [
-            {
-              laneId: lane.laneId,
-              inputId: lane.inputId,
-              cadence: "PER_YEAR",
-              committedVolume: lane.annualVolume,
-              unit: lane.volumeUnit,
-              committedSpend: lane.annualSpendEur,
-              currency: "EUR",
-            },
-          ],
-        });
-      }
+          (lane.annualSpendEur !== null && lane.annualSpendEur > 0));
 
-      await createContract({
+      const defaultTitle =
+        contractType === "SPOT_PO"
+          ? "Spot Top-Up"
+          : contractType === "ESTIMATE"
+            ? "Quick Commercial Estimate"
+            : "Framework Agreement";
+
+      // Single atomic/idempotent server request so partial failures or lost-response
+      // retries can never create orphaned or duplicate contracts (#47).
+      // Keep the exact submitted snapshot until a response confirms its outcome.
+      const request = pending?.request ?? {
         supplierFacilityId: lane.fromFacilityId,
-        title: title.trim() || (contractType === "SPOT_PO" ? "Spot Top-Up" : "Framework Agreement"),
+        title: title.trim() || defaultTitle,
         contractType,
-        pricingModel: "FIXED",
-        expiryBehavior: contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER",
-        confidence: "CONTRACTED",
-        startDate,
-        endDate: endDate.trim() ? endDate.trim() : null,
-        noticePeriodDays: contractType === "FRAMEWORK" ? 30 : 0,
+        pricingModel: contractType === "FRAMEWORK" ? pricingModel : "FIXED",
+        expiryBehavior,
+        confidence: contractType === "ESTIMATE" ? "ESTIMATED" : "CONTRACTED",
+        startDate: trimmedStart,
+        endDate: trimmedEnd ? trimmedEnd : null,
+        noticePeriodDays: parsedNotice,
         nonRenewalNoticeGiven: false,
+        idempotencyKey: typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+        ...(shouldPreserveLegacyBase
+          ? { preserveLegacyBaseForLaneId: lane.laneId }
+          : {}),
         lines: [
           {
             laneId: lane.laneId,
             inputId: lane.inputId,
             cadence,
-            committedVolume:
-              parsedVol !== null && Number.isFinite(parsedVol) ? parsedVol : null,
+            committedVolume: parsedVol,
             unit: lane.volumeUnit,
-            committedSpend:
-              parsedSpend !== null && Number.isFinite(parsedSpend)
-                ? parsedSpend
-                : null,
+            committedSpend: parsedSpend,
             currency: "EUR",
           },
         ],
-      });
+      };
+      submittedRequest = request;
+      setPending({ request, saving: true });
+      await createContract(request);
+      setPending({ request, saving: false, confirmed: true });
+      submittedRequest = undefined;
 
+      // Clear the draft only after confirmed server success.
       setVolume("");
       setSpend("");
       setAdding(false);
       await onChanged();
     } catch (err) {
-      setError(err instanceof Error ? err.message : "Failed to save contract");
+      const message = err instanceof Error ? err.message : "Failed to save contract";
+      const definitiveRejection = err instanceof ApiError && err.status < 500 && err.status !== 409;
+      if (definitiveRejection) setPending(null);
+      // This account-scoped state survives even if the route view unmounts.
+      else if (submittedRequest) setPending({
+        request: submittedRequest, saving: false,
+        conflict: err instanceof ApiError && err.status === 409, error: message,
+      });
+      setError(message);
+      // Reconcile contracts state with server so retries never act on stale client state (#47)
+      try {
+        await onChanged();
+      } catch {
+        // Keep the original save error visible
+      }
     } finally {
+      inFlight.current = false;
       setSaving(false);
     }
   };
@@ -244,9 +316,9 @@ export function LaneContractsDrawerSection({
         </div>
       )}
 
-      {error && (
-        <div className="text-[10px] text-red-300 bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
-          {error}
+      {(error || pending?.error) && (
+        <div role="alert" className="text-[10px] text-red-300 bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
+          {error || pending?.error}
         </div>
       )}
 
@@ -283,7 +355,7 @@ export function LaneContractsDrawerSection({
                 <div className="flex items-center gap-1.5 pt-1">
                   <button
                     type="button"
-                    disabled={saving}
+                    disabled={busy}
                     onClick={() => void handleExtendOneYear(contract)}
                     className="inline-flex items-center gap-1 rounded border border-emerald-500/35 bg-emerald-500/10 hover:bg-emerald-500/20 px-1.5 py-0.5 text-[10px] text-emerald-200 cursor-pointer"
                   >
@@ -292,7 +364,7 @@ export function LaneContractsDrawerSection({
                   </button>
                   <button
                     type="button"
-                    disabled={saving}
+                    disabled={busy}
                     onClick={() => void handleArchive(contract)}
                     className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-800 hover:bg-slate-700 px-1.5 py-0.5 text-[10px] text-slate-300 cursor-pointer"
                   >
@@ -312,27 +384,48 @@ export function LaneContractsDrawerSection({
           onSubmit={(e) => void handleCreateContract(e)}
           className="rounded-md border border-sky-500/35 bg-slate-900/90 p-2.5 space-y-2 text-xs"
         >
-          <div className="grid grid-cols-2 gap-2">
+          {awaitingConfirmation && (
+            <p role="status" className="text-amber-200">
+              {pending?.conflict
+                ? "This request conflicts with an existing save. Review saved contracts before starting another draft."
+                : "The previous save is unconfirmed. Retry that save to check its outcome before editing."}
+            </p>
+          )}
+          <fieldset disabled={busy || awaitingConfirmation} className="grid grid-cols-2 gap-2">
+            <legend className="sr-only">Contract details</legend>
             <input
               type="text"
+              aria-label="Contract title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Contract title"
               className="col-span-2 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
             />
             <select
+              aria-label="Contract type"
               value={contractType}
               onChange={(e) => {
-                const v = e.target.value as "FRAMEWORK" | "SPOT_PO";
+                const v = e.target.value as "FRAMEWORK" | "SPOT_PO" | "ESTIMATE";
                 setContractType(v);
-                setCadence(v === "SPOT_PO" ? "TOTAL_OVER_TERM" : "PER_YEAR");
+                if (v === "SPOT_PO") {
+                  setCadence("TOTAL_OVER_TERM");
+                  setExpiryBehavior("AUTO_ARCHIVE");
+                } else if (v === "ESTIMATE") {
+                  setCadence("PER_YEAR");
+                  setExpiryBehavior("HOLDOVER");
+                } else {
+                  setCadence("PER_YEAR");
+                  setExpiryBehavior("HOLDOVER");
+                }
               }}
               className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
             >
               <option value="SPOT_PO">Spot Top-Up (AUTO_ARCHIVE)</option>
-              <option value="FRAMEWORK">Framework (HOLDOVER)</option>
+              <option value="FRAMEWORK">Framework Agreement</option>
+              <option value="ESTIMATE">Quick Estimate (Level 1)</option>
             </select>
             <select
+              aria-label="Contract cadence"
               value={cadence}
               onChange={(e) =>
                 setCadence(e.target.value as "PER_YEAR" | "TOTAL_OVER_TERM")
@@ -342,10 +435,49 @@ export function LaneContractsDrawerSection({
               <option value="TOTAL_OVER_TERM">Total Over Term</option>
               <option value="PER_YEAR">Per Year</option>
             </select>
+            {contractType === "FRAMEWORK" && (
+              <>
+                <select
+                  aria-label="Pricing model"
+                  value={pricingModel}
+                  onChange={(e) =>
+                    setPricingModel(e.target.value as "FIXED" | "INDEXED")
+                  }
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
+                >
+                  <option value="FIXED">Fixed Price</option>
+                  <option value="INDEXED">Indexed Price</option>
+                </select>
+                <select
+                  aria-label="Expiry behavior"
+                  value={expiryBehavior}
+                  onChange={(e) =>
+                    setExpiryBehavior(
+                      e.target.value as "HOLDOVER" | "AUTO_RENEW" | "AUTO_ARCHIVE",
+                    )
+                  }
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
+                >
+                  <option value="HOLDOVER">Holdover</option>
+                  <option value="AUTO_RENEW">Auto-Renew</option>
+                  <option value="AUTO_ARCHIVE">Auto-Archive</option>
+                </select>
+                <input
+                  type="number"
+                  min="0"
+                  aria-label="Notice period days"
+                  value={noticePeriodDays}
+                  onChange={(e) => setNoticePeriodDays(e.target.value)}
+                  placeholder="Notice period (days)"
+                  className="col-span-2 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
+                />
+              </>
+            )}
             <input
               type="number"
               step="any"
               min="0"
+              aria-label="Committed volume"
               value={volume}
               onChange={(e) => setVolume(e.target.value)}
               placeholder={`Volume (${lane.volumeUnit})`}
@@ -355,6 +487,7 @@ export function LaneContractsDrawerSection({
               type="number"
               step="any"
               min="0"
+              aria-label="Committed spend"
               value={spend}
               onChange={(e) => setSpend(e.target.value)}
               placeholder="Spend (€ EUR)"
@@ -362,18 +495,42 @@ export function LaneContractsDrawerSection({
             />
             <input
               type="date"
+              required
+              aria-label="Contract start date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
               className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
             />
             <input
               type="date"
+              aria-label="Contract end date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
               className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
             />
-          </div>
+          </fieldset>
           <div className="flex justify-end gap-1.5">
+            {pending?.conflict && (
+              <button type="button" disabled={busy} onClick={async () => {
+                setSaving(true);
+                try {
+                  const refreshed = await onChanged();
+                  if (!refreshed) {
+                    setError("Could not refresh saved contracts. Try again.");
+                    return;
+                  }
+                  setPending(null);
+                  setAdding(false);
+                  setVolume("");
+                  setSpend("");
+                  setError(null);
+                } catch (err) {
+                  setError(err instanceof Error ? err.message : "Failed to refresh saved contracts");
+                } finally { setSaving(false); }
+              }} className="rounded border border-amber-500 px-2 py-1 text-amber-200">
+                Review Saved Contracts
+              </button>
+            )}
             <button
               type="button"
               onClick={() => setAdding(false)}
@@ -383,10 +540,10 @@ export function LaneContractsDrawerSection({
             </button>
             <button
               type="submit"
-              disabled={saving}
+              disabled={busy || pending?.conflict}
               className="rounded bg-sky-500 hover:bg-sky-400 px-2.5 py-1 text-[11px] font-semibold text-white cursor-pointer"
             >
-              {saving ? "Saving..." : "Save Contract"}
+              {busy ? "Saving..." : awaitingConfirmation ? "Retry Previous Save" : "Save Contract"}
             </button>
           </div>
         </form>

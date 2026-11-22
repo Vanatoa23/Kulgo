@@ -1,6 +1,8 @@
 import {
   AnalyticsSummarySchema,
   SimulateAnalyticsResponseSchema,
+  resolveFacilityRole,
+  resolveLaneDirection,
   type AnalyticsSummary,
   type AnonymizedRiskAlert,
   type CompliancePackId,
@@ -205,7 +207,15 @@ export function evaluateNetworkAnalytics(
     inputsById.set(item.inputId, item);
   }
 
-  const activeLanes = input.lanes.filter((lane) => lane.volumeSharePct > 0);
+  const activeLanes = input.lanes.filter(
+    (lane) =>
+      lane.volumeSharePct > 0 &&
+      resolveLaneDirection(
+        lane,
+        facilitiesById.get(lane.fromFacilityId),
+        facilitiesById.get(lane.toFacilityId),
+      ) !== "DOWNSTREAM",
+  );
   const activeSignals = input.riskSignals.filter((signal) =>
     isSignalActive(signal, asOfDate.toISOString()),
   );
@@ -528,7 +538,10 @@ export function evaluateNetworkAnalytics(
   const activeSupplierIds = new Set(activeLanes.map((l) => l.fromFacilityId));
   const activeSupplierFacilities = Array.from(activeSupplierIds)
     .map((id) => facilitiesById.get(id))
-    .filter((f): f is Facility => f !== undefined && !f.isOwnFacility);
+    .filter(
+      (f): f is Facility =>
+        f !== undefined && resolveFacilityRole(f) === "SUPPLIER",
+    );
 
   const signalsByLane = matchNetworkRiskSignals(
     activeLanes, input.facilities, activeSignals, asOfDate.toISOString(),

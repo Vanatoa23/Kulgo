@@ -708,3 +708,73 @@ describe("Analytics & What-If Commercial Consistency (Issue #42)", () => {
     ).toBe(true);
   });
 });
+
+
+describe("What-If split source quantities", () => {
+  for (const viewMode of ["RUN_RATE", "PERIOD_WINDOW"] as const) {
+    it.each(["legacy", "mixed", "contract"])(`keeps physical totals on spend-only edits (${viewMode}, %s)`, async (source) => {
+      const app = createTestApp();
+      const { cookie, supA, laneA, laneB } = await setupTwoSupplierNetwork(app, {
+        lane1AnnualVolume: 100, lane2AnnualVolume: 100,
+        lane1AnnualSpendEur: 1000, lane2AnnualSpendEur: 1000,
+      });
+      const patch = async (laneId: string, payload: Record<string, unknown>) => {
+        const res = await app.request(`/api/v1/workspace/lanes/${laneId}`, {
+          method: "PATCH", headers: { "Content-Type": "application/json", Cookie: cookie },
+          body: JSON.stringify(payload),
+        });
+        expect(res.status).toBe(200);
+      };
+      await patch(laneA.laneId, { volumeUnit: "KG", annualVolume: 100000 });
+      await patch(laneB.laneId, { fromFacilityId: supA.facilityId });
+      if (source !== "legacy") {
+        await createContract(app, cookie, {
+          supplierFacilityId: supA.facilityId, title: "Source commitments",
+          contractType: "FRAMEWORK", startDate: "2025-01-01", endDate: null,
+          lines: [laneA, ...(source === "contract" ? [laneB] : [])].map((lane) => ({
+            laneId: lane.laneId, cadence: "PER_YEAR", committedVolume: 100,
+            unit: "TONNES", committedSpend: 1000, currency: "EUR",
+          })),
+        });
+      }
+      const split = await app.request("/api/v1/workspace/lanes/allocation-splits", {
+        method: "PATCH", headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ splits: [
+          { laneId: laneA.laneId, allocationSplitPct: 75 },
+          { laneId: laneB.laneId, allocationSplitPct: 25 },
+        ] }),
+      });
+      expect(split.status).toBe(200);
+      const result = await app.request("/api/v1/analytics/simulate", {
+        method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ viewMode, laneChanges: [{ laneId: laneA.laneId, annualSpendEur: 500000 }] }),
+      });
+      expect(result.status).toBe(200);
+      const simulation = SimulateAnalyticsResponseSchema.parse(await result.json());
+      const baseline = simulation.baseline.financialRisk!.laneCommercials!;
+      const simulated = simulation.simulated.financialRisk!.laneCommercials!;
+      expect(baseline.reduce((sum, lane) => sum + (lane.activeVolume ?? 0), 0)).toBeCloseTo(200, 0);
+      for (const lane of simulated) {
+        const original = baseline.find((l) => l.laneId === lane.laneId)!;
+        expect(lane.activeVolume).toBeCloseTo(original.activeVolume!, 4);
+      }
+      expect(simulation.simulated.financialRisk!.totalActiveSpendEur)
+        .not.toBe(simulation.baseline.financialRisk!.totalActiveSpendEur);
+      expect(simulation.simulated.hhiMetrics).toEqual(simulation.baseline.hhiMetrics);
+      expect(baseline.find((lane) => lane.laneId === laneA.laneId)?.activeSpendEur).toBe(1500);
+      expect(baseline.find((lane) => lane.laneId === laneB.laneId)?.activeSpendEur).toBe(500);
+      expect(simulated.find((lane) => lane.laneId === laneA.laneId)?.activeSpendEur).toBe(500000);
+      expect(simulated.find((lane) => lane.laneId === laneB.laneId)?.activeSpendEur).toBe(500);
+
+      const noOpResponse = await app.request("/api/v1/analytics/simulate", {
+        method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ viewMode, laneChanges: [{ laneId: laneA.laneId, annualSpendEur: 1500 }] }),
+      });
+      expect(noOpResponse.status).toBe(200);
+      const noOp = SimulateAnalyticsResponseSchema.parse(await noOpResponse.json());
+      expect(noOp.simulated.financialRisk).toEqual(noOp.baseline.financialRisk);
+      expect(noOp.simulated.hhiMetrics).toEqual(noOp.baseline.hhiMetrics);
+      expect(noOp.simulated.esg).toEqual(noOp.baseline.esg);
+    });
+  }
+});

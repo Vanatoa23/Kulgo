@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { estimateLaneCo2eTonnes, haversineDistanceKm } from "@kulgo/engine";
 import {
   ContractLineSchema,
@@ -8,6 +8,8 @@ import {
   SupplyInputSchema,
   SupplyLaneSchema,
   WorkspaceNetworkResponseSchema,
+  resolveFacilityRole,
+  resolveLaneDirection,
   type Contract,
   type ContractLine,
   type CreateContractInput,
@@ -41,6 +43,13 @@ export class WorkspaceValidationError extends Error {
   constructor(message: string) {
     super(message);
     this.name = "WorkspaceValidationError";
+  }
+}
+
+export class WorkspaceConflictError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "WorkspaceConflictError";
   }
 }
 
@@ -269,6 +278,39 @@ export interface WorkspaceRepository {
     contractLineId: string,
     input: UpdateContractLineInput,
   ): Promise<ContractLine | null>;
+  createContractWithLinesAtomic(
+    orgId: string,
+    input: CreateContractWithLinesAtomicInput,
+  ): Promise<CreateContractWithLinesAtomicResult>;
+  applyAllocationSplitsAtomic(
+    orgId: string,
+    updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }>;
+}
+
+export interface CreateContractWithLinesAtomicInput {
+  contract: CreateContractInput;
+  lines: ReadonlyArray<Omit<CreateContractLineInput, "contractId">>;
+  preserveLegacyBaseForLaneId?: string;
+  idempotencyKey?: string;
+}
+
+export interface CreateContractWithLinesAtomicResult {
+  contract: Contract;
+  lines: ContractLine[];
+  preservedBase?: { contract: Contract; lines: ContractLine[] };
+  deduplicated?: boolean;
+}
+
+function deterministicUuid(namespace: string, orgId: string, key: string): string {
+  const bytes = createHash("sha256")
+    .update(`${namespace}:${orgId}:${key}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
 function parseConversionFactorsJson(
@@ -338,7 +380,76 @@ function mapSupplyInputRow(row: Record<string, unknown>): SupplyInput {
   });
 }
 
+function normalizeFacilityRoleAndOwn(input: {
+  relationshipRole?: Facility["relationshipRole"];
+  isOwnFacility?: boolean;
+  kind?: Facility["kind"];
+}): {
+  relationshipRole: NonNullable<Facility["relationshipRole"]>;
+  isOwnFacility: boolean;
+} {
+  if (input.relationshipRole) {
+    return {
+      relationshipRole: input.relationshipRole,
+      isOwnFacility: input.relationshipRole === "OWN",
+    };
+  }
+  const role = resolveFacilityRole(input);
+  return {
+    relationshipRole: role,
+    isOwnFacility: role === "OWN",
+  };
+}
+
+function resolveUpdatedFacilityRoleAndOwn(
+  existing: Facility,
+  input: UpdateFacilityInput,
+  nextKind: Facility["kind"],
+): {
+  relationshipRole: NonNullable<Facility["relationshipRole"]>;
+  isOwnFacility: boolean;
+} {
+  if (input.relationshipRole !== undefined) {
+    return {
+      relationshipRole: input.relationshipRole,
+      isOwnFacility: input.relationshipRole === "OWN",
+    };
+  }
+  const existingRole = resolveFacilityRole(existing);
+  if (input.isOwnFacility !== undefined) {
+    if (input.isOwnFacility) {
+      return { relationshipRole: "OWN", isOwnFacility: true };
+    }
+    return {
+      relationshipRole:
+        existingRole === "OWN"
+          ? nextKind === "CUSTOMER"
+            ? "CLIENT"
+            : "SUPPLIER"
+          : existingRole,
+      isOwnFacility: false,
+    };
+  }
+  return {
+    relationshipRole: existingRole,
+    isOwnFacility: existingRole === "OWN",
+  };
+}
+
 function mapFacilityRow(row: Record<string, unknown>): Facility {
+  const isOwnFacility = Boolean(row.isOwnFacility);
+  const rawRole =
+    row.relationshipRole === "SUPPLIER" ||
+    row.relationshipRole === "OWN" ||
+    row.relationshipRole === "CLIENT"
+      ? row.relationshipRole
+      : undefined;
+  const normalized = normalizeFacilityRoleAndOwn({
+    relationshipRole: rawRole,
+    isOwnFacility,
+    kind: row.kind as Facility["kind"],
+  });
+
   return FacilitySchema.parse({
     facilityId: row.facilityId,
     ownerOrgId: row.ownerOrgId,
@@ -349,7 +460,8 @@ function mapFacilityRow(row: Record<string, unknown>): Facility {
     regionCode: typeof row.regionCode === "string" ? row.regionCode : null,
     lat: Number(row.lat),
     lng: Number(row.lng),
-    isOwnFacility: Boolean(row.isOwnFacility),
+    isOwnFacility: normalized.isOwnFacility,
+    relationshipRole: normalized.relationshipRole,
     isPartnerVerified: Boolean(row.isPartnerVerified),
     sector: typeof row.sector === "string" ? row.sector : null,
     esgBadges: Array.isArray(row.esgBadges) ? row.esgBadges : [],
@@ -376,11 +488,21 @@ function mapFacilityRow(row: Record<string, unknown>): Facility {
 }
 
 function mapSupplyLaneRow(row: Record<string, unknown>): SupplyLane {
+  const rawDirection =
+    row.direction === "UPSTREAM" ||
+    row.direction === "INTERNAL" ||
+    row.direction === "DOWNSTREAM"
+      ? row.direction
+      : undefined;
   return SupplyLaneSchema.parse({
     laneId: row.laneId,
     ownerOrgId: row.ownerOrgId,
     fromFacilityId: row.fromFacilityId,
     toFacilityId: row.toFacilityId,
+    ...(rawDirection !== undefined ? { direction: rawDirection } : {}),
+    ...(typeof row.allocationSplitPct === "number"
+      ? { allocationSplitPct: row.allocationSplitPct }
+      : {}),
     inputId: typeof row.inputId === "string" ? row.inputId : null,
     materialCategory: row.materialCategory,
     transportMode: row.transportMode,
@@ -502,6 +624,15 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     hook: (orgId: string, facilityId: string) => Promise<void>,
   ): void {
     this.onFacilityDeleted = hook;
+  }
+
+  private runInTransaction<T>(
+    work: (tx: ArcadeDbClient) => Promise<T>,
+  ): Promise<T> {
+    if (typeof this.db.transaction === "function") {
+      return this.db.transaction(work);
+    }
+    return work(this.db);
   }
 
   async getNetwork(
@@ -901,7 +1032,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
-              lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
+              lat, lng, isOwnFacility, relationshipRole, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
               defaultCarryingCostPct, annualElectricityMwh, renewableElectricityPct,
               renewableInstrumentsVerified, annualRevenueEur
        FROM Facility WHERE ownerOrgId = :orgId`,
@@ -918,7 +1049,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
-              lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
+              lat, lng, isOwnFacility, relationshipRole, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
               defaultCarryingCostPct, annualElectricityMwh, renewableElectricityPct,
               renewableInstrumentsVerified, annualRevenueEur
        FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :orgId LIMIT 1`,
@@ -948,6 +1079,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     importedId?: string,
   ): Promise<Facility> {
     const safeOrgId = assertOrgId(orgId);
+    const roleState = normalizeFacilityRoleAndOwn({
+      relationshipRole: input.relationshipRole,
+      isOwnFacility: input.isOwnFacility,
+      kind: input.kind,
+    });
     const facility = FacilitySchema.parse({
       facilityId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
@@ -958,7 +1094,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       regionCode: input.regionCode ?? null,
       lat: input.lat,
       lng: input.lng,
-      isOwnFacility: input.isOwnFacility,
+      isOwnFacility: roleState.isOwnFacility,
+      relationshipRole: roleState.relationshipRole,
       isPartnerVerified: false,
       sector: input.sector ?? null,
       esgBadges: input.esgBadges ?? [],
@@ -996,6 +1133,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         lng = :lng,
         locationWkt = :locationWkt,
         isOwnFacility = :isOwnFacility,
+        relationshipRole = :relationshipRole,
         isPartnerVerified = :isPartnerVerified,
         sector = :sector,
         esgBadges = :esgBadges,
@@ -1017,6 +1155,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         lng: facility.lng,
         locationWkt,
         isOwnFacility: facility.isOwnFacility,
+        relationshipRole: facility.relationshipRole ?? roleState.relationshipRole,
         isPartnerVerified: facility.isPartnerVerified,
         sector: facility.sector,
         esgBadges: facility.esgBadges,
@@ -1042,10 +1181,13 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const existing = await this.findFacility(safeOrgId, facilityId);
     if (!existing) return null;
 
+    const nextKind = input.kind !== undefined ? input.kind : existing.kind;
+    const roleState = resolveUpdatedFacilityRoleAndOwn(existing, input, nextKind);
+
     const updated = FacilitySchema.parse({
       ...existing,
       name: input.name !== undefined ? input.name : existing.name,
-      kind: input.kind !== undefined ? input.kind : existing.kind,
+      kind: nextKind,
       locationPrecision:
         input.locationPrecision !== undefined
           ? input.locationPrecision
@@ -1058,10 +1200,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         input.regionCode !== undefined ? input.regionCode : existing.regionCode,
       lat: input.lat !== undefined ? input.lat : existing.lat,
       lng: input.lng !== undefined ? input.lng : existing.lng,
-      isOwnFacility:
-        input.isOwnFacility !== undefined
-          ? input.isOwnFacility
-          : existing.isOwnFacility,
+      isOwnFacility: roleState.isOwnFacility,
+      relationshipRole: roleState.relationshipRole,
       sector: input.sector !== undefined ? input.sector : existing.sector,
       esgBadges:
         input.esgBadges !== undefined ? input.esgBadges : existing.esgBadges,
@@ -1099,6 +1239,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         lng = :lng,
         locationWkt = :locationWkt,
         isOwnFacility = :isOwnFacility,
+        relationshipRole = :relationshipRole,
         sector = :sector,
         esgBadges = :esgBadges,
         estimatedScope12Tco2e = :estimatedScope12Tco2e,
@@ -1118,6 +1259,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         lng: updated.lng,
         locationWkt,
         isOwnFacility: updated.isOwnFacility,
+        relationshipRole: updated.relationshipRole ?? roleState.relationshipRole,
         sector: updated.sector,
         esgBadges: updated.esgBadges,
         estimatedScope12Tco2e: updated.estimatedScope12Tco2e,
@@ -1322,7 +1464,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const safeOrgId = assertOrgId(orgId);
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, inputId, materialCategory,
+      `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
               transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
               contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
               riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
@@ -1341,7 +1483,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const safeOrgId = assertOrgId(orgId);
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, inputId, materialCategory,
+      `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
               transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
               contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
               riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
@@ -1397,11 +1539,17 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       explicitEstimatedLaneCo2e: input.estimatedLaneCo2e,
     });
 
+    const direction =
+      input.direction ?? resolveLaneDirection({}, fromFacility, toFacility);
     const lane = SupplyLaneSchema.parse({
       laneId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       fromFacilityId: input.fromFacilityId,
       toFacilityId: input.toFacilityId,
+      direction,
+      ...(input.allocationSplitPct !== undefined
+        ? { allocationSplitPct: input.allocationSplitPct }
+        : {}),
       inputId,
       materialCategory: input.materialCategory,
       transportMode: input.transportMode,
@@ -1461,6 +1609,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
          ownerOrgId = :ownerOrgId,
          fromFacilityId = :fromFacilityId,
          toFacilityId = :toFacilityId,
+         direction = :direction,
+         allocationSplitPct = :allocationSplitPct,
          inputId = :inputId,
          materialCategory = :materialCategory,
          transportMode = :transportMode,
@@ -1490,6 +1640,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         ownerOrgId: lane.ownerOrgId,
         fromFacilityId: lane.fromFacilityId,
         toFacilityId: lane.toFacilityId,
+        direction: lane.direction ?? "UPSTREAM",
+        allocationSplitPct: lane.allocationSplitPct ?? null,
         inputId: lane.inputId,
         materialCategory: lane.materialCategory,
         transportMode: lane.transportMode,
@@ -1605,10 +1757,20 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
             : existing.estimatedLaneCo2e,
     });
 
+    const nextDirection =
+      input.direction !== undefined
+        ? input.direction
+        : endpointsChanged
+          ? resolveLaneDirection({}, fromFacility, toFacility)
+          : (existing.direction ?? resolveLaneDirection({}, fromFacility, toFacility));
     const updated = SupplyLaneSchema.parse({
       ...existing,
       fromFacilityId: nextFromId,
       toFacilityId: nextToId,
+      direction: nextDirection,
+      ...(input.allocationSplitPct !== undefined
+        ? { allocationSplitPct: input.allocationSplitPct }
+        : {}),
       inputId: nextInputId,
       materialCategory:
         input.materialCategory !== undefined
@@ -1709,6 +1871,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       await this.db.command(
         "sql",
         `UPDATE SUPPLIES_LANE SET
+          direction = :direction,
+          allocationSplitPct = :allocationSplitPct,
           inputId = :inputId,
           materialCategory = :materialCategory,
           transportMode = :transportMode,
@@ -1735,6 +1899,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           economicAttributionRatio = :economicAttributionRatio
          WHERE laneId = :laneId AND ownerOrgId = :orgId`,
         {
+          direction: updated.direction ?? nextDirection,
+          allocationSplitPct: updated.allocationSplitPct ?? null,
           inputId: updated.inputId,
           materialCategory: updated.materialCategory,
           transportMode: updated.transportMode,
@@ -2110,6 +2276,591 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
 
     return updated;
   }
+
+  async createContractWithLinesAtomic(
+    orgId: string,
+    input: CreateContractWithLinesAtomicInput,
+  ): Promise<CreateContractWithLinesAtomicResult> {
+    const safeOrgId = assertOrgId(orgId);
+    const trimmedIdem = input.idempotencyKey?.trim() || undefined;
+    const targetContractId = trimmedIdem
+      ? deterministicUuid("kulgo-contract-idem", safeOrgId, trimmedIdem)
+      : randomUUID();
+
+    return this.runInTransaction(async (tx) => {
+      // 1. Idempotency replay check inside transaction
+      if (trimmedIdem) {
+        const existingRows = await tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT contractId, ownerOrgId, supplierFacilityId, title, contractType,
+                  pricingModel, expiryBehavior, confidence, startDate, endDate,
+                  noticePeriodDays, nonRenewalNoticeGiven, archiveEffectiveDate,
+                  isManuallyArchived, incoterms, notes, idempotencyRequestJson
+           FROM Contract WHERE contractId = :contractId AND ownerOrgId = :orgId LIMIT 1`,
+          { contractId: targetContractId, orgId: safeOrgId },
+        );
+        if (existingRows[0]) {
+          const existingContract = mapContractRow(existingRows[0]);
+          const lineRows = await tx.query<Record<string, unknown>>(
+            "sql",
+            `SELECT contractLineId, contractId, ownerOrgId, laneId, inputId, cadence,
+                    committedVolume, unit, committedSpend, unitPrice, currency,
+                    startDateOverride, endDateOverride
+             FROM ContractLine WHERE contractId = :contractId AND ownerOrgId = :orgId`,
+            { contractId: targetContractId, orgId: safeOrgId },
+          );
+          const existingLines = lineRows.map(mapContractLineRow);
+          const laneInputs = await tx.query<{ laneId: string; inputId: string | null }>(
+            "sql",
+            "SELECT laneId, inputId FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId",
+            { orgId: safeOrgId },
+          );
+          if (!contractRequestMatches(input, existingRows[0].idempotencyRequestJson,
+            existingContract, existingLines,
+            new Map(laneInputs.map((lane) => [lane.laneId, lane.inputId])))) {
+            throw new WorkspaceConflictError(
+              "Idempotency key was already used for a different contract payload",
+            );
+          }
+          return {
+            contract: existingContract,
+            lines: existingLines,
+            deduplicated: true,
+          };
+        }
+      }
+
+      // 2. Pre-validate supplierFacilityId, all laneIds, and all inputIds BEFORE any write
+      const supplierRows = await tx.query<Record<string, unknown>>(
+        "sql",
+        "SELECT facilityId FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :orgId LIMIT 1",
+        { facilityId: input.contract.supplierFacilityId, orgId: safeOrgId },
+      );
+      if (!supplierRows[0]) {
+        throw new WorkspaceValidationError(
+          "Referenced supplierFacilityId does not exist in this organization",
+        );
+      }
+
+      const laneRows = await tx.query<Record<string, unknown>>(
+        "sql",
+        `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
+                transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
+                contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
+                riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
+                unitLandedCostEur, ordinaryFreightCostPerUnitEur, customAnnualDisruptionProb, customTtrDays,
+                productEmissionFactorTco2ePerUnit, pcfVerified, economicAttributionRatio
+         FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId`,
+        { orgId: safeOrgId },
+      );
+      const laneById = new Map(
+        laneRows.map((r) => {
+          const l = mapSupplyLaneRow(r);
+          return [l.laneId, l] as const;
+        }),
+      );
+
+      for (const lineInput of input.lines) {
+        if (!laneById.has(lineInput.laneId)) {
+          throw new WorkspaceValidationError(
+            "Referenced laneId does not exist in this organization",
+          );
+        }
+        if (lineInput.inputId) {
+          const inpRows = await tx.query<Record<string, unknown>>(
+            "sql",
+            "SELECT inputId FROM SupplyInput WHERE inputId = :inputId AND ownerOrgId = :orgId LIMIT 1",
+            { inputId: lineInput.inputId, orgId: safeOrgId },
+          );
+          if (!inpRows[0]) {
+            throw new WorkspaceValidationError(
+              "Referenced inputId does not exist in this organization",
+            );
+          }
+        }
+      }
+
+      // 3. Atomically preserve legacy Base Agreement if requested and not yet created
+      let preservedBase: { contract: Contract; lines: ContractLine[] } | undefined;
+      if (
+        input.preserveLegacyBaseForLaneId &&
+        input.contract.contractType === "SPOT_PO"
+      ) {
+        const targetLane = laneById.get(input.preserveLegacyBaseForLaneId);
+        if (!targetLane) {
+          throw new WorkspaceValidationError(
+            "Referenced preserveLegacyBaseForLaneId does not exist in this organization",
+          );
+        }
+        const existingLaneLines = await tx.query<Record<string, unknown>>(
+          "sql",
+          "SELECT contractLineId FROM ContractLine WHERE laneId = :laneId AND ownerOrgId = :orgId LIMIT 1",
+          { laneId: targetLane.laneId, orgId: safeOrgId },
+        );
+        const baseContractId = deterministicUuid(
+          "kulgo-legacy-base",
+          safeOrgId,
+          targetLane.laneId,
+        );
+        const existingBaseContract = await tx.query<Record<string, unknown>>(
+          "sql",
+          "SELECT contractId FROM Contract WHERE contractId = :contractId AND ownerOrgId = :orgId LIMIT 1",
+          { contractId: baseContractId, orgId: safeOrgId },
+        );
+        const hasLegacyValues =
+          (targetLane.annualVolume !== null && targetLane.annualVolume > 0) ||
+          (targetLane.annualSpendEur !== null && targetLane.annualSpendEur > 0);
+
+        if (
+          existingLaneLines.length === 0 &&
+          existingBaseContract.length === 0 &&
+          hasLegacyValues
+        ) {
+          const baseContract = ContractSchema.parse({
+            contractId: baseContractId,
+            ownerOrgId: safeOrgId,
+            supplierFacilityId: targetLane.fromFacilityId,
+            title: "Base Agreement",
+            contractType: "FRAMEWORK",
+            pricingModel: "FIXED",
+            expiryBehavior: "HOLDOVER",
+            confidence: "ESTIMATED",
+            startDate: `${new Date().getUTCFullYear()}-01-01`,
+            endDate: null,
+            noticePeriodDays: 30,
+            nonRenewalNoticeGiven: false,
+            archiveEffectiveDate: null,
+            isManuallyArchived: false,
+            incoterms: null,
+            notes: null,
+          });
+          const baseLine = ContractLineSchema.parse({
+            contractLineId: deterministicUuid(
+              "kulgo-legacy-base-line",
+              safeOrgId,
+              targetLane.laneId,
+            ),
+            contractId: baseContract.contractId,
+            ownerOrgId: safeOrgId,
+            laneId: targetLane.laneId,
+            inputId: targetLane.inputId,
+            cadence: "PER_YEAR",
+            committedVolume: targetLane.annualVolume,
+            unit: targetLane.volumeUnit,
+            committedSpend: targetLane.annualSpendEur,
+            unitPrice: null,
+            currency: "EUR",
+            startDateOverride: null,
+            endDateOverride: null,
+          });
+          await tx.command(
+            "sql",
+            `CREATE VERTEX Contract SET
+              contractId = :contractId, ownerOrgId = :ownerOrgId,
+              supplierFacilityId = :supplierFacilityId, title = :title,
+              contractType = :contractType, pricingModel = :pricingModel,
+              expiryBehavior = :expiryBehavior, confidence = :confidence,
+              startDate = :startDate, endDate = :endDate,
+              noticePeriodDays = :noticePeriodDays, nonRenewalNoticeGiven = :nonRenewalNoticeGiven,
+              archiveEffectiveDate = :archiveEffectiveDate, isManuallyArchived = :isManuallyArchived,
+              incoterms = :incoterms, notes = :notes`,
+            { ...baseContract },
+          );
+          await tx.command(
+            "sql",
+            `CREATE VERTEX ContractLine SET
+              contractLineId = :contractLineId, contractId = :contractId,
+              ownerOrgId = :ownerOrgId, laneId = :laneId, inputId = :inputId,
+              cadence = :cadence, committedVolume = :committedVolume, unit = :unit,
+              committedSpend = :committedSpend, unitPrice = :unitPrice, currency = :currency,
+              startDateOverride = :startDateOverride, endDateOverride = :endDateOverride`,
+            { ...baseLine },
+          );
+          preservedBase = { contract: baseContract, lines: [baseLine] };
+        }
+      }
+
+      // 4. Create requested contract + lines in the same transaction
+      const defaultExpiry =
+        input.contract.contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER";
+      const contract = ContractSchema.parse({
+        contractId: targetContractId,
+        ownerOrgId: safeOrgId,
+        supplierFacilityId: input.contract.supplierFacilityId,
+        title: input.contract.title,
+        contractType: input.contract.contractType,
+        pricingModel: input.contract.pricingModel,
+        expiryBehavior: input.contract.expiryBehavior ?? defaultExpiry,
+        confidence: input.contract.confidence,
+        startDate: input.contract.startDate,
+        endDate: input.contract.endDate ?? null,
+        noticePeriodDays: input.contract.noticePeriodDays,
+        nonRenewalNoticeGiven: input.contract.nonRenewalNoticeGiven,
+        archiveEffectiveDate: null,
+        isManuallyArchived: false,
+        incoterms: input.contract.incoterms ?? null,
+        notes: input.contract.notes ?? null,
+      });
+
+      await tx.command(
+        "sql",
+        `CREATE VERTEX Contract SET
+          contractId = :contractId, ownerOrgId = :ownerOrgId,
+          supplierFacilityId = :supplierFacilityId, title = :title,
+          contractType = :contractType, pricingModel = :pricingModel,
+          expiryBehavior = :expiryBehavior, confidence = :confidence,
+          startDate = :startDate, endDate = :endDate,
+          noticePeriodDays = :noticePeriodDays, nonRenewalNoticeGiven = :nonRenewalNoticeGiven,
+          archiveEffectiveDate = :archiveEffectiveDate, isManuallyArchived = :isManuallyArchived,
+          incoterms = :incoterms, notes = :notes,
+          idempotencyRequestJson = :idempotencyRequestJson`,
+        { ...contract, idempotencyRequestJson: trimmedIdem
+          ? contractRequestSnapshot(input, contract, new Map(
+              Array.from(laneById.values()).map((lane) => [lane.laneId, lane.inputId]),
+            ))
+          : null },
+      );
+
+      const createdLines: ContractLine[] = [];
+      for (let i = 0; i < input.lines.length; i += 1) {
+        const lineInput = input.lines[i]!;
+        const lane = laneById.get(lineInput.laneId)!;
+        const line = ContractLineSchema.parse({
+          contractLineId: trimmedIdem
+            ? deterministicUuid("kulgo-contract-line-idem", safeOrgId, `${trimmedIdem}:${i}`)
+            : randomUUID(),
+          contractId: contract.contractId,
+          ownerOrgId: safeOrgId,
+          laneId: lineInput.laneId,
+          inputId: lineInput.inputId ?? lane.inputId,
+          cadence: lineInput.cadence,
+          committedVolume: lineInput.committedVolume ?? null,
+          unit: lineInput.unit,
+          committedSpend: lineInput.committedSpend ?? null,
+          unitPrice: lineInput.unitPrice ?? null,
+          currency: lineInput.currency,
+          startDateOverride: lineInput.startDateOverride ?? null,
+          endDateOverride: lineInput.endDateOverride ?? null,
+        });
+        await tx.command(
+          "sql",
+          `CREATE VERTEX ContractLine SET
+            contractLineId = :contractLineId, contractId = :contractId,
+            ownerOrgId = :ownerOrgId, laneId = :laneId, inputId = :inputId,
+            cadence = :cadence, committedVolume = :committedVolume, unit = :unit,
+            committedSpend = :committedSpend, unitPrice = :unitPrice, currency = :currency,
+            startDateOverride = :startDateOverride, endDateOverride = :endDateOverride`,
+          { ...line },
+        );
+        createdLines.push(line);
+      }
+
+      // Double-counting guardrail: archive any active ESTIMATE contract on the same lane(s)
+      if (
+        (contract.contractType === "FRAMEWORK" ||
+          contract.contractType === "SPOT_PO") &&
+        createdLines.length > 0
+      ) {
+        const affectedLaneIds = new Set(createdLines.map((l) => l.laneId));
+        const allOrgLines = await tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT contractId, laneId FROM ContractLine WHERE ownerOrgId = :orgId`,
+          { orgId: safeOrgId },
+        );
+        const siblingContractIds = new Set(
+          allOrgLines
+            .filter(
+              (r) =>
+                affectedLaneIds.has(String(r.laneId)) &&
+                String(r.contractId) !== contract.contractId,
+            )
+            .map((r) => String(r.contractId)),
+        );
+        for (const siblingId of siblingContractIds) {
+          const siblingRows = await tx.query<Record<string, unknown>>(
+            "sql",
+            `SELECT contractId, contractType, isManuallyArchived
+             FROM Contract WHERE contractId = :contractId AND ownerOrgId = :orgId LIMIT 1`,
+            { contractId: siblingId, orgId: safeOrgId },
+          );
+          const sibling = siblingRows[0];
+          if (
+            sibling &&
+            String(sibling.contractType) === "ESTIMATE" &&
+            !Boolean(sibling.isManuallyArchived)
+          ) {
+            await tx.command(
+              "sql",
+              `UPDATE Contract SET
+                isManuallyArchived = true,
+                archiveEffectiveDate = :archiveEffectiveDate
+               WHERE contractId = :contractId AND ownerOrgId = :orgId`,
+              {
+                archiveEffectiveDate: contract.startDate,
+                contractId: siblingId,
+                orgId: safeOrgId,
+              },
+            );
+          }
+        }
+      }
+
+      return {
+        contract,
+        lines: createdLines,
+        ...(preservedBase ? { preservedBase } : {}),
+      };
+    });
+  }
+
+  async applyAllocationSplitsAtomic(
+    orgId: string,
+    updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }> {
+    const safeOrgId = assertOrgId(orgId);
+    return this.runInTransaction(async (tx) => {
+      const [facilityRows, laneRows] = await Promise.all([
+        tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT facilityId, ownerOrgId, name, kind, relationshipRole, countryCode, lat, lng,
+                  locationPrecision, isOwnFacility, tier, sector, regionCode, notes
+           FROM Facility WHERE ownerOrgId = :orgId`,
+          { orgId: safeOrgId },
+        ),
+        tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
+                  transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
+                  contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
+                  riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
+                  unitLandedCostEur, ordinaryFreightCostPerUnitEur, customAnnualDisruptionProb, customTtrDays,
+                  productEmissionFactorTco2ePerUnit, pcfVerified, economicAttributionRatio
+           FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId`,
+          { orgId: safeOrgId },
+        ),
+      ]);
+
+      const { updatedLanes } = computeAtomicSplitMutations(
+        facilityRows.map(mapFacilityRow),
+        laneRows.map(mapSupplyLaneRow),
+        updates,
+      );
+
+      for (const lane of updatedLanes) {
+        await tx.command(
+          "sql",
+          `UPDATE SUPPLIES_LANE SET
+            allocationSplitPct = :allocationSplitPct,
+            volumeSharePct = :volumeSharePct
+           WHERE laneId = :laneId AND ownerOrgId = :orgId`,
+          {
+            allocationSplitPct: lane.allocationSplitPct ?? null,
+            volumeSharePct: lane.volumeSharePct,
+            laneId: lane.laneId,
+            orgId: safeOrgId,
+          },
+        );
+      }
+
+      // Signed ContractLines are intentionally preserved untouched; the engine applies
+      // allocationSplitPct to derived active quantities across the split group.
+      return { lanes: updatedLanes, contractLines: [] };
+    });
+  }
+}
+
+// Private immutable replay metadata, deliberately excluded from the public Contract schema.
+function contractRequestSnapshot(
+  input: CreateContractWithLinesAtomicInput, contract: Contract,
+  laneInputs: ReadonlyMap<string, string | null>,
+): string {
+  return JSON.stringify({
+    contract,
+    lines: input.lines.map((line) => ({ ...line, inputId: line.inputId ?? laneInputs.get(line.laneId) ?? null })),
+    laneInputs: Array.from(laneInputs).filter(([id]) => input.lines.some((line) => line.laneId === id)),
+    preserveLegacyBaseForLaneId: input.preserveLegacyBaseForLaneId ?? null,
+  });
+}
+
+function contractRequestMatches(
+  input: CreateContractWithLinesAtomicInput, snapshot: unknown,
+  currentContract: Contract, currentLines: readonly ContractLine[],
+  laneInputs: ReadonlyMap<string, string | null>,
+): boolean {
+  if (typeof snapshot === "string" && snapshot) {
+    const original = JSON.parse(snapshot) as {
+      contract: Contract;
+      lines: Array<Omit<CreateContractLineInput, "contractId">>;
+      laneInputs: Array<[string, string | null]>;
+      preserveLegacyBaseForLaneId: string | null;
+    };
+    return (input.preserveLegacyBaseForLaneId ?? null) === original.preserveLegacyBaseForLaneId &&
+      contractPayloadMatchesExisting(input, original.contract, original.lines, new Map(original.laneInputs));
+  }
+  // Older records have no original snapshot. Keep their conservative conflict behavior.
+  return contractPayloadMatchesExisting(input, currentContract, currentLines, laneInputs);
+}
+
+function contractPayloadMatchesExisting(
+  input: CreateContractWithLinesAtomicInput,
+  existingContract: Contract,
+  existingLines: ReadonlyArray<Omit<CreateContractLineInput, "contractId">>,
+  laneInputs: ReadonlyMap<string, string | null>,
+): boolean {
+  const defaultExpiry =
+    input.contract.contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER";
+  const expectedExpiry = input.contract.expiryBehavior ?? defaultExpiry;
+
+  if (
+    existingContract.supplierFacilityId !== input.contract.supplierFacilityId ||
+    existingContract.title !== input.contract.title ||
+    existingContract.contractType !== input.contract.contractType ||
+    existingContract.pricingModel !== input.contract.pricingModel ||
+    existingContract.expiryBehavior !== expectedExpiry ||
+    existingContract.confidence !== input.contract.confidence ||
+    existingContract.startDate !== input.contract.startDate ||
+    (existingContract.endDate ?? null) !== (input.contract.endDate ?? null) ||
+    existingContract.noticePeriodDays !== input.contract.noticePeriodDays ||
+    existingContract.nonRenewalNoticeGiven !== input.contract.nonRenewalNoticeGiven ||
+    (existingContract.incoterms ?? null) !== (input.contract.incoterms ?? null) ||
+    (existingContract.notes ?? null) !== (input.contract.notes ?? null)
+  ) {
+    return false;
+  }
+
+  if (existingLines.length !== input.lines.length) {
+    return false;
+  }
+
+  const normalizeLine = (l: {
+    laneId?: string;
+    inputId?: string | null;
+    cadence?: string;
+    committedVolume?: number | null;
+    unit?: string;
+    committedSpend?: number | null;
+    unitPrice?: number | null;
+    currency?: string;
+    startDateOverride?: string | null;
+    endDateOverride?: string | null;
+  }) =>
+    JSON.stringify([
+      l.laneId ?? "",
+      l.inputId ?? null,
+      l.cadence ?? "",
+      l.committedVolume ?? null,
+      l.unit ?? "",
+      l.committedSpend ?? null,
+      l.unitPrice ?? null,
+      (l.currency ?? "EUR").toUpperCase(),
+      l.startDateOverride ?? null,
+      l.endDateOverride ?? null,
+    ]);
+
+  const existingSorted = existingLines.map(normalizeLine).sort();
+  const incomingSorted = input.lines.map((line) => normalizeLine({
+    ...line,
+    inputId: line.inputId ?? laneInputs.get(line.laneId) ?? null,
+  })).sort();
+  for (let i = 0; i < existingSorted.length; i += 1) {
+    if (existingSorted[i] !== incomingSorted[i]) {
+      return false;
+    }
+  }
+  return true;
+}
+
+function getAllocationGroupKey(
+  lane: SupplyLane,
+  facilitiesById: ReadonlyMap<string, Facility>,
+): string {
+  const dir = resolveLaneDirection(
+    lane,
+    facilitiesById.get(lane.fromFacilityId),
+    facilitiesById.get(lane.toFacilityId),
+  );
+  const materialKey = lane.inputId ?? lane.materialCategory.trim().toLowerCase();
+  return `${lane.fromFacilityId}::${dir}::${materialKey}`;
+}
+
+function computeAtomicSplitMutations(
+  allFacilities: readonly Facility[],
+  allLanes: readonly SupplyLane[],
+  updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+): { updatedLanes: SupplyLane[] } {
+  if (updates.length < 2) {
+    throw new WorkspaceValidationError(
+      "Allocation splits require at least 2 sibling lanes",
+    );
+  }
+  const seen = new Set<string>();
+  let totalPct = 0;
+  for (const u of updates) {
+    if (seen.has(u.laneId)) {
+      throw new WorkspaceValidationError("Duplicate laneId in allocation split");
+    }
+    seen.add(u.laneId);
+    if (!Number.isFinite(u.allocationSplitPct) || u.allocationSplitPct < 0 || u.allocationSplitPct > 100) {
+      throw new WorkspaceValidationError("allocationSplitPct must be between 0 and 100");
+    }
+    totalPct += u.allocationSplitPct;
+  }
+  if (Math.abs(totalPct - 100) > 0.01) {
+    throw new WorkspaceValidationError("Allocation splits must sum to 100%");
+  }
+
+  const facilitiesById = new Map(allFacilities.map((f) => [f.facilityId, f]));
+  const laneById = new Map(allLanes.map((l) => [l.laneId, l]));
+  const targetLanes: SupplyLane[] = [];
+  for (const u of updates) {
+    const lane = laneById.get(u.laneId);
+    if (!lane) {
+      throw new WorkspaceValidationError(
+        `Supply lane "${u.laneId}" was not found in this organization`,
+      );
+    }
+    targetLanes.push(lane);
+  }
+
+  const expectedGroupKey = getAllocationGroupKey(targetLanes[0]!, facilitiesById);
+  if (
+    !targetLanes.every(
+      (l) => getAllocationGroupKey(l, facilitiesById) === expectedGroupKey,
+    )
+  ) {
+    throw new WorkspaceValidationError(
+      "All lanes in an allocation split must share the same origin facility, material, and direction",
+    );
+  }
+
+  // Validate full membership against the complete allocation group in the database
+  const fullGroupLanes = allLanes.filter(
+    (l) => getAllocationGroupKey(l, facilitiesById) === expectedGroupKey,
+  );
+  if (
+    fullGroupLanes.length !== targetLanes.length ||
+    !fullGroupLanes.every((l) => seen.has(l.laneId))
+  ) {
+    throw new WorkspaceValidationError(
+      `Allocation split must include all ${fullGroupLanes.length} sibling lanes in this group; refresh and try again`,
+    );
+  }
+
+  const pctByLaneId = new Map(
+    updates.map((u) => [u.laneId, u.allocationSplitPct]),
+  );
+
+  // Preserve source quantities; allocation is applied once by the engine.
+  const updatedLanes = targetLanes.map((lane) => {
+    const pct = pctByLaneId.get(lane.laneId)!;
+    return SupplyLaneSchema.parse({
+      ...lane,
+      allocationSplitPct: pct,
+      volumeSharePct: pct,
+    });
+  });
+
+  return { updatedLanes };
 }
 
 interface StoredFacilityRecord {
@@ -2126,6 +2877,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
   private readonly facilities = new Map<string, StoredFacilityRecord>();
   private readonly lanes = new Map<string, SupplyLane>();
   private readonly contracts = new Map<string, Contract>();
+  private readonly contractRequests = new Map<string, string>();
   private readonly contractLines = new Map<string, ContractLine>();
   private onFacilityDeleted?: (
     orgId: string,
@@ -2397,6 +3149,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     importedId?: string,
   ): Promise<Facility> {
     const safeOrgId = assertOrgId(orgId);
+    const roleState = normalizeFacilityRoleAndOwn({
+      relationshipRole: input.relationshipRole,
+      isOwnFacility: input.isOwnFacility,
+      kind: input.kind,
+    });
     const facility = FacilitySchema.parse({
       facilityId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
@@ -2407,7 +3164,8 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       regionCode: input.regionCode ?? null,
       lat: input.lat,
       lng: input.lng,
-      isOwnFacility: input.isOwnFacility,
+      isOwnFacility: roleState.isOwnFacility,
+      relationshipRole: roleState.relationshipRole,
       isPartnerVerified: false,
       sector: input.sector ?? null,
       esgBadges: input.esgBadges ?? [],
@@ -2445,10 +3203,12 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     if (!record || record.facility.ownerOrgId !== safeOrgId) return null;
 
     const existing = record.facility;
+    const nextKind = input.kind !== undefined ? input.kind : existing.kind;
+    const roleState = resolveUpdatedFacilityRoleAndOwn(existing, input, nextKind);
     const updated = FacilitySchema.parse({
       ...existing,
       name: input.name !== undefined ? input.name : existing.name,
-      kind: input.kind !== undefined ? input.kind : existing.kind,
+      kind: nextKind,
       locationPrecision:
         input.locationPrecision !== undefined
           ? input.locationPrecision
@@ -2461,10 +3221,8 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
         input.regionCode !== undefined ? input.regionCode : existing.regionCode,
       lat: input.lat !== undefined ? input.lat : existing.lat,
       lng: input.lng !== undefined ? input.lng : existing.lng,
-      isOwnFacility:
-        input.isOwnFacility !== undefined
-          ? input.isOwnFacility
-          : existing.isOwnFacility,
+      isOwnFacility: roleState.isOwnFacility,
+      relationshipRole: roleState.relationshipRole,
       sector: input.sector !== undefined ? input.sector : existing.sector,
       esgBadges:
         input.esgBadges !== undefined ? input.esgBadges : existing.esgBadges,
@@ -2693,11 +3451,18 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       explicitEstimatedLaneCo2e: input.estimatedLaneCo2e,
     });
 
+    const direction =
+      input.direction ??
+      resolveLaneDirection({}, fromRecord.facility, toRecord.facility);
     const lane = SupplyLaneSchema.parse({
       laneId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       fromFacilityId: input.fromFacilityId,
       toFacilityId: input.toFacilityId,
+      direction,
+      ...(input.allocationSplitPct !== undefined
+        ? { allocationSplitPct: input.allocationSplitPct }
+        : {}),
       inputId,
       materialCategory: input.materialCategory,
       transportMode: input.transportMode,
@@ -2834,10 +3599,21 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
             : existing.estimatedLaneCo2e,
     });
 
+    const nextDirection =
+      input.direction !== undefined
+        ? input.direction
+        : endpointsChanged
+          ? resolveLaneDirection({}, fromRecord.facility, toRecord.facility)
+          : (existing.direction ??
+            resolveLaneDirection({}, fromRecord.facility, toRecord.facility));
     const updated = SupplyLaneSchema.parse({
       ...existing,
       fromFacilityId: nextFromId,
       toFacilityId: nextToId,
+      direction: nextDirection,
+      ...(input.allocationSplitPct !== undefined
+        ? { allocationSplitPct: input.allocationSplitPct }
+        : {}),
       inputId: nextInputId,
       materialCategory:
         input.materialCategory !== undefined
@@ -3125,5 +3901,272 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     });
     this.contractLines.set(contractLineId, updated);
     return { ...updated };
+  }
+
+  async createContractWithLinesAtomic(
+    orgId: string,
+    input: CreateContractWithLinesAtomicInput,
+  ): Promise<CreateContractWithLinesAtomicResult> {
+    const safeOrgId = assertOrgId(orgId);
+    const trimmedIdem = input.idempotencyKey?.trim() || undefined;
+    const targetContractId = trimmedIdem
+      ? deterministicUuid("kulgo-contract-idem", safeOrgId, trimmedIdem)
+      : randomUUID();
+
+    // 1. Idempotency replay check
+    if (trimmedIdem) {
+      const existing = this.contracts.get(targetContractId);
+      if (existing && existing.ownerOrgId === safeOrgId) {
+        const existingLines = Array.from(this.contractLines.values())
+          .filter(
+            (l) =>
+              l.ownerOrgId === safeOrgId && l.contractId === targetContractId,
+          )
+          .map((l) => ({ ...l }));
+        const laneInputs = new Map(Array.from(this.lanes.values())
+          .filter((lane) => lane.ownerOrgId === safeOrgId)
+          .map((lane) => [lane.laneId, lane.inputId] as const));
+        if (!contractRequestMatches(input, this.contractRequests.get(targetContractId), existing, existingLines, laneInputs)) {
+          throw new WorkspaceConflictError(
+            "Idempotency key was already used for a different contract payload",
+          );
+        }
+        return {
+          contract: { ...existing },
+          lines: existingLines,
+          deduplicated: true,
+        };
+      }
+    }
+
+    // 2. Pre-validate supplier, all lanes, and all inputs BEFORE mutating state
+    const supplier = this.facilities.get(input.contract.supplierFacilityId);
+    if (!supplier || supplier.facility.ownerOrgId !== safeOrgId) {
+      throw new WorkspaceValidationError(
+        "Referenced supplierFacilityId does not exist in this organization",
+      );
+    }
+
+    for (const lineInput of input.lines) {
+      const lane = this.lanes.get(lineInput.laneId);
+      if (!lane || lane.ownerOrgId !== safeOrgId) {
+        throw new WorkspaceValidationError(
+          "Referenced laneId does not exist in this organization",
+        );
+      }
+      if (lineInput.inputId) {
+        const supplyInput = this.inputs.get(lineInput.inputId);
+        if (!supplyInput || supplyInput.ownerOrgId !== safeOrgId) {
+          throw new WorkspaceValidationError(
+            "Referenced inputId does not exist in this organization",
+          );
+        }
+      }
+    }
+
+    // 3. Prepare legacy Base Agreement if needed (without mutating yet)
+    let preservedBase: { contract: Contract; lines: ContractLine[] } | undefined;
+    if (
+      input.preserveLegacyBaseForLaneId &&
+      input.contract.contractType === "SPOT_PO"
+    ) {
+      const targetLane = this.lanes.get(input.preserveLegacyBaseForLaneId);
+      if (!targetLane || targetLane.ownerOrgId !== safeOrgId) {
+        throw new WorkspaceValidationError(
+          "Referenced preserveLegacyBaseForLaneId does not exist in this organization",
+        );
+      }
+      const laneHasLines = Array.from(this.contractLines.values()).some(
+        (l) => l.ownerOrgId === safeOrgId && l.laneId === targetLane.laneId,
+      );
+      const baseContractId = deterministicUuid(
+        "kulgo-legacy-base",
+        safeOrgId,
+        targetLane.laneId,
+      );
+      const hasLegacyValues =
+        (targetLane.annualVolume !== null && targetLane.annualVolume > 0) ||
+        (targetLane.annualSpendEur !== null && targetLane.annualSpendEur > 0);
+
+      if (
+        !laneHasLines &&
+        !this.contracts.has(baseContractId) &&
+        hasLegacyValues
+      ) {
+        const baseContract = ContractSchema.parse({
+          contractId: baseContractId,
+          ownerOrgId: safeOrgId,
+          supplierFacilityId: targetLane.fromFacilityId,
+          title: "Base Agreement",
+          contractType: "FRAMEWORK",
+          pricingModel: "FIXED",
+          expiryBehavior: "HOLDOVER",
+          confidence: "ESTIMATED",
+          startDate: `${new Date().getUTCFullYear()}-01-01`,
+          endDate: null,
+          noticePeriodDays: 30,
+          nonRenewalNoticeGiven: false,
+          archiveEffectiveDate: null,
+          isManuallyArchived: false,
+          incoterms: null,
+          notes: null,
+        });
+        const baseLine = ContractLineSchema.parse({
+          contractLineId: deterministicUuid(
+            "kulgo-legacy-base-line",
+            safeOrgId,
+            targetLane.laneId,
+          ),
+          contractId: baseContract.contractId,
+          ownerOrgId: safeOrgId,
+          laneId: targetLane.laneId,
+          inputId: targetLane.inputId,
+          cadence: "PER_YEAR",
+          committedVolume: targetLane.annualVolume,
+          unit: targetLane.volumeUnit,
+          committedSpend: targetLane.annualSpendEur,
+          unitPrice: null,
+          currency: "EUR",
+          startDateOverride: null,
+          endDateOverride: null,
+        });
+        preservedBase = { contract: baseContract, lines: [baseLine] };
+      }
+    }
+
+    // 4. Parse requested contract + lines (all-or-nothing before mutating maps)
+    const defaultExpiry =
+      input.contract.contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER";
+    const contract = ContractSchema.parse({
+      contractId: targetContractId,
+      ownerOrgId: safeOrgId,
+      supplierFacilityId: input.contract.supplierFacilityId,
+      title: input.contract.title,
+      contractType: input.contract.contractType,
+      pricingModel: input.contract.pricingModel,
+      expiryBehavior: input.contract.expiryBehavior ?? defaultExpiry,
+      confidence: input.contract.confidence,
+      startDate: input.contract.startDate,
+      endDate: input.contract.endDate ?? null,
+      noticePeriodDays: input.contract.noticePeriodDays,
+      nonRenewalNoticeGiven: input.contract.nonRenewalNoticeGiven,
+      archiveEffectiveDate: null,
+      isManuallyArchived: false,
+      incoterms: input.contract.incoterms ?? null,
+      notes: input.contract.notes ?? null,
+    });
+
+    const createdLines = input.lines.map((lineInput, i) => {
+      const lane = this.lanes.get(lineInput.laneId)!;
+      return ContractLineSchema.parse({
+        contractLineId: trimmedIdem
+          ? deterministicUuid("kulgo-contract-line-idem", safeOrgId, `${trimmedIdem}:${i}`)
+          : randomUUID(),
+        contractId: contract.contractId,
+        ownerOrgId: safeOrgId,
+        laneId: lineInput.laneId,
+        inputId: lineInput.inputId ?? lane.inputId,
+        cadence: lineInput.cadence,
+        committedVolume: lineInput.committedVolume ?? null,
+        unit: lineInput.unit,
+        committedSpend: lineInput.committedSpend ?? null,
+        unitPrice: lineInput.unitPrice ?? null,
+        currency: lineInput.currency,
+        startDateOverride: lineInput.startDateOverride ?? null,
+        endDateOverride: lineInput.endDateOverride ?? null,
+      });
+    });
+
+    // 5. Commit atomically to in-memory maps
+    if (preservedBase) {
+      this.contracts.set(preservedBase.contract.contractId, preservedBase.contract);
+      for (const bl of preservedBase.lines) {
+        this.contractLines.set(bl.contractLineId, bl);
+      }
+    }
+    this.contracts.set(contract.contractId, contract);
+    if (trimmedIdem) {
+      this.contractRequests.set(contract.contractId, contractRequestSnapshot(input, contract,
+        new Map(input.lines.map((line) => [line.laneId, this.lanes.get(line.laneId)!.inputId])),
+      ));
+    }
+    for (const line of createdLines) {
+      this.contractLines.set(line.contractLineId, line);
+    }
+
+    // Double-counting guardrail: archive any active ESTIMATE contract on the same lane(s)
+    if (
+      (contract.contractType === "FRAMEWORK" ||
+        contract.contractType === "SPOT_PO") &&
+      createdLines.length > 0
+    ) {
+      const affectedLaneIds = new Set(createdLines.map((l) => l.laneId));
+      const siblingContractIds = new Set(
+        Array.from(this.contractLines.values())
+          .filter(
+            (l) =>
+              l.ownerOrgId === safeOrgId &&
+              affectedLaneIds.has(l.laneId) &&
+              l.contractId !== contract.contractId,
+          )
+          .map((l) => l.contractId),
+      );
+      for (const siblingId of siblingContractIds) {
+        const sibling = this.contracts.get(siblingId);
+        if (
+          sibling &&
+          sibling.ownerOrgId === safeOrgId &&
+          sibling.contractType === "ESTIMATE" &&
+          !sibling.isManuallyArchived
+        ) {
+          this.contracts.set(siblingId, {
+            ...sibling,
+            isManuallyArchived: true,
+            archiveEffectiveDate: contract.startDate,
+          });
+        }
+      }
+    }
+
+    return {
+      contract: { ...contract },
+      lines: createdLines.map((l) => ({ ...l })),
+      ...(preservedBase
+        ? {
+            preservedBase: {
+              contract: { ...preservedBase.contract },
+              lines: preservedBase.lines.map((l) => ({ ...l })),
+            },
+          }
+        : {}),
+    };
+  }
+
+  async applyAllocationSplitsAtomic(
+    orgId: string,
+    updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }> {
+    const safeOrgId = assertOrgId(orgId);
+    const orgFacilities = Array.from(this.facilities.values())
+      .map((r) => r.facility)
+      .filter((f) => f.ownerOrgId === safeOrgId);
+    const orgLanes = Array.from(this.lanes.values()).filter(
+      (l) => l.ownerOrgId === safeOrgId,
+    );
+
+    const { updatedLanes } = computeAtomicSplitMutations(
+      orgFacilities,
+      orgLanes,
+      updates,
+    );
+
+    for (const lane of updatedLanes) {
+      this.lanes.set(lane.laneId, lane);
+    }
+
+    return {
+      lanes: updatedLanes.map((l) => ({ ...l })),
+      contractLines: [],
+    };
   }
 }

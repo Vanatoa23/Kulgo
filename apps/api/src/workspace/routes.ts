@@ -30,6 +30,7 @@ import {
   serializeNetworkToCsv,
 } from "./import-export.js";
 import {
+  WorkspaceConflictError,
   WorkspaceValidationError,
   type WorkspaceRepository,
 } from "./repository.js";
@@ -491,6 +492,53 @@ export function createWorkspaceRoutes({
     }
   });
 
+  const ApplyAllocationSplitsBodySchema = z.object({
+    splits: z
+      .array(
+        z.object({
+          laneId: z.string().uuid(),
+          allocationSplitPct: z.number().finite().min(0).max(100),
+        }),
+      )
+      .min(2)
+      .max(50),
+  });
+
+  routes.patch("/lanes/allocation-splits", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = ApplyAllocationSplitsBodySchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "Validation failed", details: parsed.error.flatten() },
+        400,
+      );
+    }
+
+    try {
+      const normalizedSplits = parsed.data.splits.map((s) => ({
+        laneId: s.laneId!,
+        allocationSplitPct: s.allocationSplitPct!,
+      }));
+      const result = await workspaceRepo.applyAllocationSplitsAtomic(
+        orgId,
+        normalizedSplits,
+      );
+      return c.json(result, 200);
+    } catch (err) {
+      if (err instanceof WorkspaceValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
+  });
+
   routes.patch("/lanes/:laneId", async (c) => {
     const orgId = c.get("auth").organization.orgId;
     const laneId = c.req.param("laneId");
@@ -571,7 +619,20 @@ export function createWorkspaceRoutes({
 
   const CreateContractWithLinesSchema = CreateContractInputSchema.extend({
     lines: z.array(CreateContractLineBodySchema).max(50).optional(),
-  });
+    preserveLegacyBaseForLaneId: z.string().uuid().optional(),
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
+  }).refine(
+    (data) => {
+      if (data.endDate && data.startDate && data.endDate < data.startDate) {
+        return false;
+      }
+      return true;
+    },
+    {
+      message: "endDate must be on or after startDate",
+      path: ["endDate"],
+    },
+  );
 
   routes.post("/contracts", async (c) => {
     const orgId = c.get("auth").organization.orgId;
@@ -591,24 +652,32 @@ export function createWorkspaceRoutes({
     }
 
     try {
-      const { lines, ...contractInput } = parsed.data;
-      const contract = await workspaceRepo.createContract(
-        orgId,
-        contractInput as Parameters<typeof workspaceRepo.createContract>[1],
+      const { lines, preserveLegacyBaseForLaneId, idempotencyKey, ...contractInput } =
+        parsed.data;
+
+      const result = await workspaceRepo.createContractWithLinesAtomic(orgId, {
+        contract: contractInput as Parameters<
+          typeof workspaceRepo.createContract
+        >[1],
+        lines: (lines ?? []) as Array<
+          Omit<Parameters<typeof workspaceRepo.createContractLine>[1], "contractId">
+        >,
+        preserveLegacyBaseForLaneId,
+        idempotencyKey,
+      });
+
+      return c.json(
+        {
+          contract: result.contract,
+          lines: result.lines,
+          ...(result.preservedBase ? { preservedBase: result.preservedBase } : {}),
+        },
+        result.deduplicated ? 200 : 201,
       );
-      const createdLines = [];
-      for (const lineInput of lines ?? []) {
-        const line = await workspaceRepo.createContractLine(orgId, {
-          ...(lineInput as Omit<
-            Parameters<typeof workspaceRepo.createContractLine>[1],
-            "contractId"
-          >),
-          contractId: contract.contractId,
-        });
-        createdLines.push(line);
-      }
-      return c.json({ contract, lines: createdLines }, 201);
     } catch (err) {
+      if (err instanceof WorkspaceConflictError) {
+        return c.json({ error: err.message }, 409);
+      }
       if (err instanceof WorkspaceValidationError) {
         return c.json({ error: err.message }, 400);
       }

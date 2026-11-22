@@ -87,7 +87,7 @@ export interface WorkspaceSidebarProps {
   loadingAnalytics: boolean;
   financialViewMode?: FinancialViewMode;
   onChangeFinancialViewMode?: (mode: FinancialViewMode) => void;
-  onContractsChanged?: () => Promise<void> | void;
+  onContractsChanged?: () => Promise<boolean>;
   selectedFacilityId: string | null;
   selectedLaneId: string | null;
   pickedCoords: { lat: number; lng: number } | null;
@@ -1595,7 +1595,7 @@ export function WorkspaceSidebar({
                     derivedSummary={analytics?.financialRisk?.laneCommercials.find(
                       (c) => c.laneId === selectedLane.laneId,
                     )}
-                    onChanged={onContractsChanged ?? (() => {})}
+                    onChanged={onContractsChanged ?? (async () => false)}
                   />
                 )}
               </>

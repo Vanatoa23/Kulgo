@@ -261,6 +261,9 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
           lat: parseOptionalNumber(record.lat),
           lng: parseOptionalNumber(record.lng),
           isOwnFacility: ownFlag.value ?? false,
+          ...(record.relationshiprole
+            ? { relationshipRole: record.relationshiprole.toUpperCase() }
+            : {}),
           sector: record.sector || null,
           esgBadges: parseBadgeList(record.esgbadges),
           estimatedScope12Tco2e:
@@ -284,6 +287,11 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
           toFacilityId: record.tofacilityid || undefined,
           fromFacilityRef: fromRef,
           toFacilityRef: toRef,
+          ...(record.direction
+            ? { direction: record.direction.toUpperCase() }
+            : {}),
+          allocationSplitPct:
+            parseOptionalNumber(record.allocationsplitpct) ?? null,
           inputId: record.inputid || null,
           materialCategory: record.materialcategory,
           transportMode: (record.transportmode || "ROAD").toUpperCase(),
@@ -553,6 +561,8 @@ export async function executeBulkImport(
       await workspaceRepo.createLane(orgId, {
         fromFacilityId,
         toFacilityId,
+        direction: row.direction,
+        allocationSplitPct: row.allocationSplitPct,
         inputId: row.inputId ? (inputIds.get(row.inputId) ?? row.inputId) : null,
         materialCategory: row.materialCategory,
         transportMode: row.transportMode,
@@ -627,6 +637,7 @@ const EXPORT_CSV_HEADERS = [
   "lat",
   "lng",
   "isOwnFacility",
+  "relationshipRole",
   "sector",
   "esgBadges",
   "estimatedScope12Tco2e",
@@ -634,6 +645,8 @@ const EXPORT_CSV_HEADERS = [
   "toFacility",
   "fromFacilityId",
   "toFacilityId",
+  "direction",
+  "allocationSplitPct",
   "materialCategory",
   "transportMode",
   "volumeSharePct",
@@ -673,42 +686,26 @@ export function serializeNetworkToCsv(
   const lines: string[] = [EXPORT_CSV_HEADERS.join(",")];
 
   for (const fac of network.facilities) {
-    lines.push(
-      [
-        "FACILITY",
-        fac.facilityId,
-        fac.name,
-        fac.kind,
-        fac.locationPrecision,
-        fac.countryCode,
-        fac.regionCode ?? "",
-        fac.lat,
-        fac.lng,
-        fac.isOwnFacility,
-        fac.sector ?? "",
-        fac.esgBadges.join("|"),
-        fac.estimatedScope12Tco2e ?? "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-        "",
-      ]
-        .map(escapeCsvCell)
-        .join(","),
-    );
+    const row: unknown[] = [
+      "FACILITY",
+      fac.facilityId,
+      fac.name,
+      fac.kind,
+      fac.locationPrecision,
+      fac.countryCode,
+      fac.regionCode ?? "",
+      fac.lat,
+      fac.lng,
+      fac.isOwnFacility,
+      fac.relationshipRole ?? "",
+      fac.sector ?? "",
+      fac.esgBadges.join("|"),
+      fac.estimatedScope12Tco2e ?? "",
+    ];
+    while (row.length < EXPORT_CSV_HEADERS.length) {
+      row.push("");
+    }
+    lines.push(row.map(escapeCsvCell).join(","));
   }
 
   for (const lane of network.lanes) {
@@ -727,10 +724,13 @@ export function serializeNetworkToCsv(
         "",
         "",
         "",
+        "",
         facilityNameById.get(lane.fromFacilityId) ?? lane.fromFacilityId,
         facilityNameById.get(lane.toFacilityId) ?? lane.toFacilityId,
         lane.fromFacilityId,
         lane.toFacilityId,
+        lane.direction ?? "",
+        lane.allocationSplitPct ?? "",
         lane.materialCategory,
         lane.transportMode,
         lane.volumeSharePct,
