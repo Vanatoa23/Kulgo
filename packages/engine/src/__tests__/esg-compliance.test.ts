@@ -30,6 +30,53 @@ const LANE_CN_STEEL = "55555555-5555-4555-8555-555555555502";
 const LANE_CN_PCB = "55555555-5555-4555-8555-555555555503";
 const LANE_US_CHEM = "55555555-5555-4555-8555-555555555504";
 
+describe("missing supplier attribution inputs (#37)", () => {
+  it.each([false, true])("uses the documented proxy instead of a full reported inventory (verified=%s)", (verified) => {
+    const fixture = makeTallinnFixture();
+    const own = fixture.facilities[0]!;
+    const supplier = {
+      ...fixture.facilities[1]!,
+      isPartnerVerified: verified,
+      estimatedScope12Tco2e: 1000,
+    };
+    const lane = {
+      ...fixture.lanes[0]!,
+      inputId: null,
+      annualVolume: null,
+      annualSpendEur: null,
+      productEmissionFactorTco2ePerUnit: null,
+      economicAttributionRatio: null,
+    };
+    const hidden = new Map<string, EsgPartnerAggregateInput>([
+      [supplier.facilityId, {
+        hiddenUpstreamScope3Tco2e: 8765,
+        supplierEmissionIntensityTco2ePerEur: null,
+        partnerTotalEmissionsCapTco2e: 9765,
+      }],
+    ]);
+    const evaluate = (estimate: number | null, lanes = [lane]) => evaluateEsgAndCompliance({
+      organization: { scope1Tco2e: 0, scope2Tco2e: 0 },
+      inputs: [],
+      facilities: [own, { ...supplier, estimatedScope12Tco2e: estimate }],
+      lanes,
+      partnerHiddenSummaries: verified ? hidden : undefined,
+    });
+    const expected = evaluate(null);
+    const result = evaluate(1000, [lane, { ...lane, laneId: LANE_CN_STEEL }]);
+    expect(result.summary.upstreamScope3Tco2e).toBe(expected.summary.upstreamScope3Tco2e);
+    const entries = result.ledgerEntries.filter((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      attributionMethod: "SECTOR_BASELINE",
+      pcafScore: 5,
+      activityValue: 0.08,
+      provenanceStatus: "CALIBRATED_BASELINE_V1",
+    });
+    expect(entries[0]!.formulaTrace).toContain("8% buyer-share prior");
+    expect(JSON.stringify(result)).not.toMatch(/8765|9765|unscaled supplier estimate/);
+  });
+});
+
 function makeTallinnFixture() {
   const facilities: Facility[] = [
     {

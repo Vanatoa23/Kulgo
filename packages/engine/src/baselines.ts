@@ -28,6 +28,9 @@ export const SECTOR_BASELINE_SCOPE12_TCO2E: Record<string, number> = {
   Manufacturing: 480,
 };
 
+/** Provisional SME buyer share used only with public sector proxies, never private inventories. */
+export const LEVEL0_DEFAULT_BUYER_SHARE = 0.08;
+
 const EARTH_RADIUS_KM = 6371;
 
 export function haversineDistanceKm(

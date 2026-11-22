@@ -1,5 +1,6 @@
 import type { ConfidenceLevel, EsgSummary, TransportMode } from "@kulgo/shared";
 import {
+  LEVEL0_DEFAULT_BUYER_SHARE,
   SECTOR_BASELINE_SCOPE12_TCO2E,
   TRANSPORT_EMISSION_FACTORS_KG_PER_TKM,
 } from "./baselines.js";
@@ -67,7 +68,10 @@ export interface SupplierEsgNode {
  * 2. Server-side Economic Emission Intensity: `buyerActiveSpendEur * supplierEmissionIntensityTco2ePerEur`
  *    (capped at 100% of `rawSupplierTotalTco2e` if positive total is provided so a buyer never exceeds 100%)
  * 3. Explicit `economicAttributionRatio` in (0, 1]: `rawSupplierTotalTco2e * clamp(ratio, 0, 1)`
- * 4. Legacy/unscaled fallback when attribution inputs are not yet provided.
+ * 4. Public sector baseline × provisional 8% SME buyer share when attribution inputs
+ *    are missing. This compatibility API has no country/activity data; the current
+ *    evaluateEsgAndCompliance API additionally supports physical/spend factors and
+ *    country adjustment. Raw partner inventories are never used as fallback activity.
  */
 export function computeSupplierScope3Attribution(
   supplier: SupplierEsgNode,
@@ -118,8 +122,12 @@ export function computeSupplierScope3Attribution(
     return safeRawTotal * clampedRatio;
   }
 
-  // 4. Default fallback when no attribution parameters are supplied
-  return safeRawTotal;
+  // 4. Keep empty/cycle-broken inventories empty; otherwise use a public proxy.
+  if (safeRawTotal === 0) return 0;
+  const sectorBaseline =
+    SECTOR_BASELINE_SCOPE12_TCO2E[supplier.sector ?? "Manufacturing"] ??
+    SECTOR_BASELINE_SCOPE12_TCO2E.Manufacturing!;
+  return sectorBaseline * LEVEL0_DEFAULT_BUYER_SHARE;
 }
 
 export interface EsgRollupInput {
