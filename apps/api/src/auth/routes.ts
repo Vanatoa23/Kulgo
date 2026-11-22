@@ -329,37 +329,13 @@ export function createAuthRoutes({
     const orgId = auth.organization.orgId;
     const targetUserId = c.req.param("userId");
 
-    const members = await authRepo.listOrgMembers(orgId);
-    const target = members.find((m) => m.userId === targetUserId);
-    if (!target) {
+    const result = await authRepo.deleteOrgMember(orgId, targetUserId, auth.user);
+    if (result === "not_found") {
       return c.json({ error: "Member not found" }, 404);
     }
-
-    const ownerCount = members.filter((m) => m.role === "OWNER").length;
-    if (target.role === "OWNER" && ownerCount <= 1) {
-      return c.json(
-        { error: "Cannot remove the last organization owner" },
-        400,
-      );
+    if (result === "last_owner") {
+      return c.json({ error: "Cannot remove the last organization owner" }, 400);
     }
-
-    const deleted = await authRepo.deleteOrgMember(orgId, targetUserId);
-    if (!deleted) {
-      return c.json({ error: "Member not found" }, 404);
-    }
-
-    await authRepo.recordAuditEvent({
-      orgId,
-      actorUserId: auth.user.userId,
-      actorEmail: auth.user.email,
-      action: "MEMBER_REMOVED",
-      summary: `Removed team member ${target.email} (${target.role})`,
-      metadata: {
-        removedUserId: target.userId,
-        removedEmail: target.email,
-        role: target.role,
-      },
-    });
 
     const payload = RemoveOrgMemberResponseSchema.parse({
       ok: true,
