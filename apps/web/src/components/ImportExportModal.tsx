@@ -184,9 +184,7 @@ export function ImportExportModal({
         result = await bulkImportWorkspace({ csv: trimmed });
       }
       setImportResult(result);
-      if (result.createdFacilities > 0 || result.createdLanes > 0) {
-        onImported();
-      }
+      onImported();
     } catch (err) {
       setImportError(
         err instanceof Error ? err.message : "Bulk import failed.",
@@ -516,7 +514,7 @@ export function ImportExportModal({
                       Network Export (CSV)
                     </h3>
                     <p className="text-[11px] text-slate-400">
-                      Spreadsheet-ready CSV of your facilities and lanes
+                      Spreadsheet-ready CSV of your facilities and lanes. Products, inputs, and their associations require JSON.
                       (round-trip compatible with Bulk Import).
                     </p>
                   </div>

@@ -1,5 +1,8 @@
+import { createHash } from "node:crypto";
 import {
   BulkImportFacilityRowSchema,
+  CreateProductInputSchema,
+  CreateSupplyInputInputSchema,
   BulkImportLaneRowSchema,
   BulkImportSummarySchema,
   WorkspaceExportJsonSchema,
@@ -19,6 +22,17 @@ const MAX_IMPORT_LANES = 1000;
 export const MAX_CSV_ROWS = 1505;
 const FORMULA_PREFIX_RE = /^[=+\-@\t\r]/;
 const FINITE_NUMBER_RE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+// Stable per destination and entity type, without preserving source organization IDs.
+function importedEntityId(orgId: string, type: string, sourceId: string): string {
+  const bytes = createHash("sha256").update(`kulgo-import-v1:${orgId}:${type}:${sourceId.toLowerCase()}`).digest().subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
 
 /**
  * RFC-4180 compliant CSV parser supporting quoted fields, escaped quotes (""),
@@ -257,9 +271,15 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
       const fromRef =
         record.fromfacilityref || record.fromfacility || undefined;
       const toRef = record.tofacilityref || record.tofacility || undefined;
+      const pcfVerified = parseOptionalBoolean(record.pcfverified);
+      if (pcfVerified.error) {
+        errors.push({ row: rowNumber, entity: "LANE", field: "pcfVerified", message: pcfVerified.error });
+        continue;
+      }
       lanes.push({
         rowNumber,
         raw: {
+          laneId: UUID_RE.test(record.refkey || "") ? record.refkey : undefined,
           fromFacilityId: record.fromfacilityid || undefined,
           toFacilityId: record.tofacilityid || undefined,
           fromFacilityRef: fromRef,
@@ -274,6 +294,16 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
           contractEndDate: record.contractenddate || null,
           contractTerms: record.contractterms || null,
           leadTimeDays: parseOptionalNumber(record.leadtimedays) ?? null,
+          safetyStockDays: parseOptionalNumber(record.safetystockdays),
+          defectRatePct: parseOptionalNumber(record.defectratepct),
+          carryingCostPct: parseOptionalNumber(record.carryingcostpct),
+          unitLandedCostEur: parseOptionalNumber(record.unitlandedcosteur),
+          ordinaryFreightCostPerUnitEur: parseOptionalNumber(record.ordinaryfreightcostperuniteur),
+          customAnnualDisruptionProb: parseOptionalNumber(record.customannualdisruptionprob),
+          customTtrDays: parseOptionalNumber(record.customttrdays),
+          productEmissionFactorTco2ePerUnit: parseOptionalNumber(record.productemissionfactortco2eperunit),
+          economicAttributionRatio: parseOptionalNumber(record.economicattributionratio),
+          pcfVerified: pcfVerified.value,
           distanceKm: parseOptionalNumber(record.distancekm) ?? null,
           estimatedLaneCo2e:
             parseOptionalNumber(record.estimatedlaneco2e) ?? null,
@@ -309,6 +339,8 @@ export async function executeBulkImport(
     facilities: Array<{ rowNumber: number; raw: unknown }>;
     lanes: Array<{ rowNumber: number; raw: unknown }>;
     initialErrors?: BulkImportError[];
+    products?: Array<{ rowNumber: number; raw: unknown }>;
+    inputs?: Array<{ rowNumber: number; raw: unknown }>;
   },
 ): Promise<BulkImportSummary> {
   const errors: BulkImportError[] = [...(payload.initialErrors ?? [])];
@@ -324,10 +356,48 @@ export async function executeBulkImport(
     );
   }
 
+  const productIds = new Map((await workspaceRepo.listProducts(orgId)).map(p => [p.productId, p.productId]));
+  const inputIds = new Map((await workspaceRepo.listInputs(orgId)).map(i => [i.inputId, i.inputId]));
+  for (const item of payload.products ?? []) {
+    const raw = item.raw as Record<string, unknown> | null;
+    const parsed = CreateProductInputSchema.safeParse(raw);
+    if (!parsed.success || !raw || typeof raw.productId !== "string" || !UUID_RE.test(raw.productId)) {
+      errors.push({ row: item.rowNumber, entity: "PRODUCT", message: "Invalid product or missing productId" });
+      continue;
+    }
+    try {
+      const targetId = productIds.get(raw.productId) ?? importedEntityId(orgId, "product", raw.productId);
+      if (![...productIds.values()].includes(targetId)) await workspaceRepo.createProduct(orgId, parsed.data, targetId);
+      productIds.set(raw.productId, targetId);
+    } catch (err) {
+      errors.push({ row: item.rowNumber, entity: "PRODUCT", message: err instanceof Error ? err.message : "Failed to create product" });
+    }
+  }
+  for (const item of payload.inputs ?? []) {
+    const raw = item.raw as Record<string, unknown> | null;
+    const parsed = CreateSupplyInputInputSchema.safeParse(raw);
+    if (!parsed.success || !raw || typeof raw.inputId !== "string" || !UUID_RE.test(raw.inputId)) {
+      errors.push({ row: item.rowNumber, entity: "INPUT", message: "Invalid input or missing inputId" });
+      continue;
+    }
+    const productId = parsed.data.productId ? productIds.get(parsed.data.productId) : null;
+    if (parsed.data.productId && !productId) {
+      errors.push({ row: item.rowNumber, entity: "INPUT", field: "productId", message: "Referenced product was not found in this organization or import" });
+      continue;
+    }
+    try {
+      const targetId = inputIds.get(raw.inputId) ?? importedEntityId(orgId, "input", raw.inputId);
+      if (![...inputIds.values()].includes(targetId)) await workspaceRepo.createInput(orgId, { ...parsed.data, productId }, targetId);
+      inputIds.set(raw.inputId, targetId);
+    } catch (err) {
+      errors.push({ row: item.rowNumber, entity: "INPUT", message: err instanceof Error ? err.message : "Failed to create input" });
+    }
+  }
+
   // Load org's existing facilities strictly scoped to orgId so lanes can reference
   // either newly imported facilities (by refKey, facilityId, or name) or existing org facilities.
   const existingFacilities = await workspaceRepo.listFacilities(orgId);
-  const existingByDedupeKey = new Map<string, string>();
+  const existingByDedupeKey = new Map<string, string[]>();
   const refToFacilityId = new Map<string, string>();
   const nameToFacilityIds = new Map<string, string[]>();
 
@@ -351,14 +421,8 @@ export async function executeBulkImport(
 
   for (const fac of existingFacilities) {
     registerFacilityRef(fac.facilityId, fac.name);
-    existingByDedupeKey.set(
-      facilityDedupeKey({
-        name: fac.name,
-        kind: fac.kind,
-        countryCode: fac.countryCode,
-      }),
-      fac.facilityId,
-    );
+    const key = facilityDedupeKey(fac);
+    existingByDedupeKey.set(key, [...(existingByDedupeKey.get(key) ?? []), fac.facilityId]);
   }
 
   let createdFacilities = 0;
@@ -375,22 +439,32 @@ export async function executeBulkImport(
       continue;
     }
 
-    const { refKey, ...createInput } = parsed.data;
+    const { refKey, facilityId: exportedId, ...createInput } = parsed.data;
     const dedupeKey = facilityDedupeKey(createInput);
-    const existingMatchId =
-      (refKey ? refToFacilityId.get(refKey.trim()) : undefined) ??
-      existingByDedupeKey.get(dedupeKey);
+    const sourceId = exportedId ?? (refKey && UUID_RE.test(refKey) ? refKey : undefined);
+    const stableId = sourceId ? importedEntityId(orgId, "facility", sourceId) : undefined;
+    const namedMatches = existingByDedupeKey.get(dedupeKey) ?? [];
+    const explicitMatch = refKey ? refToFacilityId.get(refKey.trim()) : undefined;
+    if (!sourceId && !explicitMatch && namedMatches.length > 1) {
+      errors.push({ row: item.rowNumber, entity: "FACILITY", field: "name", message: "Multiple facilities match this name, kind, and country; provide an explicit facility ID" });
+      continue;
+    }
+    const existingMatchId = sourceId
+      ? refToFacilityId.get(sourceId) ?? (stableId ? refToFacilityId.get(stableId) : undefined)
+      : explicitMatch ?? namedMatches[0];
 
     if (existingMatchId) {
       registerFacilityRef(existingMatchId, createInput.name, refKey);
+      if (exportedId) refToFacilityId.set(exportedId, existingMatchId);
       continue;
     }
 
     try {
-      const created = await workspaceRepo.createFacility(orgId, createInput);
+      const created = await workspaceRepo.createFacility(orgId, createInput, stableId);
       createdFacilities += 1;
-      existingByDedupeKey.set(dedupeKey, created.facilityId);
+      if (!exportedId && !refKey) existingByDedupeKey.set(dedupeKey, [created.facilityId]);
       registerFacilityRef(created.facilityId, created.name, refKey);
+      if (exportedId) refToFacilityId.set(exportedId, created.facilityId);
     } catch (err) {
       errors.push({
         row: item.rowNumber,
@@ -410,6 +484,7 @@ export async function executeBulkImport(
       if (direct) return direct;
       const lower = refToFacilityId.get(explicitId.toLowerCase());
       if (lower) return lower;
+      return null;
     }
     if (ref) {
       const trimmed = ref.trim();
@@ -418,13 +493,14 @@ export async function executeBulkImport(
         refToFacilityId.get(trimmed.toLowerCase());
       if (byRef) return byRef;
       const byName = nameToFacilityIds.get(trimmed.toLowerCase());
-      if (byName && byName.length > 0) {
+      if (byName && byName.length === 1) {
         return byName[0]!;
       }
     }
     return null;
   };
 
+  const existingLaneIds = new Set((await workspaceRepo.listLanes(orgId)).map(lane => lane.laneId));
   let createdLanes = 0;
   for (const item of payload.lanes) {
     const parsed = BulkImportLaneRowSchema.safeParse(item.raw);
@@ -450,30 +526,34 @@ export async function executeBulkImport(
     );
 
     if (!fromFacilityId) {
+      const ambiguous = !row.fromFacilityId && row.fromFacilityRef && (nameToFacilityIds.get(row.fromFacilityRef.trim().toLowerCase())?.length ?? 0) > 1;
       errors.push({
         row: item.rowNumber,
         entity: "LANE",
         field: "fromFacility",
-        message: `Source facility "${row.fromFacilityId ?? row.fromFacilityRef ?? "(missing)"}" was not found in this organization's workspace`,
+        message: ambiguous ? "Source facility name is ambiguous; provide an explicit facility ID or reference" : `Source facility "${row.fromFacilityId ?? row.fromFacilityRef ?? "(missing)"}" was not found in this organization's workspace`,
       });
       continue;
     }
 
     if (!toFacilityId) {
+      const ambiguous = !row.toFacilityId && row.toFacilityRef && (nameToFacilityIds.get(row.toFacilityRef.trim().toLowerCase())?.length ?? 0) > 1;
       errors.push({
         row: item.rowNumber,
         entity: "LANE",
         field: "toFacility",
-        message: `Destination facility "${row.toFacilityId ?? row.toFacilityRef ?? "(missing)"}" was not found in this organization's workspace`,
+        message: ambiguous ? "Destination facility name is ambiguous; provide an explicit facility ID or reference" : `Destination facility "${row.toFacilityId ?? row.toFacilityRef ?? "(missing)"}" was not found in this organization's workspace`,
       });
       continue;
     }
 
+    const stableLaneId = row.laneId ? importedEntityId(orgId, "lane", row.laneId) : undefined;
+    if (row.laneId && (existingLaneIds.has(row.laneId) || (stableLaneId && existingLaneIds.has(stableLaneId)))) continue;
     try {
       await workspaceRepo.createLane(orgId, {
         fromFacilityId,
         toFacilityId,
-        inputId: row.inputId ?? null,
+        inputId: row.inputId ? (inputIds.get(row.inputId) ?? row.inputId) : null,
         materialCategory: row.materialCategory,
         transportMode: row.transportMode,
         volumeSharePct: row.volumeSharePct,
@@ -487,7 +567,18 @@ export async function executeBulkImport(
         estimatedLaneCo2e: row.estimatedLaneCo2e ?? null,
         riskStatus: row.riskStatus,
         riskReason: row.riskReason ?? null,
-      });
+        safetyStockDays: row.safetyStockDays,
+        defectRatePct: row.defectRatePct,
+        carryingCostPct: row.carryingCostPct,
+        unitLandedCostEur: row.unitLandedCostEur,
+        ordinaryFreightCostPerUnitEur: row.ordinaryFreightCostPerUnitEur,
+        customAnnualDisruptionProb: row.customAnnualDisruptionProb,
+        customTtrDays: row.customTtrDays,
+        productEmissionFactorTco2ePerUnit: row.productEmissionFactorTco2ePerUnit,
+        economicAttributionRatio: row.economicAttributionRatio,
+        pcfVerified: row.pcfVerified,
+      }, stableLaneId);
+      if (stableLaneId) existingLaneIds.add(stableLaneId);
       createdLanes += 1;
     } catch (err) {
       errors.push({
@@ -556,6 +647,16 @@ const EXPORT_CSV_HEADERS = [
   "estimatedLaneCo2e",
   "riskStatus",
   "riskReason",
+  "safetyStockDays",
+  "defectRatePct",
+  "carryingCostPct",
+  "unitLandedCostEur",
+  "ordinaryFreightCostPerUnitEur",
+  "customAnnualDisruptionProb",
+  "customTtrDays",
+  "productEmissionFactorTco2ePerUnit",
+  "economicAttributionRatio",
+  "pcfVerified",
 ] as const;
 
 /**
@@ -643,6 +744,16 @@ export function serializeNetworkToCsv(
         lane.estimatedLaneCo2e ?? "",
         lane.riskStatus,
         lane.riskReason ?? "",
+        lane.safetyStockDays ?? "",
+        lane.defectRatePct ?? "",
+        lane.carryingCostPct ?? "",
+        lane.unitLandedCostEur ?? "",
+        lane.ordinaryFreightCostPerUnitEur ?? "",
+        lane.customAnnualDisruptionProb ?? "",
+        lane.customTtrDays ?? "",
+        lane.productEmissionFactorTco2ePerUnit ?? "",
+        lane.economicAttributionRatio ?? "",
+        lane.pcfVerified ?? "",
       ]
         .map(escapeCsvCell)
         .join(","),
