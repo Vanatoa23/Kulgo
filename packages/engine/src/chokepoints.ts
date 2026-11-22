@@ -380,7 +380,11 @@ export function matchLaneRiskSignals(
   nowIso?: string,
 ): LaneSignalMatch[] {
   const activeSignals = signals.filter(
-    (s) => isSignalActive(s, nowIso) && s.affectedChokepoints.length > 0,
+    (s) => isSignalActive(s, nowIso) && s.affectedChokepoints.length > 0 &&
+      // A geographically targeted sanctions advisory must not expand to every
+      // supplier using the same broad corridor. Layer 1 matches its targets.
+      (s.kind !== "SANCTIONS" ||
+        (s.affectedCountryCodes.length === 0 && !s.regionCode)),
   );
   const matches: LaneSignalMatch[] = [];
 

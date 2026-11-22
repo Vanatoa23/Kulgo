@@ -3,7 +3,7 @@ import { AnalyticsSummarySchema, FacilitySchema, RiskSignalSchema, SupplyLaneSch
 import { InMemoryAuthRepository } from "../src/auth/repository.js";
 import { InMemoryWorkspaceRepository } from "../src/workspace/repository.js";
 import { InMemoryInvitationRepository } from "../src/invites/repository.js";
-import { InMemoryRiskSignalRepository } from "../src/analytics/risk-signals.js";
+import { DEMO_RISK_SIGNALS, InMemoryRiskSignalRepository } from "../src/analytics/risk-signals.js";
 import { createPartnerHiddenSummaryResolver } from "../src/analytics/partner-resolver.js";
 import { OrgScopedAnalyticsRepository } from "../src/analytics/repository.js";
 
@@ -26,7 +26,7 @@ const signal = RiskSignalSchema.parse({ signalId: "private-event", title: "Disru
   polygonWkt: "POLYGON ((113 22, 115 22, 115 23, 113 23, 113 22))" });
 
 describe("hidden upstream risk matching (#38)", () => {
-  it.each(["climate plus lane sanctions", "polygon sanctions", "corridor sanctions", "unrelated event"])("propagates %s without leaking private topology", async scenario => {
+  it.each(["climate plus lane sanctions", "polygon sanctions", "corridor sanctions", "unrelated event", "targeted Baltic sanctions"])("propagates %s without leaking private topology", async scenario => {
     const authRepo = new InMemoryAuthRepository();
     const workspaceRepo = new InMemoryWorkspaceRepository();
     const riskSignalRepo = new InMemoryRiskSignalRepository([]);
@@ -38,7 +38,10 @@ describe("hidden upstream risk matching (#38)", () => {
       upstreamLane.riskReason = "Secondary sanctions on SECRET upstream identity";
     }
     const buyer = WorkspaceNetworkResponseSchema.parse({ facilities: [own(1, buyerOrg), tier1], lanes: [buyerLane], products: [], inputs: [] });
-    const partner = WorkspaceNetworkResponseSchema.parse({ facilities: [own(3, partnerOrg), secret], lanes: [upstreamLane], products: [], inputs: [] });
+    const upstream = scenario === "targeted Baltic sanctions"
+      ? { ...secret, countryCode: "FI", lat: 60.2, lng: 24.9 }
+      : secret;
+    const partner = WorkspaceNetworkResponseSchema.parse({ facilities: [own(3, partnerOrg), upstream], lanes: [upstreamLane], products: [], inputs: [] });
     vi.spyOn(workspaceRepo, "getNetwork").mockImplementation(async org => org === buyerOrg ? buyer : partner);
     vi.spyOn(inviteRepo, "listVerifiedPartnerLinksForOrg").mockImplementation(async org => org === buyerOrg ? [{
       inviteId: id(7), fromOrgId: buyerOrg, targetFacilityId: tier1.facilityId, partnerOrgId: partnerOrg,
@@ -51,10 +54,11 @@ describe("hidden upstream risk matching (#38)", () => {
       ...(scenario === "climate plus lane sanctions" ? { kind: "CLIMATE" as const, severity: "YELLOW" as const } : {}),
       ...(scenario === "corridor sanctions" ? { polygonWkt: "POLYGON EMPTY", affectedChokepoints: ["SUEZ_CANAL" as const] } : {}),
       ...(scenario === "unrelated event" ? { polygonWkt: "POLYGON ((0 0, 1 0, 1 1, 0 1, 0 0))" } : {}),
+      ...(scenario === "targeted Baltic sanctions" ? DEMO_RISK_SIGNALS[0] : {}),
     });
     const summary = AnalyticsSummarySchema.parse(await repo.getSummary(buyerOrg));
     const sanctions = summary.alerts.filter(a => a.category === "SECONDARY_SANCTION");
-    if (scenario === "unrelated event") {
+    if (scenario === "unrelated event" || scenario === "targeted Baltic sanctions") {
       expect(sanctions).toHaveLength(0);
       expect(summary.financialRisk?.baseEur).toBe(baseline.financialRisk?.baseEur);
     } else {

@@ -1330,8 +1330,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         fromFacilityId: aTier1BId,
         toFacilityId: aOwnId,
         materialCategory: "Modules",
-        // Keep clean fixture lanes off the demo Baltic sanctions corridor.
-        transportMode: "AIR",
+        transportMode: "SEA",
         volumeSharePct: 100,
         economicAttributionRatio: 0.5,
       }),
@@ -1383,7 +1382,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         fromFacilityId: bTier1CId,
         toFacilityId: bOwnNorthId,
         materialCategory: "Clean Subcomponents",
-        transportMode: "AIR",
+        transportMode: "SEA",
         volumeSharePct: 100,
         economicAttributionRatio: 1,
         riskStatus: "GREEN",
@@ -1430,7 +1429,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         fromFacilityId: cTier1AId,
         toFacilityId: cOwnId,
         materialCategory: "Recycled Enclosures",
-        transportMode: "AIR",
+        transportMode: "SEA",
         volumeSharePct: 100,
       }),
     });
