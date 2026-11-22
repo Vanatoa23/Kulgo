@@ -73,7 +73,7 @@ export interface NetworkHubPageProps {
   onCreateInvite: (
     input: CreateInviteInput,
   ) => Promise<CreateInviteResponse | null>;
-  onContractsChanged: () => Promise<void> | void;
+  onContractsChanged: () => Promise<boolean>;
 }
 
 const COUNTRY_CENTROIDS: Record<string, [number, number]> = {

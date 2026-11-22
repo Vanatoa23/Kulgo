@@ -71,7 +71,7 @@ export interface NodeInspectorDrawerProps {
   onCreateInvite: (
     input: CreateInviteInput,
   ) => Promise<CreateInviteResponse | null>;
-  onContractsChanged: () => Promise<void> | void;
+  onContractsChanged: () => Promise<boolean>;
 }
 
 const TRANSPORT_MODES: readonly TransportMode[] = [
@@ -678,7 +678,7 @@ export function NodeInspectorDrawer({
                 0,
               );
               const isValid = Math.abs(totalPct - 100) <= 0.01;
-              const previewPool = allocationPreviewPool(group.lanes, derivedByLaneId);
+              const previewPool = allocationPreviewPool(group.lanes, derivedByLaneId, splitDrafts);
 
               return (
                 <div
@@ -723,7 +723,7 @@ export function NodeInspectorDrawer({
                     {group.lanes.map((lane, idx) => {
                       const dest = facilitiesById.get(lane.toFacilityId);
                       const pct = Number(splitDrafts[lane.laneId]) || 0;
-                      const derivedVol = allocationPreviewVolume(previewPool, pct, lane.volumeUnit);
+                      const derivedVol = allocationPreviewVolume(previewPool, pct, lane.volumeUnit, lane.laneId);
                       return (
                         <div
                           key={lane.laneId}

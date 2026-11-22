@@ -18,7 +18,7 @@ export interface LaneContractsDrawerSectionProps {
   contracts: readonly Contract[];
   contractLines: readonly ContractLine[];
   derivedSummary?: DerivedLaneCommercialSummary;
-  onChanged: () => Promise<void> | void;
+  onChanged: () => Promise<boolean>;
 }
 
 function addOneYearIso(isoDate: string | null): string {
@@ -514,7 +514,11 @@ export function LaneContractsDrawerSection({
               <button type="button" disabled={busy} onClick={async () => {
                 setSaving(true);
                 try {
-                  await onChanged();
+                  const refreshed = await onChanged();
+                  if (!refreshed) {
+                    setError("Could not refresh saved contracts. Try again.");
+                    return;
+                  }
                   setPending(null);
                   setAdding(false);
                   setVolume("");

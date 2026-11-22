@@ -173,7 +173,7 @@ export function App() {
   }, []);
 
   const loadWorkspaceNetwork = useCallback(
-    async (shouldFit: boolean) => {
+    async (shouldFit: boolean): Promise<boolean> => {
       const ticket = networkGuard.begin();
       setLoadingNetwork(true);
       try {
@@ -181,23 +181,25 @@ export function App() {
           getNetwork(),
           listInvites().catch(() => [] as Invitation[]),
         ]);
-        if (!ticket.isCurrent()) return;
+        if (!ticket.isCurrent()) return false;
         setNetwork(data);
         setInvitations(invites);
         if (shouldFit && data.facilities.length > 0) {
           setFitTrigger((n) => n + 1);
         }
+        return true;
       } catch (err) {
-        if (!ticket.isCurrent()) return;
+        if (!ticket.isCurrent()) return false;
         if (err instanceof ApiError && err.status === 401) {
           setSession(null);
-          return;
+          return false;
         }
         setBannerError(
           err instanceof Error
             ? err.message
             : "Failed to load workspace network.",
         );
+        return false;
       } finally {
         if (ticket.isCurrent()) {
           setLoadingNetwork(false);

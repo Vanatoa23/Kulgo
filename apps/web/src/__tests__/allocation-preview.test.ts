@@ -11,7 +11,7 @@ const lane = (laneId: string, volumeUnit: "KG" | "TONNES" | "UNITS", annualVolum
 const idA = "44444444-4444-4444-8444-444444444441";
 const idB = "44444444-4444-4444-8444-444444444442";
 
-// The preview only consumes the quantity/unit pair from a derived summary.
+// These fixtures specify only the fields consumed by the preview.
 const summary = (activeVolume: number | null, baseUnit: string) =>
   ({ activeVolume, baseUnit }) as ReturnType<typeof DerivedLaneCommercialSummarySchema.parse>;
 
@@ -21,16 +21,45 @@ describe("allocation preview quantity units", () => {
     const pool = allocationPreviewPool(lanes, new Map([
       [idA, summary(1, "TONNES")], [idB, summary(1, "TONNES")],
     ]));
-    expect(allocationPreviewVolume(pool, 75, "KG")).toBe("1500.0");
-    expect(allocationPreviewVolume(pool, 25, "TONNES")).toBe("0.5");
+    expect(allocationPreviewVolume(pool, 75, "KG", idA)).toBe("1500.0");
+    expect(allocationPreviewVolume(pool, 25, "TONNES", idB)).toBe("0.5");
   });
   it("uses the stored unit when falling back to legacy volume", () => {
     const pool = allocationPreviewPool([lane(idA, "KG", 1000), lane(idB, "TONNES", 1)],
-      new Map([[idA, summary(null, "TONNES")]]));
-    expect(allocationPreviewVolume(pool, 50, "KG")).toBe("1000.0");
+      new Map());
+    expect(allocationPreviewVolume(pool, 50, "KG", idA)).toBe("1000.0");
   });
   it("does not guess conversions for incompatible units", () => {
     expect(allocationPreviewPool([lane(idA, "UNITS", 10)],
-      new Map([[idA, summary(1, "TONNES")]]))).toBeNull();
+      new Map([[idA, summary(1, "TONNES")]]))).toMatchObject({ total: null });
   });
+});
+
+
+it("excludes lapsed legacy volume and normalizes allocation among eligible destinations", () => {
+  const lanes = [lane(idA, "KG", 100000), lane(idB, "TONNES", 900)];
+  const pool = allocationPreviewPool(lanes, new Map([
+    [idA, summary(100, "TONNES")],
+    [idB, { ...summary(null, "TONNES"), laneCommercialState: "LAPSED_UNCONTRACTED" }],
+  ]), { [idA]: 75, [idB]: 25 });
+  expect(allocationPreviewVolume(pool, 75, "KG", idA)).toBe("100000.0");
+  expect(allocationPreviewVolume(pool, 25, "TONNES", idB)).toBe("0.0");
+});
+
+it("does not substitute legacy volume when analytics has an unknown active quantity", () => {
+  const pool = allocationPreviewPool([lane(idA, "TONNES", 100), lane(idB, "TONNES", 100)],
+    new Map([[idA, summary(null, "TONNES")], [idB, summary(50, "TONNES")]]));
+  expect(allocationPreviewVolume(pool, 50, "TONNES", idA)).toBe("25.0");
+  expect(allocationPreviewVolume(pool, 50, "TONNES", idB)).toBe("25.0");
+});
+
+it("shows zero for an all-lapsed group and omits an unverifiable zero-eligible split", () => {
+  const lanes = [lane(idA, "TONNES", 100), lane(idB, "TONNES", 100)];
+  const lapsed = { ...summary(null, "TONNES"), laneCommercialState: "LAPSED_UNCONTRACTED" as const };
+  const allLapsed = allocationPreviewPool(lanes, new Map([[idA, lapsed], [idB, lapsed]]));
+  expect(allocationPreviewVolume(allLapsed, 50, "TONNES", idA)).toBe("0.0");
+  const zeroEligible = allocationPreviewPool(lanes, new Map([[idA, summary(100, "TONNES")], [idB, lapsed]]),
+    { [idA]: 0, [idB]: 100 });
+  expect(allocationPreviewVolume(zeroEligible, 0, "TONNES", idA)).toBeNull();
+  expect(allocationPreviewVolume(zeroEligible, 100, "TONNES", idB)).toBe("0.0");
 });

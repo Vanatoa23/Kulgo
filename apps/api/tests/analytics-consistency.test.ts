@@ -716,6 +716,7 @@ describe("What-If split source quantities", () => {
       const app = createTestApp();
       const { cookie, supA, laneA, laneB } = await setupTwoSupplierNetwork(app, {
         lane1AnnualVolume: 100, lane2AnnualVolume: 100,
+        lane1AnnualSpendEur: 1000, lane2AnnualSpendEur: 1000,
       });
       const patch = async (laneId: string, payload: Record<string, unknown>) => {
         const res = await app.request(`/api/v1/workspace/lanes/${laneId}`, {
@@ -760,6 +761,20 @@ describe("What-If split source quantities", () => {
       expect(simulation.simulated.financialRisk!.totalActiveSpendEur)
         .not.toBe(simulation.baseline.financialRisk!.totalActiveSpendEur);
       expect(simulation.simulated.hhiMetrics).toEqual(simulation.baseline.hhiMetrics);
+      expect(baseline.find((lane) => lane.laneId === laneA.laneId)?.activeSpendEur).toBe(1500);
+      expect(baseline.find((lane) => lane.laneId === laneB.laneId)?.activeSpendEur).toBe(500);
+      expect(simulated.find((lane) => lane.laneId === laneA.laneId)?.activeSpendEur).toBe(500000);
+      expect(simulated.find((lane) => lane.laneId === laneB.laneId)?.activeSpendEur).toBe(500);
+
+      const noOpResponse = await app.request("/api/v1/analytics/simulate", {
+        method: "POST", headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({ viewMode, laneChanges: [{ laneId: laneA.laneId, annualSpendEur: 1500 }] }),
+      });
+      expect(noOpResponse.status).toBe(200);
+      const noOp = SimulateAnalyticsResponseSchema.parse(await noOpResponse.json());
+      expect(noOp.simulated.financialRisk).toEqual(noOp.baseline.financialRisk);
+      expect(noOp.simulated.hhiMetrics).toEqual(noOp.baseline.hhiMetrics);
+      expect(noOp.simulated.esg).toEqual(noOp.baseline.esg);
     });
   }
 });

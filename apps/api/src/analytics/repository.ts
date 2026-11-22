@@ -672,7 +672,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       const volumeChanged = change.annualVolume !== undefined;
       const spendChanged = change.annualSpendEur !== undefined;
       const hasCommercialChange =
-        volumeShareChanged || volumeChanged || spendChanged;
+        volumeShareChanged || volumeChanged;
 
       const baseComm = baselineSourceCommercials.laneSummaries.get(lane.laneId);
       const isLapsedBaseline =
@@ -685,7 +685,8 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       // introduces positive simulated volume or spend, so a share-only edit cannot
       // relabel a lapsed lane as LEVEL_0_UNPRICED and revive it in HHI/SPOF.
       const shouldBypassContracts =
-        hasCommercialChange && (!isLapsedBaseline || addsExplicitCommercials);
+        (hasCommercialChange || (spendChanged && isLapsedBaseline && addsExplicitCommercials)) &&
+        (!isLapsedBaseline || addsExplicitCommercials);
 
       if (shouldBypassContracts) {
         commercialChangedLaneIds.add(lane.laneId);
@@ -765,9 +766,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       }
 
       let nextAnnualSpendEur = lane.annualSpendEur;
-      if (change.annualSpendEur !== undefined) {
-        nextAnnualSpendEur = change.annualSpendEur;
-      } else if (shouldBypassContracts) {
+      if (shouldBypassContracts) {
         nextAnnualSpendEur =
           volumeShareChanged && effectiveBaseSpend !== null
             ? Math.max(0, effectiveBaseSpend * ratio)
@@ -837,8 +836,8 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       viewMode,
     });
 
-    // For any lane whose volumeSharePct/annualVolume/annualSpendEur is being simulated,
-    // bypass unscaled contractLines on that lane so the simulated lane quantities take effect.
+    // Bypass commitments only for source quantity changes or explicitly revived lanes.
+    // Destination spend overrides are applied after allocation below.
     const simulatedContractLines = (network.contractLines ?? []).filter(
       (cl) => !commercialChangedLaneIds.has(cl.laneId),
     );
@@ -852,7 +851,12 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       network.inputs,
       network.contracts ?? [],
       simulatedContractLines,
-      { asOfDate: isoDate, viewMode, facilities: network.facilities },
+      {
+        asOfDate: isoDate, viewMode, facilities: network.facilities,
+        annualSpendEurOverrides: new Map(request.laneChanges
+          .filter((change) => change.annualSpendEur !== undefined)
+          .map((change) => [change.laneId, change.annualSpendEur!])),
+      },
     );
 
     const simulatedFinancialRisk = computeFinancialRiskSummary({

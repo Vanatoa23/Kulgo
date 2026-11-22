@@ -423,13 +423,38 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
     await volInput.fill("10");
     await inspector.getByRole("button", { name: "Save Contract" }).click();
     await expect(inspector.getByRole("button", { name: "Retry Previous Save" })).toBeDisabled();
+    await expect(inspector.getByRole("button", { name: "Review Saved Contracts" })).toBeEnabled();
+    // The server has newer data, but failed refreshes must leave the pending draft
+    // and conflict controls intact while the user still sees stale contracts.
+    expect((await page.request.patch(`/api/v1/workspace/contracts/${committedContractId}`, {
+      data: { title: "Latest Saved Top-Up" },
+    })).status()).toBe(200);
+    let refreshFailures = 0;
+    await page.route("**/api/v1/workspace/network*", async (route) => {
+      if (refreshFailures++ === 0) {
+        await route.fulfill({ status: 500, contentType: "application/json",
+          body: JSON.stringify({ error: "Simulated failed contract refresh" }) });
+      } else {
+        await route.abort("failed");
+      }
+    });
+    for (let attempt = 0; attempt < 2; attempt++) {
+      await inspector.getByRole("button", { name: "Review Saved Contracts" }).click();
+      await expect(inspector.getByText("Could not refresh saved contracts. Try again.")).toBeVisible();
+      await expect(volInput).toHaveValue("10");
+      await expect(volInput).toBeDisabled();
+      await expect(inspector.getByText("Edited Spot Top-Up", { exact: true })).toHaveCount(1);
+      await expect(inspector.getByRole("button", { name: "Review Saved Contracts" })).toBeEnabled();
+    }
+    await page.unroute("**/api/v1/workspace/network*");
     await inspector.getByRole("button", { name: "Review Saved Contracts" }).click();
     await expect(volInput).toHaveCount(0);
+    await expect(inspector.getByText("Latest Saved Top-Up", { exact: true })).toHaveCount(1);
     expect(contractRequests).toHaveLength(5);
     await inspector.getByTestId("add-contract-topup-btn").click();
     await expect(volInput).toBeEnabled();
     await expect(volInput).toHaveValue("");
-    await expect(inspector.getByText("Edited Spot Top-Up", { exact: true })).toHaveCount(1);
+    await expect(inspector.getByText("Latest Saved Top-Up", { exact: true })).toHaveCount(1);
     await page.unroute("**/api/v1/workspace/contracts");
   });
 });

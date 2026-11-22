@@ -195,6 +195,8 @@ export interface ContractDerivationOptions {
   facilities?: readonly Facility[];
   /** Source quantities for simulations that will allocate their edited inputs later. */
   applyAllocationSplits?: boolean;
+  /** Per-destination What-If spend, applied after allocation and before material totals. */
+  annualSpendEurOverrides?: ReadonlyMap<string, number | null>;
   viewMode?: FinancialViewMode;
   windowStart?: string;
   windowEndExclusive?: string;
@@ -894,6 +896,39 @@ export function deriveNetworkCommercials(
           }
         }
       }
+    }
+  }
+
+  // A scenario override names a destination, not an additional source for its
+  // allocation group. Recompute spend-dependent aggregates before deriving shares.
+  for (const [laneId, annualSpend] of options.annualSpendEurOverrides ?? []) {
+    const raw = rawLaneMap.get(laneId);
+    if (!raw || raw.state === "LAPSED_UNCONTRACTED") continue;
+    const nextSpend = annualSpend === null ? null
+      : annualSpend * (viewMode === "RUN_RATE" ? 1 : windowDays / DAY_COUNT_BASIS);
+    const previousSpend = raw.activeSpendEur;
+    if (nextSpend === previousSpend) continue;
+    if (previousSpend !== null && previousSpend > 0 && nextSpend !== null) {
+      const ratio = nextSpend / previousSpend;
+      raw.cBothSpendEur *= ratio;
+      raw.spendOnlyExcludedEur *= ratio;
+      raw.atRiskRunRateSpend *= ratio;
+      raw.totalRunRateSpend *= ratio;
+    } else {
+      const hasVolume = raw.activeVolume !== null && raw.activeVolume > 0;
+      raw.cBothVolume = nextSpend !== null && hasVolume ? raw.activeVolume! : 0;
+      raw.cBothSpendEur = hasVolume ? (nextSpend ?? 0) : 0;
+      raw.spendOnlyExcludedEur = hasVolume ? 0 : (nextSpend ?? 0);
+      const atRiskFraction = raw.totalRunRateVolume > 0
+        ? raw.atRiskRunRateVolume / raw.totalRunRateVolume
+        : raw.nextExpirationDay !== null && raw.nextExpirationDay - asOfDay <= lookaheadDays ? 1 : 0;
+      raw.totalRunRateSpend = annualSpend ?? 0;
+      raw.atRiskRunRateSpend = raw.totalRunRateSpend * atRiskFraction;
+    }
+    raw.activeSpendEur = nextSpend;
+    if (raw.state === "LEVEL_0_UNPRICED" && nextSpend !== null && nextSpend > 0) {
+      raw.state = "ACTIVE";
+      if (raw.activeConfidences.length === 0) raw.activeConfidences.push("ESTIMATED");
     }
   }
 
