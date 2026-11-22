@@ -1,6 +1,7 @@
 import {
   TransportModeSchema,
   type Facility,
+  type FinancialViewMode,
   type SimulateAnalyticsResponse,
   type SimulatedLaneChange,
   type SupplyInput,
@@ -26,6 +27,7 @@ export interface WhatIfSimulatorDrawerProps {
   inputs: readonly SupplyInput[];
   activeProductId: string | null;
   activeInputId: string | null;
+  financialViewMode?: FinancialViewMode;
   onClose: () => void;
 }
 
@@ -82,6 +84,7 @@ export function WhatIfSimulatorDrawer({
   inputs,
   activeProductId,
   activeInputId,
+  financialViewMode,
   onClose,
 }: WhatIfSimulatorDrawerProps) {
   const [drafts, setDrafts] = useState<Record<string, DraftLaneOverride>>({});
@@ -141,6 +144,7 @@ export function WhatIfSimulatorDrawer({
       simulateAnalytics({
         ...(activeProductId ? { productId: activeProductId } : {}),
         ...(activeInputId ? { inputId: activeInputId } : {}),
+        ...(financialViewMode ? { viewMode: financialViewMode } : {}),
         laneChanges,
       })
         .then((res) => {
@@ -168,7 +172,7 @@ export function WhatIfSimulatorDrawer({
       cancelled = true;
       window.clearTimeout(timer);
     };
-  }, [open, laneChanges, activeProductId, activeInputId]);
+  }, [open, laneChanges, activeProductId, activeInputId, financialViewMode]);
 
   if (!open) return null;
 

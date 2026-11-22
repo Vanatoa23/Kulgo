@@ -1,9 +1,11 @@
 import {
+  FINANCIAL_RISK_PARAMS_V1,
   computeFinancialRiskSummary,
   computeFinancialSimulationDelta,
+  deriveNetworkCommercials,
   evaluateEsgAndCompliance,
   evaluateNetworkAnalytics,
-  simulateNetworkAnalytics,
+  toBaseUnit,
   type HiddenFinancialRiskInput,
   type HiddenPartnerAggregate,
 } from "@kulgo/engine";
@@ -13,10 +15,10 @@ import {
   ExecutiveReportSchema,
   FACTOR_MATRIX_VERSION,
   SimulateAnalyticsResponseSchema,
+  VolumeUnitSchema,
   type AnalyticsSummary,
   type Contract,
   type ContractLine,
-  type DerivedLaneCommercialSummary,
   type EsgLedgerResponse,
   type ExecutiveReport,
   type FinancialViewMode,
@@ -225,6 +227,8 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     viewMode: FinancialViewMode = "PERIOD_WINDOW",
   ): Promise<AnalyticsSummary> {
     const safeOrgId = assertOrgId(orgId);
+    const effectiveAsOfDate = asOfDate ?? new Date();
+    const isoDate = toIsoDateUtc(effectiveAsOfDate);
     const [organization, network, riskSignals] = await Promise.all([
       this.authRepo.findOrganizationById(safeOrgId),
       this.workspaceRepo.getNetwork(safeOrgId, filters),
@@ -233,6 +237,14 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     const partnerHiddenSummaries = this.resolvePartnerHiddenSummaries
       ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
       : undefined;
+
+    const commercials = deriveNetworkCommercials(
+      network.lanes,
+      network.inputs,
+      network.contracts ?? [],
+      network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode },
+    );
 
     const financialRisk = computeFinancialRiskSummary({
       products: network.products,
@@ -246,13 +258,11 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         network.lanes,
         partnerHiddenSummaries,
       ),
-      asOfDate: toIsoDateUtc(asOfDate ?? new Date()),
+      commercials,
+      asOfDate: isoDate,
       viewMode,
     });
 
-    const laneCommercialsByLaneId = new Map<string, DerivedLaneCommercialSummary>(
-      financialRisk.laneCommercials.map((lc) => [lc.laneId, lc]),
-    );
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
       network.contractLines,
@@ -265,9 +275,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       lanes: network.lanes,
       riskSignals,
       partnerHiddenSummaries,
-      laneCommercialsByLaneId,
+      laneCommercialsByLaneId: commercials.laneSummaries,
       incotermsByLaneId,
-      asOfDate,
+      asOfDate: effectiveAsOfDate,
     });
 
     return AnalyticsSummarySchema.parse({ ...summary, financialRisk });
@@ -280,10 +290,11 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     viewMode: FinancialViewMode = "PERIOD_WINDOW",
   ): Promise<EsgLedgerResponse> {
     const safeOrgId = assertOrgId(orgId);
-    const [organization, network, riskSignals] = await Promise.all([
+    const effectiveAsOfDate = asOfDate ?? new Date();
+    const isoDate = toIsoDateUtc(effectiveAsOfDate);
+    const [organization, network] = await Promise.all([
       this.authRepo.findOrganizationById(safeOrgId),
       this.workspaceRepo.getNetwork(safeOrgId, filters),
-      this.riskSignalRepo.listActive(),
     ]);
     if (!organization) {
       throw new AnalyticsValidationError("Organization not found");
@@ -293,24 +304,12 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
       : undefined;
 
-    const financialRisk = computeFinancialRiskSummary({
-      products: network.products,
-      inputs: network.inputs,
-      facilities: network.facilities,
-      lanes: network.lanes,
-      contracts: network.contracts,
-      contractLines: network.contractLines,
-      riskSignals,
-      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
-        network.lanes,
-        partnerHiddenSummaries,
-      ),
-      asOfDate: toIsoDateUtc(asOfDate ?? new Date()),
-      viewMode,
-    });
-
-    const laneCommercialsByLaneId = new Map<string, DerivedLaneCommercialSummary>(
-      financialRisk.laneCommercials.map((lc) => [lc.laneId, lc]),
+    const commercials = deriveNetworkCommercials(
+      network.lanes,
+      network.inputs,
+      network.contracts ?? [],
+      network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode },
     );
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
@@ -323,14 +322,14 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       facilities: network.facilities,
       lanes: network.lanes,
       partnerHiddenSummaries,
-      laneCommercialsByLaneId,
+      laneCommercialsByLaneId: commercials.laneSummaries,
       incotermsByLaneId,
     });
 
     return EsgLedgerResponseSchema.parse({
       ledgerVersion: "1.0",
       factorMatrixVersion: FACTOR_MATRIX_VERSION,
-      generatedAt: (asOfDate ?? new Date()).toISOString(),
+      generatedAt: effectiveAsOfDate.toISOString(),
       organizationId: organization.orgId,
       organizationName: organization.name,
       activeCompliancePacks: summary.activeCompliancePacks ?? ["GLOBAL_GHG_ISSB"],
@@ -347,6 +346,8 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     viewMode: FinancialViewMode = "PERIOD_WINDOW",
   ): Promise<ExecutiveReport> {
     const safeOrgId = assertOrgId(orgId);
+    const effectiveAsOfDate = asOfDate ?? new Date();
+    const isoDate = toIsoDateUtc(effectiveAsOfDate);
     const [organization, network, riskSignals] = await Promise.all([
       this.authRepo.findOrganizationById(safeOrgId),
       this.workspaceRepo.getNetwork(safeOrgId, filters),
@@ -360,6 +361,14 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       throw new AnalyticsValidationError("Organization not found");
     }
 
+    const commercials = deriveNetworkCommercials(
+      network.lanes,
+      network.inputs,
+      network.contracts ?? [],
+      network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode },
+    );
+
     const financialRisk = computeFinancialRiskSummary({
       products: network.products,
       inputs: network.inputs,
@@ -372,13 +381,11 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         network.lanes,
         partnerHiddenSummaries,
       ),
-      asOfDate: toIsoDateUtc(asOfDate ?? new Date()),
+      commercials,
+      asOfDate: isoDate,
       viewMode,
     });
 
-    const laneCommercialsByLaneId = new Map<string, DerivedLaneCommercialSummary>(
-      financialRisk.laneCommercials.map((lc) => [lc.laneId, lc]),
-    );
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
       network.contractLines,
@@ -392,9 +399,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         lanes: network.lanes,
         riskSignals,
         partnerHiddenSummaries,
-        laneCommercialsByLaneId,
+        laneCommercialsByLaneId: commercials.laneSummaries,
         incotermsByLaneId,
-        asOfDate,
+        asOfDate: effectiveAsOfDate,
       }),
       financialRisk,
     });
@@ -469,7 +476,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
 
     return ExecutiveReportSchema.parse({
       reportVersion: "1.0",
-      generatedAt: (asOfDate ?? new Date()).toISOString(),
+      generatedAt: effectiveAsOfDate.toISOString(),
       organization: {
         orgId: organization.orgId,
         name: organization.name,
@@ -518,6 +525,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     asOfDate?: Date,
   ): Promise<SimulateAnalyticsResponse> {
     const safeOrgId = assertOrgId(orgId);
+    const effectiveAsOfDate = asOfDate ?? new Date();
+    const isoDate = toIsoDateUtc(effectiveAsOfDate);
+    const viewMode: FinancialViewMode = request.viewMode ?? "RUN_RATE";
     const filters: NetworkFilters = {
       productId: request.productId,
       inputId: request.inputId,
@@ -541,39 +551,149 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       );
     }
 
+    const baselineCommercials = deriveNetworkCommercials(
+      network.lanes,
+      network.inputs,
+      network.contracts ?? [],
+      network.contractLines ?? [],
+      { asOfDate: isoDate, viewMode },
+    );
+    const baselineScale =
+      viewMode === "RUN_RATE"
+        ? 1
+        : baselineCommercials.windowDays /
+          FINANCIAL_RISK_PARAMS_V1.dayCountBasis;
+
+    const inputsById = new Map(
+      network.inputs.map((item) => [item.inputId, item]),
+    );
     const changesByLaneId = new Map(
       request.laneChanges.map((change) => [change.laneId, change]),
     );
     const commercialChangedLaneIds = new Set<string>();
-    const simulatedLanes = network.lanes.map((lane) => {
+    let appliedChangesCount = 0;
+
+    const simulatedLanesWithContractBase = network.lanes.map((lane) => {
       const change = changesByLaneId.get(lane.laneId);
       if (!change) {
         return lane;
       }
+
+      appliedChangesCount += 1;
+
+      const volumeShareChanged =
+        change.volumeSharePct !== undefined &&
+        change.volumeSharePct !== lane.volumeSharePct;
+      const volumeChanged = change.annualVolume !== undefined;
+      const spendChanged = change.annualSpendEur !== undefined;
       const hasCommercialChange =
-        change.volumeSharePct !== undefined ||
-        change.annualVolume !== undefined ||
-        change.annualSpendEur !== undefined;
-      if (hasCommercialChange) {
+        volumeShareChanged || volumeChanged || spendChanged;
+
+      const baseComm = baselineCommercials.laneSummaries.get(lane.laneId);
+      const isLapsedBaseline =
+        baseComm?.laneCommercialState === "LAPSED_UNCONTRACTED";
+      const addsExplicitCommercials =
+        (typeof change.annualVolume === "number" && change.annualVolume > 0) ||
+        (typeof change.annualSpendEur === "number" &&
+          change.annualSpendEur > 0);
+      // Preserve expired contract lines for lapsed lanes unless the edit explicitly
+      // introduces positive simulated volume or spend, so a share-only edit cannot
+      // relabel a lapsed lane as LEVEL_0_UNPRICED and revive it in HHI/SPOF.
+      const shouldBypassContracts =
+        hasCommercialChange && (!isLapsedBaseline || addsExplicitCommercials);
+
+      if (shouldBypassContracts) {
         commercialChangedLaneIds.add(lane.laneId);
       }
 
-      let scaledVolume = lane.annualVolume;
-      let scaledSpend = lane.annualSpendEur;
-      if (change.volumeSharePct !== undefined) {
-        const ratio =
-          lane.volumeSharePct > 0
-            ? change.volumeSharePct / lane.volumeSharePct
-            : change.volumeSharePct === 0
-              ? 0
-              : 1;
-        if (change.annualVolume === undefined && lane.annualVolume !== null) {
-          scaledVolume = Math.max(0, lane.annualVolume * ratio);
+      const ratio = volumeShareChanged
+        ? lane.volumeSharePct > 0
+          ? change.volumeSharePct! / lane.volumeSharePct
+          : change.volumeSharePct === 0
+            ? 0
+            : 1
+        : 1;
+
+      let effectiveBaseVolume = lane.annualVolume;
+      let effectiveBaseVolumeUnit = lane.volumeUnit;
+      let effectiveBaseSpend = lane.annualSpendEur;
+      if (shouldBypassContracts && baseComm) {
+        if (baseComm.activeVolume !== null) {
+          const annualizedVol =
+            baselineScale > 0
+              ? baseComm.activeVolume / baselineScale
+              : baseComm.activeVolume;
+          const fromUnit = baseComm.baseUnit ?? lane.volumeUnit;
+          const parsedBaseUnit = VolumeUnitSchema.safeParse(fromUnit);
+          if (change.annualVolume === undefined && parsedBaseUnit.success) {
+            // Keep untouched (or share-scaled) volume in its canonical baseUnit
+            // so custom input unitConversionFactors are never double-applied.
+            effectiveBaseVolume = annualizedVol;
+            effectiveBaseVolumeUnit = parsedBaseUnit.data;
+          } else {
+            const linkedInput = lane.inputId
+              ? inputsById.get(lane.inputId)
+              : undefined;
+            const converted = toBaseUnit(
+              annualizedVol,
+              fromUnit,
+              lane.volumeUnit,
+            );
+            if (!converted.unitConflict && converted.value !== null) {
+              effectiveBaseVolume = converted.value;
+            } else {
+              const forwardFactor =
+                linkedInput?.unitConversionFactors?.[lane.volumeUnit] ??
+                linkedInput?.unitConversionFactors?.[
+                  lane.volumeUnit.toUpperCase()
+                ];
+              effectiveBaseVolume =
+                forwardFactor !== undefined &&
+                Number.isFinite(forwardFactor) &&
+                forwardFactor > 0
+                  ? annualizedVol / forwardFactor
+                  : annualizedVol;
+            }
+          }
+        } else {
+          effectiveBaseVolume = null;
         }
-        if (change.annualSpendEur === undefined && lane.annualSpendEur !== null) {
-          scaledSpend = Math.max(0, lane.annualSpendEur * ratio);
-        }
+
+        effectiveBaseSpend =
+          baseComm.activeSpendEur !== null
+            ? baselineScale > 0
+              ? baseComm.activeSpendEur / baselineScale
+              : baseComm.activeSpendEur
+            : null;
       }
+
+      let nextAnnualVolume = lane.annualVolume;
+      let nextVolumeUnit = lane.volumeUnit;
+      if (change.annualVolume !== undefined) {
+        nextAnnualVolume = change.annualVolume;
+      } else if (shouldBypassContracts) {
+        nextAnnualVolume =
+          volumeShareChanged && effectiveBaseVolume !== null
+            ? Math.max(0, effectiveBaseVolume * ratio)
+            : effectiveBaseVolume;
+        nextVolumeUnit = effectiveBaseVolumeUnit;
+      }
+
+      let nextAnnualSpendEur = lane.annualSpendEur;
+      if (change.annualSpendEur !== undefined) {
+        nextAnnualSpendEur = change.annualSpendEur;
+      } else if (shouldBypassContracts) {
+        nextAnnualSpendEur =
+          volumeShareChanged && effectiveBaseSpend !== null
+            ? Math.max(0, effectiveBaseSpend * ratio)
+            : effectiveBaseSpend;
+      }
+
+      const transportOrVolumeChanged =
+        (change.transportMode !== undefined &&
+          change.transportMode !== lane.transportMode) ||
+        volumeShareChanged ||
+        volumeChanged;
 
       return {
         ...lane,
@@ -583,12 +703,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         ...(change.transportMode !== undefined
           ? { transportMode: change.transportMode }
           : {}),
-        annualVolume:
-          change.annualVolume !== undefined ? change.annualVolume : scaledVolume,
-        annualSpendEur:
-          change.annualSpendEur !== undefined
-            ? change.annualSpendEur
-            : scaledSpend,
+        volumeUnit: nextVolumeUnit,
+        annualVolume: nextAnnualVolume,
+        annualSpendEur: nextAnnualSpendEur,
         ...(change.safetyStockDays !== undefined
           ? { safetyStockDays: change.safetyStockDays }
           : {}),
@@ -601,6 +718,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         ...(change.riskStatus !== undefined
           ? { riskStatus: change.riskStatus }
           : {}),
+        estimatedLaneCo2e: transportOrVolumeChanged
+          ? null
+          : lane.estimatedLaneCo2e,
       };
     });
 
@@ -610,12 +730,11 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
             this.resolvePartnerHiddenSummaries(safeOrgId, network),
             this.resolvePartnerHiddenSummaries(safeOrgId, {
               facilities: network.facilities,
-              lanes: simulatedLanes,
+              lanes: simulatedLanesWithContractBase,
             }),
           ])
         : [undefined, undefined];
 
-    const isoDate = toIsoDateUtc(asOfDate ?? new Date());
     const baselineFinancialRisk = computeFinancialRiskSummary({
       products: network.products,
       inputs: network.inputs,
@@ -628,50 +747,23 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         network.lanes,
         baselinePartnerHiddenSummaries,
       ),
+      commercials: baselineCommercials,
       asOfDate: isoDate,
-      viewMode: "RUN_RATE",
+      viewMode,
     });
 
     // For any lane whose volumeSharePct/annualVolume/annualSpendEur is being simulated,
     // bypass unscaled contractLines on that lane so the simulated lane quantities take effect.
-    const baselineLaneCommById = new Map(
-      baselineFinancialRisk.laneCommercials.map((c) => [c.laneId, c]),
-    );
-    const simulatedLanesWithContractBase = simulatedLanes.map((lane) => {
-      if (!commercialChangedLaneIds.has(lane.laneId)) return lane;
-      const change = changesByLaneId.get(lane.laneId);
-      const baseComm = baselineLaneCommById.get(lane.laneId);
-      if (
-        change?.volumeSharePct !== undefined &&
-        change.annualVolume === undefined &&
-        change.annualSpendEur === undefined &&
-        baseComm &&
-        baseComm.activeContractCount > 0
-      ) {
-        const origLane = network.lanes.find((l) => l.laneId === lane.laneId);
-        const ratio =
-          origLane && origLane.volumeSharePct > 0
-            ? change.volumeSharePct / origLane.volumeSharePct
-            : change.volumeSharePct === 0
-              ? 0
-              : 1;
-        return {
-          ...lane,
-          annualVolume:
-            baseComm.activeVolume !== null
-              ? Math.max(0, baseComm.activeVolume * ratio)
-              : lane.annualVolume,
-          annualSpendEur:
-            baseComm.activeSpendEur !== null
-              ? Math.max(0, baseComm.activeSpendEur * ratio)
-              : lane.annualSpendEur,
-        };
-      }
-      return lane;
-    });
-
     const simulatedContractLines = (network.contractLines ?? []).filter(
       (cl) => !commercialChangedLaneIds.has(cl.laneId),
+    );
+
+    const simulatedCommercials = deriveNetworkCommercials(
+      simulatedLanesWithContractBase,
+      network.inputs,
+      network.contracts ?? [],
+      simulatedContractLines,
+      { asOfDate: isoDate, viewMode },
     );
 
     const simulatedFinancialRisk = computeFinancialRiskSummary({
@@ -686,8 +778,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         simulatedLanesWithContractBase,
         simulatedPartnerHiddenSummaries,
       ),
+      commercials: simulatedCommercials,
       asOfDate: isoDate,
-      viewMode: "RUN_RATE",
+      viewMode,
     });
 
     const financialDeltas = computeFinancialSimulationDelta({
@@ -698,34 +791,35 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       oneTimeQualificationEur: request.oneTimeQualificationEur,
     });
 
-    const baselineOnly = evaluateNetworkAnalytics({
-      organization: {
-        scope1Tco2e: organization?.scope1Tco2e ?? null,
-        scope2Tco2e: organization?.scope2Tco2e ?? null,
-      },
+    const orgContext = buildOrgAnalyticsContext(organization, network.products);
+    const incotermsByLaneId = buildLaneIncotermsMap(
+      network.contracts,
+      network.contractLines,
+    );
+
+    const baselineSummary = evaluateNetworkAnalytics({
+      organization: orgContext,
       inputs: network.inputs,
       facilities: network.facilities,
       lanes: network.lanes,
       riskSignals,
       partnerHiddenSummaries: baselinePartnerHiddenSummaries,
-      asOfDate,
+      laneCommercialsByLaneId: baselineCommercials.laneSummaries,
+      incotermsByLaneId,
+      asOfDate: effectiveAsOfDate,
     });
 
-    const simulatedResult = simulateNetworkAnalytics(
-      {
-        organization: {
-          scope1Tco2e: organization?.scope1Tco2e ?? null,
-          scope2Tco2e: organization?.scope2Tco2e ?? null,
-        },
-        inputs: network.inputs,
-        facilities: network.facilities,
-        lanes: network.lanes,
-        riskSignals,
-        partnerHiddenSummaries: simulatedPartnerHiddenSummaries,
-        asOfDate,
-      },
-      request.laneChanges,
-    );
+    const simulatedSummary = evaluateNetworkAnalytics({
+      organization: orgContext,
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: simulatedLanesWithContractBase,
+      riskSignals,
+      partnerHiddenSummaries: simulatedPartnerHiddenSummaries,
+      laneCommercialsByLaneId: simulatedCommercials.laneSummaries,
+      incotermsByLaneId,
+      asOfDate: effectiveAsOfDate,
+    });
 
     const summarizeHhi = (summary: AnalyticsSummary) => {
       const materialHhis = summary.hhiMetrics.filter(
@@ -746,43 +840,41 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     };
 
     const round2 = (value: number) => Math.round(value * 100) / 100;
-    const baseHhi = summarizeHhi(baselineOnly);
-    const simHhi = summarizeHhi(simulatedResult.simulated);
-    const baseRedAlerts = baselineOnly.alerts.filter(
+    const baseHhi = summarizeHhi(baselineSummary);
+    const simHhi = summarizeHhi(simulatedSummary);
+    const baseRedAlerts = baselineSummary.alerts.filter(
       (a) => a.severity === "RED",
     ).length;
-    const simRedAlerts = simulatedResult.simulated.alerts.filter(
+    const simRedAlerts = simulatedSummary.alerts.filter(
       (a) => a.severity === "RED",
     ).length;
 
     return SimulateAnalyticsResponseSchema.parse({
-      baseline: { ...baselineOnly, financialRisk: baselineFinancialRisk },
+      baseline: { ...baselineSummary, financialRisk: baselineFinancialRisk },
       simulated: {
-        ...simulatedResult.simulated,
+        ...simulatedSummary,
         financialRisk: simulatedFinancialRisk,
       },
       deltas: {
         resilienceScoreDelta: round2(
-          simulatedResult.simulated.resilienceScore -
-            baselineOnly.resilienceScore,
+          simulatedSummary.resilienceScore - baselineSummary.resilienceScore,
         ),
         maxHhiDelta: round2(simHhi.maxHhi - baseHhi.maxHhi),
         avgHhiDelta: round2(simHhi.avgHhi - baseHhi.avgHhi),
         alertCountDelta:
-          simulatedResult.simulated.alerts.length - baselineOnly.alerts.length,
+          simulatedSummary.alerts.length - baselineSummary.alerts.length,
         redAlertCountDelta: simRedAlerts - baseRedAlerts,
         spofCountDelta: simHhi.spofCount - baseHhi.spofCount,
         transportScope3Tco2eDelta: round2(
-          simulatedResult.simulated.esg.transportScope3Tco2e -
-            baselineOnly.esg.transportScope3Tco2e,
+          simulatedSummary.esg.transportScope3Tco2e -
+            baselineSummary.esg.transportScope3Tco2e,
         ),
         totalTco2eDelta: round2(
-          simulatedResult.simulated.esg.totalTco2e -
-            baselineOnly.esg.totalTco2e,
+          simulatedSummary.esg.totalTco2e - baselineSummary.esg.totalTco2e,
         ),
         financialDeltas,
       },
-      appliedChangesCount: simulatedResult.appliedChangesCount,
+      appliedChangesCount,
     });
   }
 }

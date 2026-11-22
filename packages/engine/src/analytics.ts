@@ -14,8 +14,8 @@ import {
   type SupplyInput,
   type SupplyLane,
   type TargetMarket,
-  type VolumeUnit,
 } from "@kulgo/shared";
+import { inferUnitFamily, toBaseUnit } from "./contracts.js";
 import { evaluateEsgAndCompliance } from "./esg-compliance.js";
 import { isSignalActive, matchNetworkRiskSignals } from "./chokepoints.js";
 import { computeHhi, type ShareEntry } from "./hhi.js";
@@ -92,67 +92,92 @@ function round2(value: number): number {
   return Math.round(value * 100) / 100;
 }
 
-function toAnnualTonnes(
-  annualVolume: number | null,
-  volumeUnit: VolumeUnit,
-): number | null {
-  if (annualVolume === null || !Number.isFinite(annualVolume) || annualVolume <= 0) {
-    return null;
-  }
-  if (volumeUnit === "TONNES") {
-    return annualVolume;
-  }
-  if (volumeUnit === "KG") {
-    return annualVolume / 1000;
-  }
-  return null;
+function finitePositive(value: number | null | undefined): value is number {
+  return typeof value === "number" && Number.isFinite(value) && value > 0;
 }
 
-type UnitFamily = "MASS" | "COUNT" | "VOLUME" | "CURRENCY";
+interface EffectiveLaneCommercial {
+  lane: SupplyLane;
+  activeVolume: number | null;
+  volumeUnit: string;
+  activeSpendEur: number | null;
+  hasUnitConflict: boolean;
+  isLapsed: boolean;
+}
 
-function getUnitFamily(unit: VolumeUnit): UnitFamily {
-  switch (unit) {
-    case "TONNES":
-    case "KG":
-      return "MASS";
-    case "UNITS":
-      return "COUNT";
-    case "LITERS":
-      return "VOLUME";
-    case "EUR_VALUE":
-      return "CURRENCY";
+function resolveEffectiveLaneCommercial(
+  lane: SupplyLane,
+  linkedInput: SupplyInput | undefined,
+  derivedComm: DerivedLaneCommercialSummary | undefined,
+): EffectiveLaneCommercial {
+  if (derivedComm !== undefined) {
+    return {
+      lane,
+      activeVolume: finitePositive(derivedComm.activeVolume)
+        ? derivedComm.activeVolume
+        : null,
+      volumeUnit:
+        derivedComm.baseUnit ??
+        linkedInput?.baseUnit ??
+        linkedInput?.unit ??
+        lane.volumeUnit,
+      activeSpendEur: finitePositive(derivedComm.activeSpendEur)
+        ? derivedComm.activeSpendEur
+        : null,
+      hasUnitConflict: derivedComm.hasUnitConflict,
+      isLapsed: derivedComm.laneCommercialState === "LAPSED_UNCONTRACTED",
+    };
   }
+  return {
+    lane,
+    activeVolume: finitePositive(lane.annualVolume) ? lane.annualVolume : null,
+    volumeUnit: lane.volumeUnit,
+    activeSpendEur: finitePositive(lane.annualSpendEur)
+      ? lane.annualSpendEur
+      : null,
+    hasUnitConflict: false,
+    isLapsed: false,
+  };
+}
+
+function toAnnualTonnes(
+  annualVolume: number | null,
+  volumeUnit: string,
+): number | null {
+  if (!finitePositive(annualVolume)) {
+    return null;
+  }
+  if (inferUnitFamily(volumeUnit) !== "MASS") {
+    return null;
+  }
+  const converted = toBaseUnit(annualVolume, volumeUnit, "TONNES");
+  return !converted.unitConflict && finitePositive(converted.value)
+    ? converted.value
+    : null;
 }
 
 /**
- * Normalizes a lane's `annualVolume` to a canonical unit within its `unitFamily`
- * (`MASS` -> `TONNES`, `COUNT` -> `UNITS`, `VOLUME` -> `LITERS`, `CURRENCY` -> `EUR_VALUE`).
- * Never silently mixes incompatible unit families.
+ * Normalizes a lane's effective volume into `targetUnit` using SI/exact/custom
+ * conversions. Never silently mixes incompatible unit families.
  */
-function normalizeVolumeInFamily(
+function normalizeVolumeToTarget(
   annualVolume: number | null,
-  volumeUnit: VolumeUnit,
-  targetFamily: UnitFamily,
+  fromUnit: string,
+  targetUnit: string,
+  unitConversionFactors?: Readonly<Record<string, number>>,
 ): number | null {
-  if (annualVolume === null || !Number.isFinite(annualVolume) || annualVolume <= 0) {
+  if (!finitePositive(annualVolume)) {
     return null;
   }
-  if (getUnitFamily(volumeUnit) !== targetFamily) {
-    return null;
-  }
-  if (targetFamily === "MASS") {
-    return toAnnualTonnes(annualVolume, volumeUnit);
-  }
-  return annualVolume;
-}
-
-function hasPositiveSpend(lane: SupplyLane): lane is SupplyLane & { annualSpendEur: number } {
-  return (
-    lane.annualSpendEur !== null &&
-    lane.annualSpendEur !== undefined &&
-    Number.isFinite(lane.annualSpendEur) &&
-    lane.annualSpendEur > 0
+  const converted = toBaseUnit(
+    annualVolume,
+    fromUnit,
+    targetUnit,
+    unitConversionFactors,
   );
+  return !converted.unitConflict && finitePositive(converted.value)
+    ? converted.value
+    : null;
 }
 
 function daysUntilContractEnd(contractEndDate: string, asOfDate: Date): number {
@@ -184,20 +209,34 @@ export function evaluateNetworkAnalytics(
   const activeSignals = input.riskSignals.filter((signal) =>
     isSignalActive(signal, asOfDate.toISOString()),
   );
+  const effectiveActiveLanes = activeLanes.map((lane) => {
+    const linkedInput = lane.inputId ? inputsById.get(lane.inputId) : undefined;
+    const derivedComm = input.laneCommercialsByLaneId?.get(lane.laneId);
+    return resolveEffectiveLaneCommercial(lane, linkedInput, derivedComm);
+  });
+  // Exclude lanes whose contracts have expired/lapsed without holdover so stale
+  // legacy lane shares or commercial fields are never revived in concentration metrics.
+  const hhiActiveLanes = effectiveActiveLanes.filter((item) => !item.isLapsed);
 
   // --- 1. HHI Concentration Metrics (Aligned with Partial-Coverage & Dimension Denominators) ---
   const hhiMetrics: HhiMetric[] = [];
 
-  if (activeLanes.length > 0) {
-    const totalActiveLanesCount = activeLanes.length;
+  if (hhiActiveLanes.length > 0) {
+    const totalActiveLanesCount = hhiActiveLanes.length;
 
-    // Group active lanes by material first
+    // Group active non-lapsed lanes by material first
     const lanesByMaterialKey = new Map<
       string,
-      { label: string; canonicalUnit: VolumeUnit | null; lanes: SupplyLane[] }
+      {
+        label: string;
+        canonicalUnit: string | null;
+        unitConversionFactors?: Readonly<Record<string, number>>;
+        lanes: EffectiveLaneCommercial[];
+      }
     >();
 
-    for (const lane of activeLanes) {
+    for (const item of hhiActiveLanes) {
+      const { lane } = item;
       const linkedInput = lane.inputId
         ? inputsById.get(lane.inputId)
         : undefined;
@@ -208,10 +247,11 @@ export function evaluateNetworkAnalytics(
 
       const group = lanesByMaterialKey.get(materialKey) ?? {
         label: materialLabel,
-        canonicalUnit: linkedInput?.unit ?? null,
+        canonicalUnit: linkedInput?.baseUnit ?? linkedInput?.unit ?? null,
+        unitConversionFactors: linkedInput?.unitConversionFactors,
         lanes: [],
       };
-      group.lanes.push(lane);
+      group.lanes.push(item);
       lanesByMaterialKey.set(materialKey, group);
     }
 
@@ -219,38 +259,40 @@ export function evaluateNetworkAnalytics(
     // Prefer derived `activeSpendEur` (`EUR` as common denominator across heterogeneous materials)
     // using partial-coverage calculation when >= 2 active lanes (or 100% of a 1-lane network) have spend.
     // Otherwise fall back to normalized mass volume (`TONNES`/`KG`) if all active lanes share mass units,
-    // or declared `volumeSharePct`.
-    const spendCoveredLanes = activeLanes.filter(hasPositiveSpend);
+    // compatible volume units, or declared `volumeSharePct`.
+    const spendCoveredLanes = hhiActiveLanes.filter(
+      (item) => item.activeSpendEur !== null,
+    );
     const usePartialOrFullSpend =
       spendCoveredLanes.length === totalActiveLanesCount ||
       spendCoveredLanes.length >= 2;
 
     const allHaveNormalizedMass =
       !usePartialOrFullSpend &&
-      activeLanes.every((lane) => {
-        const tonnes = toAnnualTonnes(lane.annualVolume, lane.volumeUnit);
-        return tonnes !== null && Number.isFinite(tonnes) && tonnes > 0;
-      });
+      hhiActiveLanes.every(
+        (item) =>
+          !item.hasUnitConflict &&
+          toAnnualTonnes(item.activeVolume, item.volumeUnit) !== null,
+      );
 
-    const singleUnitFamily = activeLanes[0]
-      ? getUnitFamily(activeLanes[0].volumeUnit)
-      : null;
+    const firstOrgUnit = hhiActiveLanes[0]?.volumeUnit ?? null;
     const allHaveCompatibleVolume =
       !usePartialOrFullSpend &&
       !allHaveNormalizedMass &&
-      singleUnitFamily !== null &&
-      activeLanes.every((lane) => {
-        const norm = normalizeVolumeInFamily(
-          lane.annualVolume,
-          lane.volumeUnit,
-          singleUnitFamily,
-        );
-        return norm !== null && Number.isFinite(norm) && norm > 0;
-      });
+      firstOrgUnit !== null &&
+      hhiActiveLanes.every(
+        (item) =>
+          !item.hasUnitConflict &&
+          normalizeVolumeToTarget(
+            item.activeVolume,
+            item.volumeUnit,
+            firstOrgUnit,
+          ) !== null,
+      );
 
     const orgLanesToScore = usePartialOrFullSpend
       ? spendCoveredLanes
-      : activeLanes;
+      : hhiActiveLanes;
     const orgWeightingBasis = usePartialOrFullSpend
       ? ("SPEND_EUR" as const)
       : allHaveNormalizedMass || allHaveCompatibleVolume
@@ -260,17 +302,18 @@ export function evaluateNetworkAnalytics(
     const supplierEntries: ShareEntry[] = [];
     const countryEntries: ShareEntry[] = [];
 
-    for (const lane of orgLanesToScore) {
+    for (const item of orgLanesToScore) {
+      const { lane } = item;
       let weight: number;
       if (usePartialOrFullSpend) {
-        weight = lane.annualSpendEur!;
+        weight = item.activeSpendEur!;
       } else if (allHaveNormalizedMass) {
-        weight = toAnnualTonnes(lane.annualVolume, lane.volumeUnit)!;
-      } else if (allHaveCompatibleVolume && singleUnitFamily) {
-        weight = normalizeVolumeInFamily(
-          lane.annualVolume,
-          lane.volumeUnit,
-          singleUnitFamily,
+        weight = toAnnualTonnes(item.activeVolume, item.volumeUnit)!;
+      } else if (allHaveCompatibleVolume && firstOrgUnit) {
+        weight = normalizeVolumeToTarget(
+          item.activeVolume,
+          item.volumeUnit,
+          firstOrgUnit,
         )!;
       } else {
         weight = lane.volumeSharePct;
@@ -318,48 +361,49 @@ export function evaluateNetworkAnalytics(
     for (const [, group] of lanesByMaterialKey) {
       const materialTotalLanes = group.lanes.length;
       const firstVolumeLane = group.lanes.find(
-        (l) =>
-          l.annualVolume !== null &&
-          Number.isFinite(l.annualVolume) &&
-          l.annualVolume > 0,
+        (item) => item.activeVolume !== null,
       );
-      const targetFamily: UnitFamily | null = group.canonicalUnit
-        ? getUnitFamily(group.canonicalUnit)
-        : firstVolumeLane
-          ? getUnitFamily(firstVolumeLane.volumeUnit)
-          : null;
+      const targetUnit: string | null =
+        group.canonicalUnit ?? firstVolumeLane?.volumeUnit ?? null;
 
       // Check for conflicting volume unit families on this material
       const hasUnitConflict =
-        targetFamily !== null &&
-        group.lanes.some(
-          (l) =>
-            l.annualVolume !== null &&
-            Number.isFinite(l.annualVolume) &&
-            l.annualVolume > 0 &&
-            getUnitFamily(l.volumeUnit) !== targetFamily,
-        );
+        group.lanes.some((item) => item.hasUnitConflict) ||
+        (targetUnit !== null &&
+          group.lanes.some(
+            (item) =>
+              item.activeVolume !== null &&
+              toBaseUnit(
+                item.activeVolume,
+                item.volumeUnit,
+                targetUnit,
+                group.unitConversionFactors,
+              ).unitConflict,
+          ));
 
       const volumeCovered =
-        !hasUnitConflict && targetFamily !== null
+        !hasUnitConflict && targetUnit !== null
           ? group.lanes
-              .map((lane) => ({
-                lane,
-                normVol: normalizeVolumeInFamily(
-                  lane.annualVolume,
-                  lane.volumeUnit,
-                  targetFamily,
+              .map((item) => ({
+                lane: item.lane,
+                normVol: normalizeVolumeToTarget(
+                  item.activeVolume,
+                  item.volumeUnit,
+                  targetUnit,
+                  group.unitConversionFactors,
                 ),
               }))
               .filter(
                 (
-                  item,
-                ): item is { lane: SupplyLane; normVol: number } =>
-                  item.normVol !== null && item.normVol > 0,
+                  entry,
+                ): entry is { lane: SupplyLane; normVol: number } =>
+                  entry.normVol !== null && entry.normVol > 0,
               )
           : [];
 
-      const spendCovered = group.lanes.filter(hasPositiveSpend);
+      const spendCovered = group.lanes.filter(
+        (item) => item.activeSpendEur !== null,
+      );
 
       let entries: ShareEntry[];
       let coveredCount: number;
@@ -379,16 +423,16 @@ export function evaluateNetworkAnalytics(
         spendCovered.length === materialTotalLanes ||
         spendCovered.length >= 2
       ) {
-        entries = spendCovered.map((lane) => ({
-          key: lane.fromFacilityId,
-          weight: lane.annualSpendEur,
+        entries = spendCovered.map((item) => ({
+          key: item.lane.fromFacilityId,
+          weight: item.activeSpendEur!,
         }));
         coveredCount = spendCovered.length;
         materialBasis = "SPEND_EUR";
       } else {
-        entries = group.lanes.map((lane) => ({
-          key: lane.fromFacilityId,
-          weight: lane.volumeSharePct,
+        entries = group.lanes.map((item) => ({
+          key: item.lane.fromFacilityId,
+          weight: item.lane.volumeSharePct,
         }));
         coveredCount = materialTotalLanes;
         materialBasis = "VOLUME_SHARE_PCT";
@@ -409,7 +453,7 @@ export function evaluateNetworkAnalytics(
 
   // 2a. SPOF (Single Point of Failure) alerts per material
   const lanesByMaterial = new Map<string, { label: string; lanes: SupplyLane[] }>();
-  for (const lane of activeLanes) {
+  for (const { lane } of hhiActiveLanes) {
     const linkedInput = lane.inputId ? inputsById.get(lane.inputId) : undefined;
     const key = linkedInput?.inputId ?? `cat:${lane.materialCategory}`;
     const label = linkedInput ? linkedInput.name : lane.materialCategory;
@@ -712,6 +756,12 @@ export function simulateNetworkAnalytics(
     changesByLaneId.set(change.laneId, change);
   }
 
+  const simulatedLaneCommercialsByLaneId = input.laneCommercialsByLaneId
+    ? new Map<string, DerivedLaneCommercialSummary>(
+        input.laneCommercialsByLaneId,
+      )
+    : undefined;
+
   let appliedChangesCount = 0;
   const simulatedLanes: SupplyLane[] = input.lanes.map((lane) => {
     const change = changesByLaneId.get(lane.laneId);
@@ -725,30 +775,93 @@ export function simulateNetworkAnalytics(
       change.volumeSharePct !== undefined
         ? change.volumeSharePct
         : lane.volumeSharePct;
+    const volumeShareChanged =
+      change.volumeSharePct !== undefined &&
+      change.volumeSharePct !== lane.volumeSharePct;
+    const volumeChanged = change.annualVolume !== undefined;
+    const spendChanged = change.annualSpendEur !== undefined;
+    const hasCommercialChange =
+      volumeShareChanged || volumeChanged || spendChanged;
+
+    const baseComm = input.laneCommercialsByLaneId?.get(lane.laneId);
+    const ratio = volumeShareChanged
+      ? lane.volumeSharePct > 0
+        ? change.volumeSharePct! / lane.volumeSharePct
+        : change.volumeSharePct === 0
+          ? 0
+          : 1
+      : 1;
 
     let nextAnnualVolume = lane.annualVolume;
     if (change.annualVolume !== undefined) {
       nextAnnualVolume = change.annualVolume;
-    } else if (
-      change.volumeSharePct !== undefined &&
-      lane.annualVolume !== null &&
-      lane.volumeSharePct > 0
-    ) {
-      nextAnnualVolume = round2(
-        lane.annualVolume * (change.volumeSharePct / lane.volumeSharePct),
-      );
+    } else if (volumeShareChanged && lane.annualVolume !== null) {
+      nextAnnualVolume = round2(Math.max(0, lane.annualVolume * ratio));
     }
 
     let nextAnnualSpendEur = lane.annualSpendEur;
-    if (
-      change.volumeSharePct !== undefined &&
+    if (change.annualSpendEur !== undefined) {
+      nextAnnualSpendEur = change.annualSpendEur;
+    } else if (
+      volumeShareChanged &&
       lane.annualSpendEur !== null &&
-      lane.annualSpendEur !== undefined &&
-      lane.volumeSharePct > 0
+      lane.annualSpendEur !== undefined
     ) {
-      nextAnnualSpendEur = round2(
-        lane.annualSpendEur * (change.volumeSharePct / lane.volumeSharePct),
-      );
+      nextAnnualSpendEur = round2(Math.max(0, lane.annualSpendEur * ratio));
+    }
+
+    if (simulatedLaneCommercialsByLaneId && hasCommercialChange) {
+      if (baseComm) {
+        const linkedInput = lane.inputId
+          ? input.inputs.find((item) => item.inputId === lane.inputId)
+          : undefined;
+        let nextDerivedVolume = baseComm.activeVolume;
+        let nextUnitConflict = baseComm.hasUnitConflict;
+        if (change.annualVolume !== undefined) {
+          if (change.annualVolume === null) {
+            nextDerivedVolume = null;
+          } else {
+            const targetUnit = baseComm.baseUnit ?? lane.volumeUnit;
+            const converted = toBaseUnit(
+              change.annualVolume,
+              lane.volumeUnit,
+              targetUnit,
+              linkedInput?.unitConversionFactors,
+            );
+            nextDerivedVolume = !converted.unitConflict
+              ? converted.value
+              : change.annualVolume;
+            nextUnitConflict = converted.unitConflict;
+          }
+        } else if (volumeShareChanged && baseComm.activeVolume !== null) {
+          nextDerivedVolume = round2(
+            Math.max(0, baseComm.activeVolume * ratio),
+          );
+        }
+
+        let nextDerivedSpend = baseComm.activeSpendEur;
+        if (change.annualSpendEur !== undefined) {
+          nextDerivedSpend = change.annualSpendEur;
+        } else if (volumeShareChanged && baseComm.activeSpendEur !== null) {
+          nextDerivedSpend = round2(
+            Math.max(0, baseComm.activeSpendEur * ratio),
+          );
+        }
+
+        const hasActiveCommercials =
+          finitePositive(nextDerivedVolume) || finitePositive(nextDerivedSpend);
+        simulatedLaneCommercialsByLaneId.set(lane.laneId, {
+          ...baseComm,
+          activeVolume: nextDerivedVolume,
+          activeSpendEur: nextDerivedSpend,
+          hasUnitConflict: nextUnitConflict,
+          laneCommercialState: hasActiveCommercials
+            ? "ACTIVE"
+            : baseComm.laneCommercialState === "LAPSED_UNCONTRACTED"
+              ? "LAPSED_UNCONTRACTED"
+              : "LEVEL_0_UNPRICED",
+        });
+      }
     }
 
     const nextTransportMode = change.transportMode ?? lane.transportMode;
@@ -756,9 +869,10 @@ export function simulateNetworkAnalytics(
 
     // Clear cached estimatedLaneCo2e when mode or volume changes so engine recomputes it
     const transportOrVolumeChanged =
-      change.transportMode !== undefined ||
-      change.volumeSharePct !== undefined ||
-      change.annualVolume !== undefined;
+      (change.transportMode !== undefined &&
+        change.transportMode !== lane.transportMode) ||
+      volumeShareChanged ||
+      volumeChanged;
 
     return {
       ...lane,
@@ -767,13 +881,16 @@ export function simulateNetworkAnalytics(
       annualSpendEur: nextAnnualSpendEur,
       transportMode: nextTransportMode,
       riskStatus: nextRiskStatus,
-      estimatedLaneCo2e: transportOrVolumeChanged ? null : lane.estimatedLaneCo2e,
+      estimatedLaneCo2e: transportOrVolumeChanged
+        ? null
+        : lane.estimatedLaneCo2e,
     };
   });
 
   const simulated = evaluateNetworkAnalytics({
     ...input,
     lanes: simulatedLanes,
+    laneCommercialsByLaneId: simulatedLaneCommercialsByLaneId,
   });
 
   const baseHhi = summarizeHhiStats(baseline);
