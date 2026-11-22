@@ -441,10 +441,31 @@ export async function listContracts(): Promise<{
   });
 }
 
+export async function applyAllocationSplits(
+  splits: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }> {
+  return apiRequest(
+    "/api/v1/workspace/lanes/allocation-splits",
+    { method: "PATCH", body: { splits } },
+    (p) => {
+      const rec = p as { lanes?: unknown[]; contractLines?: unknown[] };
+      return {
+        lanes: (rec.lanes ?? []).map((l) =>
+          parseWithSchema(SupplyLaneSchema, l),
+        ),
+        contractLines: (rec.contractLines ?? []).map((cl) =>
+          parseWithSchema(ContractLineSchema, cl),
+        ),
+      };
+    },
+  );
+}
+
 export async function createContract(
   input: CreateContractInput & {
     lines?: Array<Omit<CreateContractLineInput, "contractId">>;
     preserveLegacyBaseForLaneId?: string;
+    idempotencyKey?: string;
   },
 ): Promise<{ contract: Contract; lines: ContractLine[] }> {
   return apiRequest(
@@ -648,7 +669,7 @@ export async function exportWorkspaceCsv(): Promise<string> {
 // --- CSRD / Executive Risk & ESG Report (M4) ---
 
 export async function getExecutiveReport(
-  filters?: NetworkQueryFilters,
+  filters?: NetworkQueryFilters & { viewMode?: FinancialViewMode },
 ): Promise<ExecutiveReport> {
   const params = new URLSearchParams();
   if (filters?.productId) {
@@ -656,6 +677,9 @@ export async function getExecutiveReport(
   }
   if (filters?.inputId) {
     params.set("inputId", filters.inputId);
+  }
+  if (filters?.viewMode) {
+    params.set("viewMode", filters.viewMode);
   }
   const query = params.toString();
   const path = query
@@ -667,22 +691,24 @@ export async function getExecutiveReport(
 }
 
 export async function getEsgLedgerJson(
-  filters?: NetworkQueryFilters,
+  filters?: NetworkQueryFilters & { viewMode?: FinancialViewMode },
 ): Promise<EsgLedgerResponse> {
   const params = new URLSearchParams({ format: "json" });
   if (filters?.productId) params.set("productId", filters.productId);
   if (filters?.inputId) params.set("inputId", filters.inputId);
+  if (filters?.viewMode) params.set("viewMode", filters.viewMode);
   return apiRequest(`/api/v1/analytics/esg-ledger?${params.toString()}`, { method: "GET" }, (res) =>
     parseWithSchema(EsgLedgerResponseSchema, res),
   );
 }
 
 export async function exportEsgLedgerCsv(
-  filters?: NetworkQueryFilters,
+  filters?: NetworkQueryFilters & { viewMode?: FinancialViewMode },
 ): Promise<string> {
   const params = new URLSearchParams({ format: "csv" });
   if (filters?.productId) params.set("productId", filters.productId);
   if (filters?.inputId) params.set("inputId", filters.inputId);
+  if (filters?.viewMode) params.set("viewMode", filters.viewMode);
   const response = await fetch(`/api/v1/analytics/esg-ledger?${params.toString()}`, {
     method: "GET",
     credentials: "include",

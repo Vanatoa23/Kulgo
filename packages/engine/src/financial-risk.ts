@@ -486,21 +486,32 @@ export function computeFinancialRiskSummary(
       ) !== "DOWNSTREAM",
   );
 
-  const commercials =
-    input.commercials ??
-    deriveNetworkCommercials(
-      sourcingLanes,
-      input.inputs,
-      contracts,
-      contractLines,
-      {
-        asOfDate: input.asOfDate,
-        viewMode: input.viewMode ?? "PERIOD_WINDOW",
-        windowStart: input.windowStart,
-        windowEndExclusive: input.windowEndExclusive,
-        fxRatesToEur: input.fxRatesToEur,
-      },
+  const hasDownstreamExcluded = sourcingLanes.length !== input.lanes.length;
+  const commercialsIncludeDownstream =
+    hasDownstreamExcluded &&
+    input.commercials !== undefined &&
+    input.lanes.some(
+      (lane) =>
+        !sourcingLanes.includes(lane) &&
+        input.commercials!.laneSummaries.has(lane.laneId),
     );
+
+  const commercials =
+    input.commercials && !commercialsIncludeDownstream
+      ? input.commercials
+      : deriveNetworkCommercials(
+          sourcingLanes,
+          input.inputs,
+          contracts,
+          contractLines,
+          {
+            asOfDate: input.asOfDate,
+            viewMode: input.viewMode ?? "PERIOD_WINDOW",
+            windowStart: input.windowStart,
+            windowEndExclusive: input.windowEndExclusive,
+            fxRatesToEur: input.fxRatesToEur,
+          },
+        );
 
   const horizonDays =
     commercials.viewMode === "RUN_RATE"

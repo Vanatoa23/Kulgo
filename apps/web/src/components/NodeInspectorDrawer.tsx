@@ -5,6 +5,7 @@ import {
   type Contract,
   type ContractLine,
   type CreateInviteInput,
+  type CreateInviteResponse,
   type CreateSupplyLaneInput,
   type Facility,
   type FacilityKind,
@@ -25,6 +26,7 @@ import {
   ChevronDown,
   ChevronRight,
   Compass,
+  Copy,
   Mail,
   MapPin,
   Plus,
@@ -61,8 +63,13 @@ export interface NodeInspectorDrawerProps {
     laneId: string,
     input: UpdateSupplyLaneInput,
   ) => Promise<boolean>;
+  onApplyAllocationSplits: (
+    splits: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ) => Promise<boolean>;
   onDeleteLane: (laneId: string) => Promise<boolean>;
-  onCreateInvite: (input: CreateInviteInput) => Promise<boolean>;
+  onCreateInvite: (
+    input: CreateInviteInput,
+  ) => Promise<CreateInviteResponse | null>;
   onContractsChanged: () => Promise<void> | void;
 }
 
@@ -119,6 +126,7 @@ export function NodeInspectorDrawer({
   onDeleteFacility,
   onCreateLane,
   onUpdateLane,
+  onApplyAllocationSplits,
   onDeleteLane,
   onCreateInvite,
   onContractsChanged,
@@ -220,7 +228,10 @@ export function NodeInspectorDrawer({
 
   // Partner invite state
   const [inviteEmail, setInviteEmail] = useState("");
-  const [inviteNotice, setInviteNotice] = useState<string | null>(null);
+  const [generatedInviteLink, setGeneratedInviteLink] = useState<string | null>(
+    null,
+  );
+  const [copiedInviteLink, setCopiedInviteLink] = useState(false);
 
   // Sync when facility changes
   useEffect(() => {
@@ -234,6 +245,8 @@ export function NodeInspectorDrawer({
     setAddingRoute(false);
     setRouteError(null);
     setSplitNotice(null);
+    setGeneratedInviteLink(null);
+    setCopiedInviteLink(false);
     setExpandedLaneId(
       initialLaneId ??
         lanes.find((l) => l.fromFacilityId === facility.facilityId)?.laneId ??
@@ -357,32 +370,14 @@ export function NodeInspectorDrawer({
 
     setSplitSavingKey(groupKey);
     setSplitNotice(null);
-    const totalGroupVolume = groupLanes.reduce(
-      (sum, l) => sum + (l.annualVolume ?? 0),
-      0,
+    const ok = await onApplyAllocationSplits(
+      groupLanes.map((lane) => ({
+        laneId: lane.laneId,
+        allocationSplitPct: Number(splitDrafts[lane.laneId]) || 0,
+      })),
     );
-    const totalGroupSpend = groupLanes.reduce(
-      (sum, l) => sum + (l.annualSpendEur ?? 0),
-      0,
-    );
-
-    let allOk = true;
-    for (const lane of groupLanes) {
-      const pct = Number(splitDrafts[lane.laneId]) || 0;
-      const ok = await onUpdateLane(lane.laneId, {
-        allocationSplitPct: pct,
-        volumeSharePct: pct,
-        ...(totalGroupVolume > 0
-          ? { annualVolume: Number(((totalGroupVolume * pct) / 100).toFixed(2)) }
-          : {}),
-        ...(totalGroupSpend > 0
-          ? { annualSpendEur: Number(((totalGroupSpend * pct) / 100).toFixed(2)) }
-          : {}),
-      });
-      if (!ok) allOk = false;
-    }
     setSplitSavingKey(null);
-    if (allOk) {
+    if (ok) {
       setSplitNotice("Destination allocation split updated to 100%.");
     }
   };
@@ -459,15 +454,16 @@ export function NodeInspectorDrawer({
 
   const handleSendInvite = async (e: FormEvent) => {
     e.preventDefault();
-    setInviteNotice(null);
+    setGeneratedInviteLink(null);
+    setCopiedInviteLink(false);
     if (!inviteEmail.trim()) return;
-    const ok = await onCreateInvite({
+    const result = await onCreateInvite({
       targetFacilityId: facility.facilityId,
       inviteeEmail: inviteEmail.trim(),
     });
-    if (ok) {
+    if (result) {
       setInviteEmail("");
-      setInviteNotice("Partner invitation sent.");
+      setGeneratedInviteLink(result.inviteLink);
     }
   };
 
@@ -681,11 +677,24 @@ export function NodeInspectorDrawer({
                 0,
               );
               const isValid = Math.abs(totalPct - 100) <= 0.01;
-              const totalVol = group.lanes.reduce(
-                (sum, l) => sum + (l.annualVolume ?? 0),
-                0,
+              const unitFactor = (u: string) =>
+                u === "TONNES" ? 1000 : u === "KG" ? 1 : null;
+              const allMass = group.lanes.every(
+                (l) => unitFactor(l.volumeUnit) !== null,
               );
-              const unit = group.lanes[0]?.volumeUnit ?? "TONNES";
+              const allSameUnit =
+                new Set(group.lanes.map((l) => l.volumeUnit)).size === 1;
+              const canPreviewVol = allSameUnit || allMass;
+              const totalCanonicalVol = canPreviewVol
+                ? group.lanes.reduce((sum, l) => {
+                    const vol =
+                      derivedByLaneId.get(l.laneId)?.activeVolume ??
+                      l.annualVolume ??
+                      0;
+                    const factor = allMass ? (unitFactor(l.volumeUnit) ?? 1) : 1;
+                    return sum + vol * factor;
+                  }, 0)
+                : 0;
 
               return (
                 <div
@@ -730,8 +739,11 @@ export function NodeInspectorDrawer({
                     {group.lanes.map((lane, idx) => {
                       const dest = facilitiesById.get(lane.toFacilityId);
                       const pct = Number(splitDrafts[lane.laneId]) || 0;
+                      const factor = allMass ? (unitFactor(lane.volumeUnit) ?? 1) : 1;
                       const derivedVol =
-                        totalVol > 0 ? ((totalVol * pct) / 100).toFixed(1) : null;
+                        canPreviewVol && totalCanonicalVol > 0
+                          ? ((totalCanonicalVol * pct) / 100 / factor).toFixed(1)
+                          : null;
                       return (
                         <div
                           key={lane.laneId}
@@ -748,7 +760,7 @@ export function NodeInspectorDrawer({
                           <div className="flex items-center gap-2 shrink-0">
                             {derivedVol && (
                               <span className="text-[10px] font-mono text-slate-400">
-                                {derivedVol} {unit}
+                                {derivedVol} {lane.volumeUnit}
                               </span>
                             )}
                             <input
@@ -1231,8 +1243,35 @@ export function NodeInspectorDrawer({
                   </button>
                 </form>
               )}
-              {inviteNotice && (
-                <div className="text-[11px] text-emerald-300">{inviteNotice}</div>
+              {generatedInviteLink && (
+                <div
+                  data-testid="partner-invite-link"
+                  className="rounded-lg border border-emerald-500/35 bg-emerald-500/10 p-2 space-y-1.5"
+                >
+                  <div className="text-[11px] font-medium text-emerald-200">
+                    Share this invite link with your partner (no email is sent automatically):
+                  </div>
+                  <div className="flex items-center gap-1.5">
+                    <input
+                      type="text"
+                      readOnly
+                      aria-label="Shareable partner invitation link"
+                      value={generatedInviteLink}
+                      className="flex-1 rounded border border-slate-700 bg-slate-950 px-2 py-1 font-mono text-[10px] text-emerald-200"
+                    />
+                    <button
+                      type="button"
+                      onClick={() => {
+                        void navigator.clipboard?.writeText(generatedInviteLink);
+                        setCopiedInviteLink(true);
+                      }}
+                      className="inline-flex items-center gap-1 rounded border border-emerald-500/40 bg-emerald-500/20 hover:bg-emerald-500/30 px-2 py-1 text-[10px] font-semibold text-emerald-200 cursor-pointer shrink-0"
+                    >
+                      <Copy className="h-3 w-3" />
+                      {copiedInviteLink ? "Copied" : "Copy"}
+                    </button>
+                  </div>
+                </div>
               )}
             </section>
           )}

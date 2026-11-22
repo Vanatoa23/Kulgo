@@ -5,6 +5,7 @@ import {
   type ContractLine,
   type CreateFacilityInput,
   type CreateInviteInput,
+  type CreateInviteResponse,
   type CreateProductInput,
   type CreateSupplyInputInput,
   type CreateSupplyLaneInput,
@@ -63,10 +64,15 @@ export interface NetworkHubPageProps {
     laneId: string,
     input: UpdateSupplyLaneInput,
   ) => Promise<boolean>;
+  onApplyAllocationSplits: (
+    splits: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ) => Promise<boolean>;
   onDeleteLane: (laneId: string) => Promise<boolean>;
   onCreateProduct: (input: CreateProductInput) => Promise<boolean>;
   onCreateSupplyInput: (input: CreateSupplyInputInput) => Promise<boolean>;
-  onCreateInvite: (input: CreateInviteInput) => Promise<boolean>;
+  onCreateInvite: (
+    input: CreateInviteInput,
+  ) => Promise<CreateInviteResponse | null>;
   onContractsChanged: () => Promise<void> | void;
 }
 
@@ -145,6 +151,7 @@ export function NetworkHubPage({
   onDeleteFacility,
   onCreateLane,
   onUpdateLane,
+  onApplyAllocationSplits,
   onDeleteLane,
   onCreateProduct,
   onCreateSupplyInput,
@@ -764,6 +771,7 @@ export function NetworkHubPage({
           onDeleteFacility={onDeleteFacility}
           onCreateLane={onCreateLane}
           onUpdateLane={onUpdateLane}
+          onApplyAllocationSplits={onApplyAllocationSplits}
           onDeleteLane={onDeleteLane}
           onCreateInvite={onCreateInvite}
           onContractsChanged={onContractsChanged}

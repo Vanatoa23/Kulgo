@@ -62,6 +62,19 @@ export function LaneContractsDrawerSection({
     new Date().toISOString().slice(0, 10),
   );
   const [endDate, setEndDate] = useState(() => addOneYearIso(null));
+  const [draftIdempotencyKey, setDraftIdempotencyKey] = useState(() =>
+    typeof crypto !== "undefined" && "randomUUID" in crypto
+      ? crypto.randomUUID()
+      : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+  );
+
+  const rotateIdempotencyKey = () => {
+    setDraftIdempotencyKey(
+      typeof crypto !== "undefined" && "randomUUID" in crypto
+        ? crypto.randomUUID()
+        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
+    );
+  };
 
   const laneLines = contractLines.filter((l) => l.laneId === lane.laneId);
   const contractById = new Map(contracts.map((c) => [c.contractId, c]));
@@ -126,8 +139,8 @@ export function LaneContractsDrawerSection({
             ? "Quick Commercial Estimate"
             : "Framework Agreement";
 
-      // Single atomic/idempotent server request so partial failures or retries
-      // can never create orphaned or duplicate Base Agreements (#47).
+      // Single atomic/idempotent server request so partial failures or lost-response
+      // retries can never create orphaned or duplicate contracts (#47).
       await createContract({
         supplierFacilityId: lane.fromFacilityId,
         title: title.trim() || defaultTitle,
@@ -139,6 +152,7 @@ export function LaneContractsDrawerSection({
         endDate: trimmedEnd ? trimmedEnd : null,
         noticePeriodDays: parsedNotice,
         nonRenewalNoticeGiven: false,
+        idempotencyKey: draftIdempotencyKey,
         ...(shouldPreserveLegacyBase
           ? { preserveLegacyBaseForLaneId: lane.laneId }
           : {}),
@@ -155,10 +169,11 @@ export function LaneContractsDrawerSection({
         ],
       });
 
-      // Reset draft fields ONLY after confirmed server success (#47)
+      // Reset draft fields & rotate idempotency key ONLY after confirmed server success (#47)
       setVolume("");
       setSpend("");
       setAdding(false);
+      rotateIdempotencyKey();
       await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save contract");

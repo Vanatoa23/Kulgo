@@ -1,11 +1,14 @@
 import { estimateLaneCo2eTonnes, haversineDistanceKm } from "@kulgo/engine";
 import { WorkspaceNetworkResponseSchema } from "@kulgo/shared";
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { createApp, createTestApp } from "../src/app.js";
 import { InMemoryAuthRepository } from "../src/auth/repository.js";
 import { loadConfig } from "../src/config.js";
 import type { ArcadeDbClient } from "../src/db/client.js";
-import { InMemoryWorkspaceRepository } from "../src/workspace/repository.js";
+import {
+  ArcadeDbWorkspaceRepository,
+  InMemoryWorkspaceRepository,
+} from "../src/workspace/repository.js";
 
 function extractCookie(res: Response): string {
   const header = res.headers.get("set-cookie") ?? "";
@@ -644,5 +647,441 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     );
     expect(baseAgreements).toHaveLength(1);
     expect(finalBody.contracts).toHaveLength(3); // 1 Base + 2 Spot Top-Ups
+
+    // 4. Invalid supplierFacilityId must reject with 400 BEFORE creating any Base Agreement
+    const otherLegacyLane = network.lanes.find(
+      (l) =>
+        l.direction === "UPSTREAM" &&
+        l.laneId !== legacyLane!.laneId &&
+        (l.annualVolume ?? 0) > 0,
+    );
+    expect(otherLegacyLane).toBeDefined();
+    const badSupplierRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        ...validPayload,
+        supplierFacilityId: "00000000-0000-4000-8000-000000000099",
+        preserveLegacyBaseForLaneId: otherLegacyLane!.laneId,
+        lines: [
+          {
+            laneId: otherLegacyLane!.laneId,
+            inputId: otherLegacyLane!.inputId,
+            cadence: "TOTAL_OVER_TERM",
+            committedVolume: 10,
+            unit: otherLegacyLane!.volumeUnit,
+            committedSpend: 10000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(badSupplierRes.status).toBe(400);
+
+    // 5. Replaying a committed request with the same idempotencyKey deduplicates cleanly
+    const idemKey = "idem-lost-response-retry-001";
+    const firstIdem = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        ...validPayload,
+        title: "Idempotent Spot PO",
+        idempotencyKey: idemKey,
+      }),
+    });
+    expect(firstIdem.status).toBe(201);
+    const firstIdemBody = (await firstIdem.json()) as {
+      contract: { contractId: string };
+    };
+
+    const replayIdem = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        ...validPayload,
+        title: "Idempotent Spot PO",
+        idempotencyKey: idemKey,
+      }),
+    });
+    expect(replayIdem.status).toBe(200);
+    const replayIdemBody = (await replayIdem.json()) as {
+      contract: { contractId: string };
+    };
+    expect(replayIdemBody.contract.contractId).toBe(
+      firstIdemBody.contract.contractId,
+    );
+
+    const afterIdemList = await app.request("/api/v1/workspace/contracts", {
+      headers: { Cookie: cookie },
+    });
+    const afterIdemBody = (await afterIdemList.json()) as {
+      contracts: Array<{ title: string }>;
+    };
+    expect(
+      afterIdemBody.contracts.filter((c) => c.title === "Idempotent Spot PO"),
+    ).toHaveLength(1);
+    expect(
+      afterIdemBody.contracts.filter((c) => c.title === "Base Agreement"),
+    ).toHaveLength(1);
+  });
+
+  it("applies allocation splits atomically with unit normalization (1 TONNE + 1000 KG -> 1.2 TONNES + 800 KG) and updates contract lines", async () => {
+    const app = createTestApp();
+    const { cookie } = await registerAndGetCookie(
+      app,
+      "splits-atomic@tallinn-mfg.ee",
+      "Estonia Splits OU",
+    );
+
+    const createFac = async (body: Record<string, unknown>) => {
+      const res = await app.request("/api/v1/workspace/facilities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { facility: { facilityId: string } }).facility;
+    };
+
+    const supplier = await createFac({
+      name: "Supplier Alpha",
+      kind: "FACTORY",
+      countryCode: "EE",
+      lat: 58.38,
+      lng: 26.72,
+      relationshipRole: "SUPPLIER",
+    });
+    const whA = await createFac({
+      name: "Tallinn WH",
+      kind: "WAREHOUSE",
+      countryCode: "EE",
+      lat: 59.43,
+      lng: 24.75,
+      relationshipRole: "OWN",
+    });
+    const whB = await createFac({
+      name: "Tartu WH",
+      kind: "WAREHOUSE",
+      countryCode: "EE",
+      lat: 58.37,
+      lng: 26.74,
+      relationshipRole: "OWN",
+    });
+
+    const createLaneReq = async (body: Record<string, unknown>) => {
+      const res = await app.request("/api/v1/workspace/lanes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { lane: { laneId: string } }).lane;
+    };
+
+    const laneTonnes = await createLaneReq({
+      fromFacilityId: supplier.facilityId,
+      toFacilityId: whA.facilityId,
+      materialCategory: "Copper",
+      transportMode: "ROAD",
+      volumeSharePct: 50,
+      allocationSplitPct: 50,
+      annualVolume: 1,
+      volumeUnit: "TONNES",
+      annualSpendEur: 5000,
+    });
+    const laneKg = await createLaneReq({
+      fromFacilityId: supplier.facilityId,
+      toFacilityId: whB.facilityId,
+      materialCategory: "Copper",
+      transportMode: "ROAD",
+      volumeSharePct: 50,
+      allocationSplitPct: 50,
+      annualVolume: 1000,
+      volumeUnit: "KG",
+      annualSpendEur: 5000,
+    });
+
+    // Rejects non-100% split atomically
+    const badSplit = await app.request("/api/v1/workspace/lanes/allocation-splits", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        splits: [
+          { laneId: laneTonnes.laneId, allocationSplitPct: 60 },
+          { laneId: laneKg.laneId, allocationSplitPct: 30 },
+        ],
+      }),
+    });
+    expect(badSplit.status).toBe(400);
+
+    // 60/40 split on 1 TONNE + 1000 KG (= 2000 KG) -> 1.2 TONNES + 800 KG
+    const okSplit = await app.request("/api/v1/workspace/lanes/allocation-splits", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        splits: [
+          { laneId: laneTonnes.laneId, allocationSplitPct: 60 },
+          { laneId: laneKg.laneId, allocationSplitPct: 40 },
+        ],
+      }),
+    });
+    expect(okSplit.status).toBe(200);
+    const splitBody = (await okSplit.json()) as {
+      lanes: Array<{
+        laneId: string;
+        allocationSplitPct: number;
+        annualVolume: number;
+        annualSpendEur: number;
+      }>;
+    };
+    const updatedTonnes = splitBody.lanes.find((l) => l.laneId === laneTonnes.laneId)!;
+    const updatedKg = splitBody.lanes.find((l) => l.laneId === laneKg.laneId)!;
+    expect(updatedTonnes.allocationSplitPct).toBe(60);
+    expect(updatedTonnes.annualVolume).toBeCloseTo(1.2, 4);
+    expect(updatedTonnes.annualSpendEur).toBe(6000);
+    expect(updatedKg.allocationSplitPct).toBe(40);
+    expect(updatedKg.annualVolume).toBeCloseTo(800, 4);
+    expect(updatedKg.annualSpendEur).toBe(4000);
+  });
+
+  it("preserves relationshipRole, direction, and allocationSplitPct across CSV export/import round-trips", async () => {
+    const app = createTestApp();
+    const { cookie: sourceCookie } = await registerAndGetCookie(
+      app,
+      "csv-src@tallinn-mfg.ee",
+      "CSV Source OU",
+    );
+    const seedRes = await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: sourceCookie },
+    });
+    expect(seedRes.status).toBe(201);
+
+    const exportRes = await app.request("/api/v1/workspace/export?format=csv", {
+      headers: { Cookie: sourceCookie },
+    });
+    expect(exportRes.status).toBe(200);
+    const csvText = await exportRes.text();
+    expect(csvText).toContain("relationshipRole");
+    expect(csvText).toContain("direction");
+    expect(csvText).toContain("allocationSplitPct");
+
+    const { cookie: destCookie } = await registerAndGetCookie(
+      app,
+      "csv-dst@tallinn-mfg.ee",
+      "CSV Dest OU",
+    );
+    const importRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: { "Content-Type": "text/csv", Cookie: destCookie },
+      body: csvText,
+    });
+    expect(importRes.status).toBe(200);
+
+    const netRes = await app.request("/api/v1/workspace/network", {
+      headers: { Cookie: destCookie },
+    });
+    const restored = WorkspaceNetworkResponseSchema.parse(await netRes.json());
+    expect(
+      restored.facilities.filter((f) => f.relationshipRole === "CLIENT").length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      restored.lanes.filter((l) => l.direction === "DOWNSTREAM").length,
+    ).toBeGreaterThanOrEqual(2);
+    expect(
+      restored.lanes
+        .filter((l) => l.direction === "UPSTREAM" && l.allocationSplitPct != null)
+        .map((l) => l.allocationSplitPct)
+        .sort(),
+    ).toEqual([30, 70]);
+  });
+
+  it("ArcadeDbWorkspaceRepository SELECT queries project relationshipRole, direction, and allocationSplitPct", async () => {
+    const seenSql: string[] = [];
+    const mockDb: ArcadeDbClient = {
+      healthCheck: vi.fn(async () => ({ connected: true, latencyMs: 1 })),
+      ensureDatabase: vi.fn(async () => undefined),
+      query: vi.fn(async (_lang: string, sql: string) => {
+        seenSql.push(sql);
+        return [];
+      }),
+      command: vi.fn(async () => []),
+    };
+    const repo = new ArcadeDbWorkspaceRepository(mockDb);
+    const orgId = "11111111-1111-4111-8111-111111111111";
+    const id = "22222222-2222-4222-8222-222222222222";
+    await repo.listFacilities(orgId);
+    await repo.updateFacility(orgId, id, { name: "Probe" });
+    await repo.listLanes(orgId);
+    await repo.updateLane(orgId, id, { leadTimeDays: 5 });
+
+    const facilityQueries = seenSql.filter((s) => s.includes("FROM Facility"));
+    const laneQueries = seenSql.filter((s) => s.includes("FROM SUPPLIES_LANE"));
+    expect(facilityQueries).toHaveLength(2);
+    for (const q of facilityQueries) {
+      expect(q).toContain("relationshipRole");
+    }
+    expect(laneQueries).toHaveLength(2);
+    for (const q of laneQueries) {
+      expect(q).toContain("direction");
+      expect(q).toContain("allocationSplitPct");
+    }
+  });
+
+  it("excludes DOWNSTREAM client delivery volumes from sourcing risk even when linked to the same inputId", async () => {
+    const app = createTestApp();
+    const { cookie } = await registerAndGetCookie(
+      app,
+      "downstream-risk@tallinn-mfg.ee",
+      "Downstream Risk OU",
+    );
+
+    // Create product + input with annualDemandQty = 100 TONNES
+    const prodRes = await app.request("/api/v1/workspace/products", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        name: "Widget",
+        sku: "WDG-1",
+        annualRevenueEur: 1_000_000,
+        grossMarginPct: 40,
+      }),
+    });
+    const { product } = (await prodRes.json()) as {
+      product: { productId: string };
+    };
+
+    const inputRes = await app.request("/api/v1/workspace/inputs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        productId: product.productId,
+        name: "Steel Coil",
+        category: "STEEL",
+        unit: "TONNES",
+        totalAnnualDemand: 100,
+        materialCriticality: 1,
+      }),
+    });
+    expect(inputRes.status).toBe(201);
+    const { input } = (await inputRes.json()) as {
+      input: { inputId: string };
+    };
+
+    const mkFac = async (
+      name: string,
+      isOwnFacility: boolean,
+      relationshipRole: "OWN" | "SUPPLIER" | "CLIENT",
+      lat: number,
+      lng: number,
+    ) => {
+      const res = await app.request("/api/v1/workspace/facilities", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          name,
+          kind: relationshipRole === "CLIENT" ? "WAREHOUSE" : "FACTORY",
+          isOwnFacility,
+          relationshipRole,
+          tier: relationshipRole === "SUPPLIER" ? 1 : 0,
+          countryCode: "EE",
+          lat,
+          lng,
+          locationPrecision: "SITE_VERIFIED",
+        }),
+      });
+      expect(res.status).toBe(201);
+      return ((await res.json()) as { facility: { facilityId: string } }).facility;
+    };
+
+    const ownFac = await mkFac("Own Plant", true, "OWN", 59.437, 24.7536);
+    const supFac = await mkFac("Upstream Supplier", false, "SUPPLIER", 58.378, 26.729);
+    const clientFac = await mkFac("Downstream Client", false, "CLIENT", 60.1699, 24.9384);
+
+    // Upstream lane covers only 40 TONNES out of 100 TONNES demand (60 TONNES uncontracted)
+    const upLaneRes = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        fromFacilityId: supFac.facilityId,
+        toFacilityId: ownFac.facilityId,
+        direction: "UPSTREAM",
+        inputId: input.inputId,
+        materialCategory: "STEEL",
+        transportMode: "ROAD",
+        annualVolume: 40,
+        volumeUnit: "TONNES",
+        annualSpendEur: 40_000,
+        leadTimeDays: 10,
+      }),
+    });
+    expect(upLaneRes.status).toBe(201);
+
+    const beforeRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: cookie },
+    });
+    expect(beforeRes.status).toBe(200);
+    const before = (await beforeRes.json()) as {
+      financialRisk: {
+        baseEur: number | null;
+        totalActiveSpendEur: number;
+        materials: Array<{
+          inputId: string;
+          mappedActiveVolume: number | null;
+          uncontractedDemand: number | null;
+        }>;
+      };
+    };
+
+    // Add a DOWNSTREAM client delivery lane of 60 TONNES linked to the SAME inputId
+    const dsLaneRes = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        fromFacilityId: ownFac.facilityId,
+        toFacilityId: clientFac.facilityId,
+        direction: "DOWNSTREAM",
+        inputId: input.inputId,
+        materialCategory: "STEEL",
+        transportMode: "ROAD",
+        annualVolume: 60,
+        volumeUnit: "TONNES",
+        annualSpendEur: 60_000,
+        leadTimeDays: 5,
+      }),
+    });
+    expect(dsLaneRes.status).toBe(201);
+
+    const afterRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: cookie },
+    });
+    expect(afterRes.status).toBe(200);
+    const after = (await afterRes.json()) as {
+      financialRisk: {
+        baseEur: number | null;
+        totalActiveSpendEur: number;
+        materials: Array<{
+          inputId: string;
+          mappedActiveVolume: number | null;
+          uncontractedDemand: number | null;
+        }>;
+      };
+    };
+
+    const beforeMat = before.financialRisk.materials.find(
+      (m) => m.inputId === input.inputId,
+    );
+    const afterMat = after.financialRisk.materials.find(
+      (m) => m.inputId === input.inputId,
+    );
+    expect(beforeMat?.mappedActiveVolume).toBeCloseTo(40, 4);
+    expect(afterMat?.mappedActiveVolume).toBeCloseTo(40, 4);
+    expect(beforeMat?.uncontractedDemand).toBeCloseTo(60, 4);
+    expect(afterMat?.uncontractedDemand).toBeCloseTo(60, 4);
+    expect(after.financialRisk.totalActiveSpendEur).toBeCloseTo(
+      before.financialRisk.totalActiveSpendEur,
+      2,
+    );
+    expect(after.financialRisk.baseEur).toBe(before.financialRisk.baseEur);
   });
 });

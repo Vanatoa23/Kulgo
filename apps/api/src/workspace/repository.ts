@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { estimateLaneCo2eTonnes, haversineDistanceKm } from "@kulgo/engine";
 import {
   ContractLineSchema,
@@ -271,6 +271,70 @@ export interface WorkspaceRepository {
     contractLineId: string,
     input: UpdateContractLineInput,
   ): Promise<ContractLine | null>;
+  createContractWithLinesAtomic(
+    orgId: string,
+    input: CreateContractWithLinesAtomicInput,
+  ): Promise<CreateContractWithLinesAtomicResult>;
+  applyAllocationSplitsAtomic(
+    orgId: string,
+    updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }>;
+}
+
+export interface CreateContractWithLinesAtomicInput {
+  contract: CreateContractInput;
+  lines: ReadonlyArray<Omit<CreateContractLineInput, "contractId">>;
+  preserveLegacyBaseForLaneId?: string;
+  idempotencyKey?: string;
+}
+
+export interface CreateContractWithLinesAtomicResult {
+  contract: Contract;
+  lines: ContractLine[];
+  preservedBase?: { contract: Contract; lines: ContractLine[] };
+  deduplicated?: boolean;
+}
+
+function deterministicUuid(namespace: string, orgId: string, key: string): string {
+  const bytes = createHash("sha256")
+    .update(`${namespace}:${orgId}:${key}`)
+    .digest()
+    .subarray(0, 16);
+  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
+  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
+  const hex = bytes.toString("hex");
+  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
+}
+
+const MASS_TO_KG: Readonly<Record<string, number>> = {
+  KG: 1,
+  TONNES: 1000,
+};
+
+function getNormalizedUnitInfo(unit: string): {
+  family: string;
+  factorToCanonical: number;
+} {
+  const upper = unit.trim().toUpperCase();
+  if (upper in MASS_TO_KG) {
+    return { family: "MASS", factorToCanonical: MASS_TO_KG[upper]! };
+  }
+  return { family: upper, factorToCanonical: 1 };
+}
+
+function areUnitsCompatible(units: readonly string[]): boolean {
+  if (units.length <= 1) return true;
+  const firstFamily = getNormalizedUnitInfo(units[0]!).family;
+  return units.every((u) => getNormalizedUnitInfo(u).family === firstFamily);
+}
+
+function toCanonicalQuantity(value: number, unit: string): number {
+  return value * getNormalizedUnitInfo(unit).factorToCanonical;
+}
+
+function fromCanonicalQuantity(canonicalValue: number, unit: string): number {
+  const { factorToCanonical } = getNormalizedUnitInfo(unit);
+  return Number((canonicalValue / factorToCanonical).toFixed(4));
 }
 
 function parseConversionFactorsJson(
@@ -584,6 +648,15 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     hook: (orgId: string, facilityId: string) => Promise<void>,
   ): void {
     this.onFacilityDeleted = hook;
+  }
+
+  private runInTransaction<T>(
+    work: (tx: ArcadeDbClient) => Promise<T>,
+  ): Promise<T> {
+    if (typeof this.db.transaction === "function") {
+      return this.db.transaction(work);
+    }
+    return work(this.db);
   }
 
   async getNetwork(
@@ -983,7 +1056,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
-              lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
+              lat, lng, isOwnFacility, relationshipRole, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
               defaultCarryingCostPct, annualElectricityMwh, renewableElectricityPct,
               renewableInstrumentsVerified, annualRevenueEur
        FROM Facility WHERE ownerOrgId = :orgId`,
@@ -1000,7 +1073,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
-              lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
+              lat, lng, isOwnFacility, relationshipRole, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
               defaultCarryingCostPct, annualElectricityMwh, renewableElectricityPct,
               renewableInstrumentsVerified, annualRevenueEur
        FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :orgId LIMIT 1`,
@@ -1415,7 +1488,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const safeOrgId = assertOrgId(orgId);
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, inputId, materialCategory,
+      `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
               transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
               contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
               riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
@@ -1434,7 +1507,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const safeOrgId = assertOrgId(orgId);
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, inputId, materialCategory,
+      `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
               transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
               contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
               riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
@@ -2227,6 +2300,533 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
 
     return updated;
   }
+
+  async createContractWithLinesAtomic(
+    orgId: string,
+    input: CreateContractWithLinesAtomicInput,
+  ): Promise<CreateContractWithLinesAtomicResult> {
+    const safeOrgId = assertOrgId(orgId);
+    const trimmedIdem = input.idempotencyKey?.trim() || undefined;
+    const targetContractId = trimmedIdem
+      ? deterministicUuid("kulgo-contract-idem", safeOrgId, trimmedIdem)
+      : randomUUID();
+
+    return this.runInTransaction(async (tx) => {
+      // 1. Idempotency replay check inside transaction
+      if (trimmedIdem) {
+        const existingRows = await tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT contractId, ownerOrgId, supplierFacilityId, title, contractType,
+                  pricingModel, expiryBehavior, confidence, startDate, endDate,
+                  noticePeriodDays, nonRenewalNoticeGiven, archiveEffectiveDate,
+                  isManuallyArchived, incoterms, notes
+           FROM Contract WHERE contractId = :contractId AND ownerOrgId = :orgId LIMIT 1`,
+          { contractId: targetContractId, orgId: safeOrgId },
+        );
+        if (existingRows[0]) {
+          const existingContract = mapContractRow(existingRows[0]);
+          const lineRows = await tx.query<Record<string, unknown>>(
+            "sql",
+            `SELECT contractLineId, contractId, ownerOrgId, laneId, inputId, cadence,
+                    committedVolume, unit, committedSpend, unitPrice, currency,
+                    startDateOverride, endDateOverride
+             FROM ContractLine WHERE contractId = :contractId AND ownerOrgId = :orgId`,
+            { contractId: targetContractId, orgId: safeOrgId },
+          );
+          return {
+            contract: existingContract,
+            lines: lineRows.map(mapContractLineRow),
+            deduplicated: true,
+          };
+        }
+      }
+
+      // 2. Pre-validate supplierFacilityId, all laneIds, and all inputIds BEFORE any write
+      const supplierRows = await tx.query<Record<string, unknown>>(
+        "sql",
+        "SELECT facilityId FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :orgId LIMIT 1",
+        { facilityId: input.contract.supplierFacilityId, orgId: safeOrgId },
+      );
+      if (!supplierRows[0]) {
+        throw new WorkspaceValidationError(
+          "Referenced supplierFacilityId does not exist in this organization",
+        );
+      }
+
+      const laneRows = await tx.query<Record<string, unknown>>(
+        "sql",
+        `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
+                transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
+                contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
+                riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
+                unitLandedCostEur, ordinaryFreightCostPerUnitEur, customAnnualDisruptionProb, customTtrDays,
+                productEmissionFactorTco2ePerUnit, pcfVerified, economicAttributionRatio
+         FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId`,
+        { orgId: safeOrgId },
+      );
+      const laneById = new Map(
+        laneRows.map((r) => {
+          const l = mapSupplyLaneRow(r);
+          return [l.laneId, l] as const;
+        }),
+      );
+
+      for (const lineInput of input.lines) {
+        if (!laneById.has(lineInput.laneId)) {
+          throw new WorkspaceValidationError(
+            "Referenced laneId does not exist in this organization",
+          );
+        }
+        if (lineInput.inputId) {
+          const inpRows = await tx.query<Record<string, unknown>>(
+            "sql",
+            "SELECT inputId FROM SupplyInput WHERE inputId = :inputId AND ownerOrgId = :orgId LIMIT 1",
+            { inputId: lineInput.inputId, orgId: safeOrgId },
+          );
+          if (!inpRows[0]) {
+            throw new WorkspaceValidationError(
+              "Referenced inputId does not exist in this organization",
+            );
+          }
+        }
+      }
+
+      // 3. Atomically preserve legacy Base Agreement if requested and not yet created
+      let preservedBase: { contract: Contract; lines: ContractLine[] } | undefined;
+      if (
+        input.preserveLegacyBaseForLaneId &&
+        input.contract.contractType === "SPOT_PO"
+      ) {
+        const targetLane = laneById.get(input.preserveLegacyBaseForLaneId);
+        if (!targetLane) {
+          throw new WorkspaceValidationError(
+            "Referenced preserveLegacyBaseForLaneId does not exist in this organization",
+          );
+        }
+        const existingLaneLines = await tx.query<Record<string, unknown>>(
+          "sql",
+          "SELECT contractLineId FROM ContractLine WHERE laneId = :laneId AND ownerOrgId = :orgId LIMIT 1",
+          { laneId: targetLane.laneId, orgId: safeOrgId },
+        );
+        const baseContractId = deterministicUuid(
+          "kulgo-legacy-base",
+          safeOrgId,
+          targetLane.laneId,
+        );
+        const existingBaseContract = await tx.query<Record<string, unknown>>(
+          "sql",
+          "SELECT contractId FROM Contract WHERE contractId = :contractId AND ownerOrgId = :orgId LIMIT 1",
+          { contractId: baseContractId, orgId: safeOrgId },
+        );
+        const hasLegacyValues =
+          (targetLane.annualVolume !== null && targetLane.annualVolume > 0) ||
+          (targetLane.annualSpendEur !== null && targetLane.annualSpendEur > 0);
+
+        if (
+          existingLaneLines.length === 0 &&
+          existingBaseContract.length === 0 &&
+          hasLegacyValues
+        ) {
+          const baseContract = ContractSchema.parse({
+            contractId: baseContractId,
+            ownerOrgId: safeOrgId,
+            supplierFacilityId: targetLane.fromFacilityId,
+            title: "Base Agreement",
+            contractType: "FRAMEWORK",
+            pricingModel: "FIXED",
+            expiryBehavior: "HOLDOVER",
+            confidence: "ESTIMATED",
+            startDate: `${new Date().getUTCFullYear()}-01-01`,
+            endDate: null,
+            noticePeriodDays: 30,
+            nonRenewalNoticeGiven: false,
+            archiveEffectiveDate: null,
+            isManuallyArchived: false,
+            incoterms: null,
+            notes: null,
+          });
+          const baseLine = ContractLineSchema.parse({
+            contractLineId: deterministicUuid(
+              "kulgo-legacy-base-line",
+              safeOrgId,
+              targetLane.laneId,
+            ),
+            contractId: baseContract.contractId,
+            ownerOrgId: safeOrgId,
+            laneId: targetLane.laneId,
+            inputId: targetLane.inputId,
+            cadence: "PER_YEAR",
+            committedVolume: targetLane.annualVolume,
+            unit: targetLane.volumeUnit,
+            committedSpend: targetLane.annualSpendEur,
+            unitPrice: null,
+            currency: "EUR",
+            startDateOverride: null,
+            endDateOverride: null,
+          });
+          await tx.command(
+            "sql",
+            `CREATE VERTEX Contract SET
+              contractId = :contractId, ownerOrgId = :ownerOrgId,
+              supplierFacilityId = :supplierFacilityId, title = :title,
+              contractType = :contractType, pricingModel = :pricingModel,
+              expiryBehavior = :expiryBehavior, confidence = :confidence,
+              startDate = :startDate, endDate = :endDate,
+              noticePeriodDays = :noticePeriodDays, nonRenewalNoticeGiven = :nonRenewalNoticeGiven,
+              archiveEffectiveDate = :archiveEffectiveDate, isManuallyArchived = :isManuallyArchived,
+              incoterms = :incoterms, notes = :notes`,
+            { ...baseContract },
+          );
+          await tx.command(
+            "sql",
+            `CREATE VERTEX ContractLine SET
+              contractLineId = :contractLineId, contractId = :contractId,
+              ownerOrgId = :ownerOrgId, laneId = :laneId, inputId = :inputId,
+              cadence = :cadence, committedVolume = :committedVolume, unit = :unit,
+              committedSpend = :committedSpend, unitPrice = :unitPrice, currency = :currency,
+              startDateOverride = :startDateOverride, endDateOverride = :endDateOverride`,
+            { ...baseLine },
+          );
+          preservedBase = { contract: baseContract, lines: [baseLine] };
+        }
+      }
+
+      // 4. Create requested contract + lines in the same transaction
+      const defaultExpiry =
+        input.contract.contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER";
+      const contract = ContractSchema.parse({
+        contractId: targetContractId,
+        ownerOrgId: safeOrgId,
+        supplierFacilityId: input.contract.supplierFacilityId,
+        title: input.contract.title,
+        contractType: input.contract.contractType,
+        pricingModel: input.contract.pricingModel,
+        expiryBehavior: input.contract.expiryBehavior ?? defaultExpiry,
+        confidence: input.contract.confidence,
+        startDate: input.contract.startDate,
+        endDate: input.contract.endDate ?? null,
+        noticePeriodDays: input.contract.noticePeriodDays,
+        nonRenewalNoticeGiven: input.contract.nonRenewalNoticeGiven,
+        archiveEffectiveDate: null,
+        isManuallyArchived: false,
+        incoterms: input.contract.incoterms ?? null,
+        notes: input.contract.notes ?? null,
+      });
+
+      await tx.command(
+        "sql",
+        `CREATE VERTEX Contract SET
+          contractId = :contractId, ownerOrgId = :ownerOrgId,
+          supplierFacilityId = :supplierFacilityId, title = :title,
+          contractType = :contractType, pricingModel = :pricingModel,
+          expiryBehavior = :expiryBehavior, confidence = :confidence,
+          startDate = :startDate, endDate = :endDate,
+          noticePeriodDays = :noticePeriodDays, nonRenewalNoticeGiven = :nonRenewalNoticeGiven,
+          archiveEffectiveDate = :archiveEffectiveDate, isManuallyArchived = :isManuallyArchived,
+          incoterms = :incoterms, notes = :notes`,
+        { ...contract },
+      );
+
+      const createdLines: ContractLine[] = [];
+      for (let i = 0; i < input.lines.length; i += 1) {
+        const lineInput = input.lines[i]!;
+        const lane = laneById.get(lineInput.laneId)!;
+        const line = ContractLineSchema.parse({
+          contractLineId: trimmedIdem
+            ? deterministicUuid("kulgo-contract-line-idem", safeOrgId, `${trimmedIdem}:${i}`)
+            : randomUUID(),
+          contractId: contract.contractId,
+          ownerOrgId: safeOrgId,
+          laneId: lineInput.laneId,
+          inputId: lineInput.inputId ?? lane.inputId,
+          cadence: lineInput.cadence,
+          committedVolume: lineInput.committedVolume ?? null,
+          unit: lineInput.unit,
+          committedSpend: lineInput.committedSpend ?? null,
+          unitPrice: lineInput.unitPrice ?? null,
+          currency: lineInput.currency,
+          startDateOverride: lineInput.startDateOverride ?? null,
+          endDateOverride: lineInput.endDateOverride ?? null,
+        });
+        await tx.command(
+          "sql",
+          `CREATE VERTEX ContractLine SET
+            contractLineId = :contractLineId, contractId = :contractId,
+            ownerOrgId = :ownerOrgId, laneId = :laneId, inputId = :inputId,
+            cadence = :cadence, committedVolume = :committedVolume, unit = :unit,
+            committedSpend = :committedSpend, unitPrice = :unitPrice, currency = :currency,
+            startDateOverride = :startDateOverride, endDateOverride = :endDateOverride`,
+          { ...line },
+        );
+        createdLines.push(line);
+      }
+
+      return {
+        contract,
+        lines: createdLines,
+        ...(preservedBase ? { preservedBase } : {}),
+      };
+    });
+  }
+
+  async applyAllocationSplitsAtomic(
+    orgId: string,
+    updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }> {
+    const safeOrgId = assertOrgId(orgId);
+    return this.runInTransaction(async (tx) => {
+      const [laneRows, contractRows, lineRows] = await Promise.all([
+        tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT laneId, ownerOrgId, fromFacilityId, toFacilityId, direction, allocationSplitPct, inputId, materialCategory,
+                  transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
+                  contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
+                  riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
+                  unitLandedCostEur, ordinaryFreightCostPerUnitEur, customAnnualDisruptionProb, customTtrDays,
+                  productEmissionFactorTco2ePerUnit, pcfVerified, economicAttributionRatio
+           FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId`,
+          { orgId: safeOrgId },
+        ),
+        tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT contractId, ownerOrgId, supplierFacilityId, title, contractType,
+                  pricingModel, expiryBehavior, confidence, startDate, endDate,
+                  noticePeriodDays, nonRenewalNoticeGiven, archiveEffectiveDate,
+                  isManuallyArchived, incoterms, notes
+           FROM Contract WHERE ownerOrgId = :orgId`,
+          { orgId: safeOrgId },
+        ),
+        tx.query<Record<string, unknown>>(
+          "sql",
+          `SELECT contractLineId, contractId, ownerOrgId, laneId, inputId, cadence,
+                  committedVolume, unit, committedSpend, unitPrice, currency,
+                  startDateOverride, endDateOverride
+           FROM ContractLine WHERE ownerOrgId = :orgId`,
+          { orgId: safeOrgId },
+        ),
+      ]);
+
+      const { updatedLanes, updatedContractLines } = computeAtomicSplitMutations(
+        laneRows.map(mapSupplyLaneRow),
+        contractRows.map(mapContractRow),
+        lineRows.map(mapContractLineRow),
+        updates,
+      );
+
+      for (const lane of updatedLanes) {
+        await tx.command(
+          "sql",
+          `UPDATE SUPPLIES_LANE SET
+            allocationSplitPct = :allocationSplitPct,
+            volumeSharePct = :volumeSharePct,
+            annualVolume = :annualVolume,
+            annualSpendEur = :annualSpendEur
+           WHERE laneId = :laneId AND ownerOrgId = :orgId`,
+          {
+            allocationSplitPct: lane.allocationSplitPct ?? null,
+            volumeSharePct: lane.volumeSharePct,
+            annualVolume: lane.annualVolume,
+            annualSpendEur: lane.annualSpendEur,
+            laneId: lane.laneId,
+            orgId: safeOrgId,
+          },
+        );
+      }
+
+      for (const line of updatedContractLines) {
+        await tx.command(
+          "sql",
+          `UPDATE ContractLine SET
+            committedVolume = :committedVolume,
+            committedSpend = :committedSpend
+           WHERE contractLineId = :contractLineId AND ownerOrgId = :orgId`,
+          {
+            committedVolume: line.committedVolume,
+            committedSpend: line.committedSpend,
+            contractLineId: line.contractLineId,
+            orgId: safeOrgId,
+          },
+        );
+      }
+
+      return { lanes: updatedLanes, contractLines: updatedContractLines };
+    });
+  }
+}
+
+function computeAtomicSplitMutations(
+  allLanes: readonly SupplyLane[],
+  allContracts: readonly Contract[],
+  allContractLines: readonly ContractLine[],
+  updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+): { updatedLanes: SupplyLane[]; updatedContractLines: ContractLine[] } {
+  if (updates.length < 2) {
+    throw new WorkspaceValidationError(
+      "Allocation splits require at least 2 sibling lanes",
+    );
+  }
+  const seen = new Set<string>();
+  let totalPct = 0;
+  for (const u of updates) {
+    if (seen.has(u.laneId)) {
+      throw new WorkspaceValidationError("Duplicate laneId in allocation split");
+    }
+    seen.add(u.laneId);
+    if (!Number.isFinite(u.allocationSplitPct) || u.allocationSplitPct < 0 || u.allocationSplitPct > 100) {
+      throw new WorkspaceValidationError("allocationSplitPct must be between 0 and 100");
+    }
+    totalPct += u.allocationSplitPct;
+  }
+  if (Math.abs(totalPct - 100) > 0.01) {
+    throw new WorkspaceValidationError("Allocation splits must sum to 100%");
+  }
+
+  const laneById = new Map(allLanes.map((l) => [l.laneId, l]));
+  const targetLanes: SupplyLane[] = [];
+  for (const u of updates) {
+    const lane = laneById.get(u.laneId);
+    if (!lane) {
+      throw new WorkspaceValidationError(
+        `Supply lane "${u.laneId}" was not found in this organization`,
+      );
+    }
+    targetLanes.push(lane);
+  }
+
+  const originId = targetLanes[0]!.fromFacilityId;
+  if (!targetLanes.every((l) => l.fromFacilityId === originId)) {
+    throw new WorkspaceValidationError(
+      "All lanes in an allocation split must share the same origin facility",
+    );
+  }
+
+  const pctByLaneId = new Map(
+    updates.map((u) => [u.laneId, u.allocationSplitPct]),
+  );
+
+  // Normalize compatible legacy volumes (e.g., TONNES + KG -> KG) before redistributing
+  const lanesWithVolume = targetLanes.filter(
+    (l) => l.annualVolume !== null && l.annualVolume > 0,
+  );
+  const canScaleLegacyVolume =
+    lanesWithVolume.length > 0 &&
+    areUnitsCompatible(targetLanes.map((l) => l.volumeUnit));
+  const totalCanonicalLegacyVol = canScaleLegacyVolume
+    ? lanesWithVolume.reduce(
+        (sum, l) => sum + toCanonicalQuantity(l.annualVolume!, l.volumeUnit),
+        0,
+      )
+    : 0;
+
+  const totalLegacySpend = targetLanes.reduce(
+    (sum, l) => sum + (l.annualSpendEur ?? 0),
+    0,
+  );
+
+  const updatedLanes = targetLanes.map((lane) => {
+    const pct = pctByLaneId.get(lane.laneId)!;
+    const nextVolume =
+      canScaleLegacyVolume && totalCanonicalLegacyVol > 0
+        ? fromCanonicalQuantity((totalCanonicalLegacyVol * pct) / 100, lane.volumeUnit)
+        : lane.annualVolume;
+    const nextSpend =
+      totalLegacySpend > 0
+        ? Number(((totalLegacySpend * pct) / 100).toFixed(2))
+        : lane.annualSpendEur;
+
+    return SupplyLaneSchema.parse({
+      ...lane,
+      allocationSplitPct: pct,
+      volumeSharePct: pct,
+      annualVolume: nextVolume,
+      annualSpendEur: nextSpend,
+    });
+  });
+
+  // Also proportionally scale active (non-archived) contract lines on these sibling lanes
+  // so contract-backed derived quantities immediately stay consistent with the new split.
+  const activeContractIds = new Set(
+    allContracts.filter((c) => !c.isManuallyArchived).map((c) => c.contractId),
+  );
+  const siblingLines = allContractLines.filter(
+    (cl) => seen.has(cl.laneId) && activeContractIds.has(cl.contractId),
+  );
+
+  const updatedContractLines: ContractLine[] = [];
+  if (siblingLines.length > 0) {
+    // Group active contract lines by lane so each lane's total active contract quantity
+    // is redistributed according to the new split percentage while preserving per-lane ratios.
+    const linesWithVol = siblingLines.filter(
+      (cl) => cl.committedVolume !== null && cl.committedVolume > 0,
+    );
+    const canScaleContractVol =
+      linesWithVol.length > 0 &&
+      areUnitsCompatible(linesWithVol.map((cl) => cl.unit));
+    const totalContractCanonicalVol = canScaleContractVol
+      ? linesWithVol.reduce(
+          (sum, cl) => sum + toCanonicalQuantity(cl.committedVolume!, cl.unit),
+          0,
+        )
+      : 0;
+
+    const currencies = new Set(siblingLines.map((cl) => cl.currency.toUpperCase()));
+    const canScaleContractSpend = currencies.size === 1;
+    const totalContractSpend = canScaleContractSpend
+      ? siblingLines.reduce((sum, cl) => sum + (cl.committedSpend ?? 0), 0)
+      : 0;
+
+    // Group lines by laneId so multi-contract lanes scale proportionally within the lane
+    const linesByLane = new Map<string, ContractLine[]>();
+    for (const cl of siblingLines) {
+      const list = linesByLane.get(cl.laneId) ?? [];
+      list.push(cl);
+      linesByLane.set(cl.laneId, list);
+    }
+
+    for (const [laneId, laneLines] of linesByLane) {
+      const pct = pctByLaneId.get(laneId) ?? 0;
+      const laneCurrentCanonicalVol = canScaleContractVol
+        ? laneLines.reduce(
+            (s, cl) =>
+              s + (cl.committedVolume ? toCanonicalQuantity(cl.committedVolume, cl.unit) : 0),
+            0,
+          )
+        : 0;
+      const laneCurrentSpend = canScaleContractSpend
+        ? laneLines.reduce((s, cl) => s + (cl.committedSpend ?? 0), 0)
+        : 0;
+
+      const laneTargetCanonicalVol = (totalContractCanonicalVol * pct) / 100;
+      const laneTargetSpend = (totalContractSpend * pct) / 100;
+
+      for (const cl of laneLines) {
+        let nextVol = cl.committedVolume;
+        if (canScaleContractVol && totalContractCanonicalVol > 0 && cl.committedVolume !== null) {
+          const shareWithinLane =
+            laneCurrentCanonicalVol > 0
+              ? toCanonicalQuantity(cl.committedVolume, cl.unit) / laneCurrentCanonicalVol
+              : 1 / laneLines.length;
+          nextVol = fromCanonicalQuantity(laneTargetCanonicalVol * shareWithinLane, cl.unit);
+        }
+        let nextSpend = cl.committedSpend;
+        if (canScaleContractSpend && totalContractSpend > 0 && cl.committedSpend !== null) {
+          const shareWithinLane =
+            laneCurrentSpend > 0 ? cl.committedSpend / laneCurrentSpend : 1 / laneLines.length;
+          nextSpend = Number((laneTargetSpend * shareWithinLane).toFixed(2));
+        }
+
+        updatedContractLines.push(
+          ContractLineSchema.parse({
+            ...cl,
+            committedVolume: nextVol,
+            committedSpend: nextSpend,
+          }),
+        );
+      }
+    }
+  }
+
+  return { updatedLanes, updatedContractLines };
 }
 
 interface StoredFacilityRecord {
@@ -3266,5 +3866,232 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     });
     this.contractLines.set(contractLineId, updated);
     return { ...updated };
+  }
+
+  async createContractWithLinesAtomic(
+    orgId: string,
+    input: CreateContractWithLinesAtomicInput,
+  ): Promise<CreateContractWithLinesAtomicResult> {
+    const safeOrgId = assertOrgId(orgId);
+    const trimmedIdem = input.idempotencyKey?.trim() || undefined;
+    const targetContractId = trimmedIdem
+      ? deterministicUuid("kulgo-contract-idem", safeOrgId, trimmedIdem)
+      : randomUUID();
+
+    // 1. Idempotency replay check
+    if (trimmedIdem) {
+      const existing = this.contracts.get(targetContractId);
+      if (existing && existing.ownerOrgId === safeOrgId) {
+        const existingLines = Array.from(this.contractLines.values())
+          .filter(
+            (l) =>
+              l.ownerOrgId === safeOrgId && l.contractId === targetContractId,
+          )
+          .map((l) => ({ ...l }));
+        return {
+          contract: { ...existing },
+          lines: existingLines,
+          deduplicated: true,
+        };
+      }
+    }
+
+    // 2. Pre-validate supplier, all lanes, and all inputs BEFORE mutating state
+    const supplier = this.facilities.get(input.contract.supplierFacilityId);
+    if (!supplier || supplier.facility.ownerOrgId !== safeOrgId) {
+      throw new WorkspaceValidationError(
+        "Referenced supplierFacilityId does not exist in this organization",
+      );
+    }
+
+    for (const lineInput of input.lines) {
+      const lane = this.lanes.get(lineInput.laneId);
+      if (!lane || lane.ownerOrgId !== safeOrgId) {
+        throw new WorkspaceValidationError(
+          "Referenced laneId does not exist in this organization",
+        );
+      }
+      if (lineInput.inputId) {
+        const supplyInput = this.inputs.get(lineInput.inputId);
+        if (!supplyInput || supplyInput.ownerOrgId !== safeOrgId) {
+          throw new WorkspaceValidationError(
+            "Referenced inputId does not exist in this organization",
+          );
+        }
+      }
+    }
+
+    // 3. Prepare legacy Base Agreement if needed (without mutating yet)
+    let preservedBase: { contract: Contract; lines: ContractLine[] } | undefined;
+    if (
+      input.preserveLegacyBaseForLaneId &&
+      input.contract.contractType === "SPOT_PO"
+    ) {
+      const targetLane = this.lanes.get(input.preserveLegacyBaseForLaneId);
+      if (!targetLane || targetLane.ownerOrgId !== safeOrgId) {
+        throw new WorkspaceValidationError(
+          "Referenced preserveLegacyBaseForLaneId does not exist in this organization",
+        );
+      }
+      const laneHasLines = Array.from(this.contractLines.values()).some(
+        (l) => l.ownerOrgId === safeOrgId && l.laneId === targetLane.laneId,
+      );
+      const baseContractId = deterministicUuid(
+        "kulgo-legacy-base",
+        safeOrgId,
+        targetLane.laneId,
+      );
+      const hasLegacyValues =
+        (targetLane.annualVolume !== null && targetLane.annualVolume > 0) ||
+        (targetLane.annualSpendEur !== null && targetLane.annualSpendEur > 0);
+
+      if (
+        !laneHasLines &&
+        !this.contracts.has(baseContractId) &&
+        hasLegacyValues
+      ) {
+        const baseContract = ContractSchema.parse({
+          contractId: baseContractId,
+          ownerOrgId: safeOrgId,
+          supplierFacilityId: targetLane.fromFacilityId,
+          title: "Base Agreement",
+          contractType: "FRAMEWORK",
+          pricingModel: "FIXED",
+          expiryBehavior: "HOLDOVER",
+          confidence: "ESTIMATED",
+          startDate: `${new Date().getUTCFullYear()}-01-01`,
+          endDate: null,
+          noticePeriodDays: 30,
+          nonRenewalNoticeGiven: false,
+          archiveEffectiveDate: null,
+          isManuallyArchived: false,
+          incoterms: null,
+          notes: null,
+        });
+        const baseLine = ContractLineSchema.parse({
+          contractLineId: deterministicUuid(
+            "kulgo-legacy-base-line",
+            safeOrgId,
+            targetLane.laneId,
+          ),
+          contractId: baseContract.contractId,
+          ownerOrgId: safeOrgId,
+          laneId: targetLane.laneId,
+          inputId: targetLane.inputId,
+          cadence: "PER_YEAR",
+          committedVolume: targetLane.annualVolume,
+          unit: targetLane.volumeUnit,
+          committedSpend: targetLane.annualSpendEur,
+          unitPrice: null,
+          currency: "EUR",
+          startDateOverride: null,
+          endDateOverride: null,
+        });
+        preservedBase = { contract: baseContract, lines: [baseLine] };
+      }
+    }
+
+    // 4. Parse requested contract + lines (all-or-nothing before mutating maps)
+    const defaultExpiry =
+      input.contract.contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER";
+    const contract = ContractSchema.parse({
+      contractId: targetContractId,
+      ownerOrgId: safeOrgId,
+      supplierFacilityId: input.contract.supplierFacilityId,
+      title: input.contract.title,
+      contractType: input.contract.contractType,
+      pricingModel: input.contract.pricingModel,
+      expiryBehavior: input.contract.expiryBehavior ?? defaultExpiry,
+      confidence: input.contract.confidence,
+      startDate: input.contract.startDate,
+      endDate: input.contract.endDate ?? null,
+      noticePeriodDays: input.contract.noticePeriodDays,
+      nonRenewalNoticeGiven: input.contract.nonRenewalNoticeGiven,
+      archiveEffectiveDate: null,
+      isManuallyArchived: false,
+      incoterms: input.contract.incoterms ?? null,
+      notes: input.contract.notes ?? null,
+    });
+
+    const createdLines = input.lines.map((lineInput, i) => {
+      const lane = this.lanes.get(lineInput.laneId)!;
+      return ContractLineSchema.parse({
+        contractLineId: trimmedIdem
+          ? deterministicUuid("kulgo-contract-line-idem", safeOrgId, `${trimmedIdem}:${i}`)
+          : randomUUID(),
+        contractId: contract.contractId,
+        ownerOrgId: safeOrgId,
+        laneId: lineInput.laneId,
+        inputId: lineInput.inputId ?? lane.inputId,
+        cadence: lineInput.cadence,
+        committedVolume: lineInput.committedVolume ?? null,
+        unit: lineInput.unit,
+        committedSpend: lineInput.committedSpend ?? null,
+        unitPrice: lineInput.unitPrice ?? null,
+        currency: lineInput.currency,
+        startDateOverride: lineInput.startDateOverride ?? null,
+        endDateOverride: lineInput.endDateOverride ?? null,
+      });
+    });
+
+    // 5. Commit atomically to in-memory maps
+    if (preservedBase) {
+      this.contracts.set(preservedBase.contract.contractId, preservedBase.contract);
+      for (const bl of preservedBase.lines) {
+        this.contractLines.set(bl.contractLineId, bl);
+      }
+    }
+    this.contracts.set(contract.contractId, contract);
+    for (const line of createdLines) {
+      this.contractLines.set(line.contractLineId, line);
+    }
+
+    return {
+      contract: { ...contract },
+      lines: createdLines.map((l) => ({ ...l })),
+      ...(preservedBase
+        ? {
+            preservedBase: {
+              contract: { ...preservedBase.contract },
+              lines: preservedBase.lines.map((l) => ({ ...l })),
+            },
+          }
+        : {}),
+    };
+  }
+
+  async applyAllocationSplitsAtomic(
+    orgId: string,
+    updates: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ): Promise<{ lanes: SupplyLane[]; contractLines: ContractLine[] }> {
+    const safeOrgId = assertOrgId(orgId);
+    const orgLanes = Array.from(this.lanes.values()).filter(
+      (l) => l.ownerOrgId === safeOrgId,
+    );
+    const orgContracts = Array.from(this.contracts.values()).filter(
+      (c) => c.ownerOrgId === safeOrgId,
+    );
+    const orgContractLines = Array.from(this.contractLines.values()).filter(
+      (cl) => cl.ownerOrgId === safeOrgId,
+    );
+
+    const { updatedLanes, updatedContractLines } = computeAtomicSplitMutations(
+      orgLanes,
+      orgContracts,
+      orgContractLines,
+      updates,
+    );
+
+    for (const lane of updatedLanes) {
+      this.lanes.set(lane.laneId, lane);
+    }
+    for (const line of updatedContractLines) {
+      this.contractLines.set(line.contractLineId, line);
+    }
+
+    return {
+      lanes: updatedLanes.map((l) => ({ ...l })),
+      contractLines: updatedContractLines.map((cl) => ({ ...cl })),
+    };
   }
 }

@@ -799,18 +799,24 @@ export function SupplyMap({
               ? inputsById.get(inspectedLane.inputId)
               : undefined;
             const dir = resolveLaneDirection(inspectedLane, fromFac, toFac);
-            const activeVol =
-              inspectedLaneDerived?.activeVolume ?? inspectedLane.annualVolume;
-            const unitLabel =
-              inspectedLaneDerived?.baseUnit ?? inspectedLane.volumeUnit;
-            const activeSpend =
-              inspectedLaneDerived?.activeSpendEur ?? inspectedLane.annualSpendEur;
+            const hasDerived = inspectedLaneDerived !== undefined;
+            const isLapsed =
+              inspectedLaneDerived?.laneCommercialState === "LAPSED_UNCONTRACTED";
+            const activeVol = hasDerived
+              ? inspectedLaneDerived.activeVolume
+              : inspectedLane.annualVolume;
+            const unitLabel = hasDerived
+              ? (inspectedLaneDerived.baseUnit ?? inspectedLane.volumeUnit)
+              : inspectedLane.volumeUnit;
+            const activeSpend = hasDerived
+              ? inspectedLaneDerived.activeSpendEur
+              : inspectedLane.annualSpendEur;
             const avgPrice = inspectedLaneDerived?.weightedAvgUnitPrice ?? null;
             const isSpendShareProxy =
               inspectedLaneDerived?.weightingBasis === "SPEND_EUR";
-            const displayShare =
-              inspectedLaneDerived?.knownMappedSharePct ??
-              inspectedLane.volumeSharePct;
+            const displayShare = hasDerived
+              ? inspectedLaneDerived.knownMappedSharePct
+              : inspectedLane.volumeSharePct;
             const isRenewalCliff = (inspectedLaneDerived?.atRiskVolumePct ?? 0) > 30;
 
             return (
@@ -832,6 +838,11 @@ export function SupplyMap({
                       <span className="px-1.5 py-0.5 rounded bg-slate-800 text-[10px] font-mono text-slate-300">
                         {dir}
                       </span>
+                      {isLapsed && (
+                        <span className="px-1.5 py-0.5 rounded bg-red-500/20 border border-red-500/40 text-[10px] font-mono font-bold text-red-300">
+                          LAPSED
+                        </span>
+                      )}
                       {inspectedLane.allocationSplitPct != null && (
                         <span className="px-1.5 py-0.5 rounded bg-emerald-500/15 text-[10px] font-mono text-emerald-300">
                           {inspectedLane.allocationSplitPct}% split
@@ -878,7 +889,11 @@ export function SupplyMap({
                       {isSpendShareProxy ? "~Spend Share %" : "Volume Share %"}
                     </div>
                     <div className="font-mono font-semibold text-emerald-300 mt-0.5">
-                      {isSpendShareProxy ? `~${displayShare}%` : `${displayShare}%`}
+                      {displayShare === null
+                        ? "—"
+                        : isSpendShareProxy
+                          ? `~${displayShare}%`
+                          : `${displayShare}%`}
                     </div>
                   </div>
                   <div className="rounded-lg border border-slate-800 bg-slate-900/80 p-2">

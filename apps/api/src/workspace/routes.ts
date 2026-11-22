@@ -491,6 +491,49 @@ export function createWorkspaceRoutes({
     }
   });
 
+  const ApplyAllocationSplitsBodySchema = z.object({
+    splits: z
+      .array(
+        z.object({
+          laneId: z.string().uuid(),
+          allocationSplitPct: z.number().finite().min(0).max(100),
+        }),
+      )
+      .min(2)
+      .max(50),
+  });
+
+  routes.patch("/lanes/allocation-splits", async (c) => {
+    const orgId = c.get("auth").organization.orgId;
+    let body: unknown;
+    try {
+      body = await c.req.json();
+    } catch {
+      return c.json({ error: "Invalid JSON payload" }, 400);
+    }
+
+    const parsed = ApplyAllocationSplitsBodySchema.safeParse(body);
+    if (!parsed.success) {
+      return c.json(
+        { error: "Validation failed", details: parsed.error.flatten() },
+        400,
+      );
+    }
+
+    try {
+      const result = await workspaceRepo.applyAllocationSplitsAtomic(
+        orgId,
+        parsed.data.splits,
+      );
+      return c.json(result, 200);
+    } catch (err) {
+      if (err instanceof WorkspaceValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
+  });
+
   routes.patch("/lanes/:laneId", async (c) => {
     const orgId = c.get("auth").organization.orgId;
     const laneId = c.req.param("laneId");
@@ -572,6 +615,7 @@ export function createWorkspaceRoutes({
   const CreateContractWithLinesSchema = CreateContractInputSchema.extend({
     lines: z.array(CreateContractLineBodySchema).max(50).optional(),
     preserveLegacyBaseForLaneId: z.string().uuid().optional(),
+    idempotencyKey: z.string().trim().min(1).max(128).optional(),
   }).refine(
     (data) => {
       if (data.endDate && data.startDate && data.endDate < data.startDate) {
@@ -603,94 +647,27 @@ export function createWorkspaceRoutes({
     }
 
     try {
-      const { lines, preserveLegacyBaseForLaneId, ...contractInput } =
+      const { lines, preserveLegacyBaseForLaneId, idempotencyKey, ...contractInput } =
         parsed.data;
 
-      // Pre-validate references before writing any contract so partial failures
-      // cannot leave orphaned Base Agreements behind (#47).
-      const allLanes = await workspaceRepo.listLanes(orgId);
-      const laneById = new Map(allLanes.map((l) => [l.laneId, l]));
-      for (const lineInput of lines ?? []) {
-        if (!laneById.has(lineInput.laneId)) {
-          return c.json(
-            { error: "Referenced laneId does not exist in this organization" },
-            400,
-          );
-        }
-      }
+      const result = await workspaceRepo.createContractWithLinesAtomic(orgId, {
+        contract: contractInput as Parameters<
+          typeof workspaceRepo.createContract
+        >[1],
+        lines: (lines ?? []) as Array<
+          Omit<Parameters<typeof workspaceRepo.createContractLine>[1], "contractId">
+        >,
+        preserveLegacyBaseForLaneId,
+        idempotencyKey,
+      });
 
-      let preservedBase:
-        | { contract: Awaited<ReturnType<typeof workspaceRepo.createContract>>; lines: Awaited<ReturnType<typeof workspaceRepo.createContractLine>>[] }
-        | undefined;
-
-      if (
-        preserveLegacyBaseForLaneId &&
-        contractInput.contractType === "SPOT_PO"
-      ) {
-        const targetLane = laneById.get(preserveLegacyBaseForLaneId);
-        if (!targetLane) {
-          return c.json(
-            { error: "Referenced preserveLegacyBaseForLaneId does not exist in this organization" },
-            400,
-          );
-        }
-        const existingLines = await workspaceRepo.listContractLines(orgId);
-        const laneHasContracts = existingLines.some(
-          (l) => l.laneId === targetLane.laneId,
-        );
-        const hasLegacyValues =
-          (targetLane.annualVolume !== null && targetLane.annualVolume > 0) ||
-          (targetLane.annualSpendEur !== null && targetLane.annualSpendEur > 0);
-
-        if (!laneHasContracts && hasLegacyValues) {
-          const baseContract = await workspaceRepo.createContract(orgId, {
-            supplierFacilityId: targetLane.fromFacilityId,
-            title: "Base Agreement",
-            contractType: "FRAMEWORK",
-            pricingModel: "FIXED",
-            expiryBehavior: "HOLDOVER",
-            confidence: "ESTIMATED",
-            startDate: `${new Date().getUTCFullYear()}-01-01`,
-            endDate: null,
-            noticePeriodDays: 30,
-            nonRenewalNoticeGiven: false,
-          });
-          const baseLine = await workspaceRepo.createContractLine(orgId, {
-            contractId: baseContract.contractId,
-            laneId: targetLane.laneId,
-            inputId: targetLane.inputId,
-            cadence: "PER_YEAR",
-            committedVolume: targetLane.annualVolume,
-            unit: targetLane.volumeUnit,
-            committedSpend: targetLane.annualSpendEur,
-            currency: "EUR",
-          });
-          preservedBase = { contract: baseContract, lines: [baseLine] };
-        }
-      }
-
-      const contract = await workspaceRepo.createContract(
-        orgId,
-        contractInput as Parameters<typeof workspaceRepo.createContract>[1],
-      );
-      const createdLines = [];
-      for (const lineInput of lines ?? []) {
-        const line = await workspaceRepo.createContractLine(orgId, {
-          ...(lineInput as Omit<
-            Parameters<typeof workspaceRepo.createContractLine>[1],
-            "contractId"
-          >),
-          contractId: contract.contractId,
-        });
-        createdLines.push(line);
-      }
       return c.json(
         {
-          contract,
-          lines: createdLines,
-          ...(preservedBase ? { preservedBase } : {}),
+          contract: result.contract,
+          lines: result.lines,
+          ...(result.preservedBase ? { preservedBase: result.preservedBase } : {}),
         },
-        201,
+        result.deduplicated ? 200 : 201,
       );
     } catch (err) {
       if (err instanceof WorkspaceValidationError) {

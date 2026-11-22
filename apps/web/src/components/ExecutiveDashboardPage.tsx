@@ -34,6 +34,8 @@ export interface ExecutiveDashboardPageProps {
   loading: boolean;
   organization: Organization;
   facilities: readonly Facility[];
+  activeProductId: string | null;
+  activeInputId: string | null;
   financialViewMode: FinancialViewMode;
   activeRedDisruptions: number;
   activeAmberDisruptions: number;
@@ -65,6 +67,8 @@ export function ExecutiveDashboardPage({
   loading,
   organization,
   facilities,
+  activeProductId,
+  activeInputId,
   financialViewMode,
   activeRedDisruptions,
   activeAmberDisruptions,
@@ -81,6 +85,11 @@ export function ExecutiveDashboardPage({
   const [exportError, setExportError] = useState<string | null>(null);
 
   const facilitiesById = new Map(facilities.map((f) => [f.facilityId, f]));
+  const reportFilters = {
+    productId: activeProductId ?? undefined,
+    inputId: activeInputId ?? undefined,
+    viewMode: financialViewMode,
+  };
 
   const handleDownloadPdf = () => {
     setExportMenuOpen(false);
@@ -96,7 +105,7 @@ export function ExecutiveDashboardPage({
     setExportError(null);
     setExportNotice(null);
     try {
-      const csv = await exportEsgLedgerCsv();
+      const csv = await exportEsgLedgerCsv(reportFilters);
       const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
       const url = URL.createObjectURL(blob);
       const a = document.createElement("a");
@@ -122,7 +131,7 @@ export function ExecutiveDashboardPage({
     setExportError(null);
     setExportNotice(null);
     try {
-      const report = await getExecutiveReport();
+      const report = await getExecutiveReport(reportFilters);
       const blob = new Blob([JSON.stringify(report, null, 2)], {
         type: "application/json",
       });

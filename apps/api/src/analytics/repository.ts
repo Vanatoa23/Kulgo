@@ -16,11 +16,13 @@ import {
   FACTOR_MATRIX_VERSION,
   SimulateAnalyticsResponseSchema,
   VolumeUnitSchema,
+  resolveLaneDirection,
   type AnalyticsSummary,
   type Contract,
   type ContractLine,
   type EsgLedgerResponse,
   type ExecutiveReport,
+  type Facility,
   type FinancialViewMode,
   type Organization,
   type Product,
@@ -38,6 +40,21 @@ import {
 } from "../workspace/repository.js";
 import type { PartnerSummaryResolutionContext } from "./partner-resolver.js";
 import type { RiskSignalRepository } from "./risk-signals.js";
+
+function filterSourcingLanes(
+  lanes: readonly SupplyLane[],
+  facilities: readonly Facility[],
+): SupplyLane[] {
+  const facById = new Map(facilities.map((f) => [f.facilityId, f]));
+  return lanes.filter(
+    (lane) =>
+      resolveLaneDirection(
+        lane,
+        facById.get(lane.fromFacilityId),
+        facById.get(lane.toFacilityId),
+      ) !== "DOWNSTREAM",
+  );
+}
 
 export class AnalyticsValidationError extends Error {
   constructor(message: string) {
@@ -238,8 +255,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
       : undefined;
 
+    const sourcingLanes = filterSourcingLanes(network.lanes, network.facilities);
     const commercials = deriveNetworkCommercials(
-      network.lanes,
+      sourcingLanes,
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
@@ -304,8 +322,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
       : undefined;
 
+    const sourcingLanes = filterSourcingLanes(network.lanes, network.facilities);
     const commercials = deriveNetworkCommercials(
-      network.lanes,
+      sourcingLanes,
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
@@ -361,8 +380,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       throw new AnalyticsValidationError("Organization not found");
     }
 
+    const sourcingLanes = filterSourcingLanes(network.lanes, network.facilities);
     const commercials = deriveNetworkCommercials(
-      network.lanes,
+      sourcingLanes,
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
@@ -551,8 +571,12 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       );
     }
 
-    const baselineCommercials = deriveNetworkCommercials(
+    const baselineSourcingLanes = filterSourcingLanes(
       network.lanes,
+      network.facilities,
+    );
+    const baselineCommercials = deriveNetworkCommercials(
+      baselineSourcingLanes,
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
@@ -758,8 +782,12 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       (cl) => !commercialChangedLaneIds.has(cl.laneId),
     );
 
-    const simulatedCommercials = deriveNetworkCommercials(
+    const simulatedSourcingLanes = filterSourcingLanes(
       simulatedLanesWithContractBase,
+      network.facilities,
+    );
+    const simulatedCommercials = deriveNetworkCommercials(
+      simulatedSourcingLanes,
       network.inputs,
       network.contracts ?? [],
       simulatedContractLines,

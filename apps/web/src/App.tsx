@@ -3,6 +3,7 @@ import type {
   AuthMeResponse,
   CreateFacilityInput,
   CreateInviteInput,
+  CreateInviteResponse,
   CreateProductInput,
   CreateSupplyInputInput,
   CreateSupplyLaneInput,
@@ -30,6 +31,7 @@ import { WhatIfSimulatorDrawer } from "./components/WhatIfSimulatorDrawer.js";
 import {
   ApiError,
   acknowledgeAlert,
+  applyAllocationSplits,
   createFacility,
   createInvite,
   createLane,
@@ -549,13 +551,53 @@ export function App() {
       });
     });
 
-  const handleCreateInvite = (input: CreateInviteInput) =>
+  const handleApplyAllocationSplits = (
+    splits: ReadonlyArray<{ laneId: string; allocationSplitPct: number }>,
+  ) =>
     runMutation(async (commit) => {
-      const result = await createInvite(input);
+      const result = await applyAllocationSplits(splits);
+      const updatedLaneById = new Map(result.lanes.map((l) => [l.laneId, l]));
+      const updatedLineById = new Map(
+        result.contractLines.map((cl) => [cl.contractLineId, cl]),
+      );
       commit(() => {
-        setInvitations((prev) => [result.invitation, ...prev]);
+        setNetwork((prev) => ({
+          ...prev,
+          lanes: prev.lanes.map((l) => updatedLaneById.get(l.laneId) ?? l),
+          contractLines: (prev.contractLines ?? []).map(
+            (cl) => updatedLineById.get(cl.contractLineId) ?? cl,
+          ),
+        }));
       });
     });
+
+  const handleCreateInvite = async (
+    input: CreateInviteInput,
+  ): Promise<CreateInviteResponse | null> => {
+    const sessionTicket = sessionGuard.capture();
+    setBusy(true);
+    setBannerError(null);
+    try {
+      const result = await createInvite(input);
+      if (!sessionTicket.isCurrent()) return null;
+      setInvitations((prev) => [result.invitation, ...prev]);
+      return result;
+    } catch (err) {
+      if (!sessionTicket.isCurrent()) return null;
+      if (err instanceof ApiError && err.status === 401) {
+        setSession(null);
+        return null;
+      }
+      setBannerError(
+        err instanceof Error
+          ? err.message
+          : "Failed to create partner invitation.",
+      );
+      return null;
+    } finally {
+      setBusy(false);
+    }
+  };
 
   const clearInviteQueryParam = () => {
     if (typeof window !== "undefined") {
@@ -692,6 +734,7 @@ export function App() {
               onDeleteFacility={handleDeleteFacility}
               onCreateLane={handleCreateLane}
               onUpdateLane={handleUpdateLane}
+              onApplyAllocationSplits={handleApplyAllocationSplits}
               onDeleteLane={handleDeleteLane}
               onCreateProduct={handleCreateProduct}
               onCreateSupplyInput={handleCreateSupplyInput}
@@ -792,6 +835,8 @@ export function App() {
               loading={loadingAnalytics}
               organization={session.organization}
               facilities={network.facilities}
+              activeProductId={activeProductId}
+              activeInputId={activeInputId}
               financialViewMode={financialViewMode}
               activeRedDisruptions={unreadRedCount}
               activeAmberDisruptions={unreadAmberCount}
