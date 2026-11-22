@@ -588,6 +588,7 @@ export const BulkImportFacilityRowSchema = CreateFacilityInputSchema.extend({
 export type BulkImportFacilityRow = z.infer<typeof BulkImportFacilityRowSchema>;
 
 export const BulkImportLaneRowSchema = z.object({
+  laneId: z.string().uuid().optional(),
   fromFacilityId: z.string().uuid().optional(),
   toFacilityId: z.string().uuid().optional(),
   fromFacilityRef: z.string().trim().min(1).max(160).optional(),

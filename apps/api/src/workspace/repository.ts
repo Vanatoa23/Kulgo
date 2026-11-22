@@ -200,7 +200,7 @@ export interface WorkspaceRepository {
   ): Promise<WorkspaceNetworkResponse>;
 
   listProducts(orgId: string): Promise<Product[]>;
-  createProduct(orgId: string, input: CreateProductInput): Promise<Product>;
+  createProduct(orgId: string, input: CreateProductInput, importedId?: string): Promise<Product>;
   updateProduct(
     orgId: string,
     productId: string,
@@ -212,6 +212,7 @@ export interface WorkspaceRepository {
   createInput(
     orgId: string,
     input: CreateSupplyInputInput,
+    importedId?: string,
   ): Promise<SupplyInput>;
   updateInput(
     orgId: string,
@@ -222,7 +223,7 @@ export interface WorkspaceRepository {
 
   listFacilities(orgId: string): Promise<Facility[]>;
   getFacilityById(orgId: string, facilityId: string): Promise<Facility | null>;
-  createFacility(orgId: string, input: CreateFacilityInput): Promise<Facility>;
+  createFacility(orgId: string, input: CreateFacilityInput, importedId?: string): Promise<Facility>;
   updateFacility(
     orgId: string,
     facilityId: string,
@@ -243,7 +244,7 @@ export interface WorkspaceRepository {
   getFacilityWkt(orgId: string, facilityId: string): Promise<string | null>;
 
   listLanes(orgId: string): Promise<SupplyLane[]>;
-  createLane(orgId: string, input: CreateSupplyLaneInput): Promise<SupplyLane>;
+  createLane(orgId: string, input: CreateSupplyLaneInput, importedId?: string): Promise<SupplyLane>;
   updateLane(
     orgId: string,
     laneId: string,
@@ -558,10 +559,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
   async createProduct(
     orgId: string,
     input: CreateProductInput,
+    importedId?: string,
   ): Promise<Product> {
     const safeOrgId = assertOrgId(orgId);
     const product = ProductSchema.parse({
-      productId: randomUUID(),
+      productId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       name: input.name,
       sku: input.sku ?? null,
@@ -691,6 +693,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
   async createInput(
     orgId: string,
     input: CreateSupplyInputInput,
+    importedId?: string,
   ): Promise<SupplyInput> {
     const safeOrgId = assertOrgId(orgId);
     const productId = input.productId ?? null;
@@ -704,7 +707,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     }
 
     const created = SupplyInputSchema.parse({
-      inputId: randomUUID(),
+      inputId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       productId,
       name: input.name,
@@ -942,10 +945,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
   async createFacility(
     orgId: string,
     input: CreateFacilityInput,
+    importedId?: string,
   ): Promise<Facility> {
     const safeOrgId = assertOrgId(orgId);
     const facility = FacilitySchema.parse({
-      facilityId: randomUUID(),
+      facilityId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       name: input.name,
       kind: input.kind,
@@ -1353,6 +1357,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
   async createLane(
     orgId: string,
     input: CreateSupplyLaneInput,
+    importedId?: string,
   ): Promise<SupplyLane> {
     const safeOrgId = assertOrgId(orgId);
     if (input.fromFacilityId === input.toFacilityId) {
@@ -1393,7 +1398,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     });
 
     const lane = SupplyLaneSchema.parse({
-      laneId: randomUUID(),
+      laneId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       fromFacilityId: input.fromFacilityId,
       toFacilityId: input.toFacilityId,
@@ -2175,10 +2180,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
   async createProduct(
     orgId: string,
     input: CreateProductInput,
+    importedId?: string,
   ): Promise<Product> {
     const safeOrgId = assertOrgId(orgId);
     const product = ProductSchema.parse({
-      productId: randomUUID(),
+      productId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       name: input.name,
       sku: input.sku ?? null,
@@ -2249,6 +2255,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
   async createInput(
     orgId: string,
     input: CreateSupplyInputInput,
+    importedId?: string,
   ): Promise<SupplyInput> {
     const safeOrgId = assertOrgId(orgId);
     const productId = input.productId ?? null;
@@ -2262,7 +2269,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     }
 
     const created = SupplyInputSchema.parse({
-      inputId: randomUUID(),
+      inputId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       productId,
       name: input.name,
@@ -2387,10 +2394,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
   async createFacility(
     orgId: string,
     input: CreateFacilityInput,
+    importedId?: string,
   ): Promise<Facility> {
     const safeOrgId = assertOrgId(orgId);
     const facility = FacilitySchema.parse({
-      facilityId: randomUUID(),
+      facilityId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       name: input.name,
       kind: input.kind,
@@ -2642,6 +2650,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
   async createLane(
     orgId: string,
     input: CreateSupplyLaneInput,
+    importedId?: string,
   ): Promise<SupplyLane> {
     const safeOrgId = assertOrgId(orgId);
     if (input.fromFacilityId === input.toFacilityId) {
@@ -2685,7 +2694,7 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     });
 
     const lane = SupplyLaneSchema.parse({
-      laneId: randomUUID(),
+      laneId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       fromFacilityId: input.fromFacilityId,
       toFacilityId: input.toFacilityId,

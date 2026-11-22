@@ -298,14 +298,44 @@ describe("Milestone 4 E2E — Org ESG Settings, Bulk CSV/JSON Import/Export & CS
     const first = await create(1);
     const second = await create(2);
     await app.request("/api/v1/workspace/lanes", { method: "POST", headers: { "Content-Type": "application/json", Cookie: source.cookie }, body: JSON.stringify({ fromFacilityId: first.facilityId, toFacilityId: second.facilityId, materialCategory: "Steel" }) });
+    await app.request("/api/v1/workspace/facilities", { method: "POST", headers: { "Content-Type": "application/json", Cookie: target.cookie }, body: JSON.stringify({ name: "Same", kind: "FACTORY", countryCode: "EE", lat: 3, lng: 1 }) });
     const response = await importNetwork(await exportNetwork());
     expect(BulkImportSummarySchema.parse(await response.json()).errors).toEqual([]);
     const restored = WorkspaceNetworkResponseSchema.parse(await (await app.request("/api/v1/workspace/network", { headers: { Cookie: target.cookie } })).json());
-    expect(restored.facilities).toHaveLength(2);
+    expect(restored.facilities).toHaveLength(3);
     expect(restored.facilities.find(f => f.facilityId === restored.lanes[0]?.fromFacilityId)?.lat).toBe(1);
     expect(restored.facilities.find(f => f.facilityId === restored.lanes[0]?.toFacilityId)?.lat).toBe(2);
+    const ambiguous = await importNetwork({ facilities: [{ name: "Same", kind: "FACTORY", countryCode: "EE", lat: 4, lng: 1 }], lanes: [{ fromFacilityRef: "Same", toFacilityRef: "Same", materialCategory: "Steel" }] });
+    const ambiguousSummary = BulkImportSummarySchema.parse(await ambiguous.json());
+    expect(ambiguousSummary.createdFacilities).toBe(0);
+    expect(ambiguousSummary.errors).toEqual(expect.arrayContaining([expect.objectContaining({ entity: "FACILITY", message: expect.stringContaining("Multiple facilities") }), expect.objectContaining({ entity: "LANE", message: expect.stringContaining("ambiguous") })]));
     const attack = await importNetwork({ lanes: [{ fromFacilityId: first.facilityId, toFacilityId: second.facilityId, materialCategory: "Steel" }] });
     expect(BulkImportSummarySchema.parse(await attack.json()).createdLanes).toBe(0);
+  });
+
+  it("retries a partial JSON restore without duplicating the graph", async () => {
+    const app = createTestApp();
+    const source = await registerOrg(app, { email: "retry-source@example.com", organizationName: "Retry source" });
+    const target = await registerOrg(app, { email: "retry-target@example.com", organizationName: "Retry target" });
+    await app.request("/api/v1/workspace/seed-demo", { method: "POST", headers: { Cookie: source.cookie } });
+    const exported = WorkspaceExportJsonSchema.parse(await (await app.request("/api/v1/workspace/export?format=json", { headers: { Cookie: source.cookie } })).json());
+    const broken = structuredClone(exported);
+    broken.lanes[0]!.fromFacilityId = "00000000-0000-4000-8000-000000000000";
+    const run = async (data: unknown) => BulkImportSummarySchema.parse(await (await app.request("/api/v1/workspace/import", { method: "POST", headers: { "Content-Type": "application/json", Cookie: target.cookie }, body: JSON.stringify(data) })).json());
+    expect((await run(broken)).errors).toHaveLength(1);
+    expect((await run(exported)).errors).toEqual([]);
+    const restored = WorkspaceNetworkResponseSchema.parse(await (await app.request("/api/v1/workspace/network", { headers: { Cookie: target.cookie } })).json());
+    expect(restored.products).toHaveLength(exported.products.length);
+    expect(restored.inputs).toHaveLength(exported.inputs.length);
+    expect(restored.facilities).toHaveLength(exported.facilities.length);
+    expect(restored.lanes).toHaveLength(exported.lanes.length);
+    expect(restored.lanes.filter(l => l.inputId)).toHaveLength(exported.lanes.filter(l => l.inputId).length);
+    for (const lane of restored.lanes) {
+      if (lane.inputId) expect(restored.inputs.some(input => input.inputId === lane.inputId)).toBe(true);
+    }
+    for (const input of restored.inputs) {
+      if (input.productId) expect(restored.products.some(product => product.productId === input.productId)).toBe(true);
+    }
   });
 
   it("generates a strict CSRD Executive Risk & ESG Report via GET /api/v1/analytics/report", async () => {
