@@ -3,6 +3,8 @@ import {
   SimulateAnalyticsResponseSchema,
   type AnalyticsSummary,
   type AnonymizedRiskAlert,
+  type CompliancePackId,
+  type DerivedLaneCommercialSummary,
   type Facility,
   type HhiMetric,
   type RiskSignal,
@@ -11,10 +13,10 @@ import {
   type SimulatedLaneChange,
   type SupplyInput,
   type SupplyLane,
+  type TargetMarket,
   type VolumeUnit,
 } from "@kulgo/shared";
-import { haversineDistanceKm } from "./baselines.js";
-import { computeEsgSummary, estimateLaneCo2eTonnes } from "./esg.js";
+import { evaluateEsgAndCompliance } from "./esg-compliance.js";
 import { isPointInWktPolygon } from "./geo.js";
 import { computeHhi, type ShareEntry } from "./hhi.js";
 
@@ -34,14 +36,24 @@ export interface HiddenPartnerAggregate {
    * strictly server-side so partner total revenue is never exposed.
    */
   productEmissionFactorTco2ePerUnit?: number | null;
+  pcfVerified?: boolean;
   supplierEmissionIntensityTco2ePerEur?: number | null;
   economicAttributionRatio?: number | null;
+  /** Server-side cap for verified partner total emissions (never serialized). */
+  partnerTotalEmissionsCapTco2e?: number | null;
 }
 
 export interface NetworkAnalyticsInput {
   organization: {
+    orgId?: string;
+    name?: string;
+    countryCode?: string;
     scope1Tco2e: number | null;
     scope2Tco2e: number | null;
+    scope2MarketTco2e?: number | null;
+    annualRevenueEur?: number | null;
+    targetMarkets?: readonly TargetMarket[] | null;
+    enabledCompliancePacks?: readonly CompliancePackId[] | null;
   };
   inputs: readonly SupplyInput[];
   facilities: readonly Facility[];
@@ -51,6 +63,14 @@ export interface NetworkAnalyticsInput {
    * Optional map keyed strictly by the buyer organization's own Tier-1 facilityId.
    */
   partnerHiddenSummaries?: ReadonlyMap<string, HiddenPartnerAggregate>;
+  /**
+   * Optional contract-derived commercial summaries keyed by laneId (from SP2).
+   */
+  laneCommercialsByLaneId?: ReadonlyMap<string, DerivedLaneCommercialSummary>;
+  /**
+   * Optional primary Incoterms keyed by laneId for basic-to-purchaser spend bridge.
+   */
+  incotermsByLaneId?: ReadonlyMap<string, string | null>;
   /**
    * Injectable reference date for deterministic contract-expiry evaluation.
    */
@@ -126,61 +146,6 @@ function hasPositiveSpend(lane: SupplyLane): lane is SupplyLane & { annualSpendE
     Number.isFinite(lane.annualSpendEur) &&
     lane.annualSpendEur > 0
   );
-}
-
-function computeEffectiveLaneCo2e(
-  lane: SupplyLane,
-  facilitiesById: ReadonlyMap<string, Facility>,
-): number {
-  if (lane.volumeSharePct <= 0) {
-    return 0;
-  }
-
-  const from = facilitiesById.get(lane.fromFacilityId);
-  const to = facilitiesById.get(lane.toFacilityId);
-
-  const distanceKm =
-    lane.distanceKm !== null && lane.distanceKm > 0
-      ? lane.distanceKm
-      : from && to
-        ? haversineDistanceKm(from.lat, from.lng, to.lat, to.lng)
-        : 0;
-
-  const annualTonnes = toAnnualTonnes(lane.annualVolume, lane.volumeUnit);
-  if (annualTonnes !== null && distanceKm > 0) {
-    return estimateLaneCo2eTonnes({
-      distanceKm,
-      annualTonnes,
-      transportMode: lane.transportMode,
-    });
-  }
-
-  return lane.estimatedLaneCo2e !== null && lane.estimatedLaneCo2e > 0
-    ? lane.estimatedLaneCo2e
-    : 0;
-}
-
-function computeOwnScope12(
-  organization: NetworkAnalyticsInput["organization"],
-  facilities: readonly Facility[],
-): { scope1: number; scope2: number } {
-  if (
-    organization.scope1Tco2e !== null ||
-    organization.scope2Tco2e !== null
-  ) {
-    return {
-      scope1: round2(Math.max(0, organization.scope1Tco2e ?? 0)),
-      scope2: round2(Math.max(0, organization.scope2Tco2e ?? 0)),
-    };
-  }
-
-  const ownTotal = facilities
-    .filter((f) => f.isOwnFacility)
-    .reduce((sum, f) => sum + Math.max(0, f.estimatedScope12Tco2e ?? 0), 0);
-
-  const scope1 = round2(ownTotal * 0.4);
-  const scope2 = round2(ownTotal - scope1);
-  return { scope1, scope2 };
 }
 
 function daysUntilContractEnd(contractEndDate: string, asOfDate: Date): number {
@@ -628,48 +593,15 @@ export function evaluateNetworkAnalytics(
   const severityRank: Record<RiskStatus, number> = { RED: 0, YELLOW: 1, GREEN: 2 };
   alerts.sort((a, b) => severityRank[a.severity] - severityRank[b.severity]);
 
-  // --- 3. Scope 1 / 2 / 3 ESG Roll-up ---
-  const { scope1, scope2 } = computeOwnScope12(
-    input.organization,
-    input.facilities,
-  );
-  const laneTransportCo2eTonnes = activeLanes.map((lane) =>
-    computeEffectiveLaneCo2e(lane, facilitiesById),
-  );
-
-  const esg = computeEsgSummary({
-    ownScope1Tco2e: scope1,
-    ownScope2Tco2e: scope2,
-    suppliers: activeSupplierFacilities.map((facility) => {
-      const hidden = input.partnerHiddenSummaries?.get(facility.facilityId);
-      const supplierLanes = activeLanes.filter(
-        (lane) => lane.fromFacilityId === facility.facilityId,
-      );
-      const buyerActiveSpendEur = supplierLanes.reduce(
-        (sum, lane) =>
-          sum + (hasPositiveSpend(lane) ? lane.annualSpendEur : 0),
-        0,
-      );
-      const purchasedVolumeTonnes = supplierLanes.reduce((sum, lane) => {
-        const tonnes = toAnnualTonnes(lane.annualVolume, lane.volumeUnit);
-        return sum + (tonnes ?? 0);
-      }, 0);
-
-      return {
-        isPartnerVerified: facility.isPartnerVerified,
-        sector: facility.sector,
-        reportedScope12Tco2e: facility.estimatedScope12Tco2e,
-        hiddenUpstreamScope3Tco2e: hidden?.hiddenUpstreamScope3Tco2e ?? null,
-        purchasedVolume: purchasedVolumeTonnes > 0 ? purchasedVolumeTonnes : null,
-        productEmissionFactorTco2ePerUnit:
-          hidden?.productEmissionFactorTco2ePerUnit ?? null,
-        buyerActiveSpendEur: buyerActiveSpendEur > 0 ? buyerActiveSpendEur : null,
-        supplierEmissionIntensityTco2ePerEur:
-          hidden?.supplierEmissionIntensityTco2ePerEur ?? null,
-        economicAttributionRatio: hidden?.economicAttributionRatio ?? null,
-      };
-    }),
-    laneTransportCo2eTonnes,
+  // --- 3. Scope 1 / 2 / 3 ESG & Multi-Region Compliance Roll-up ---
+  const { summary: esg } = evaluateEsgAndCompliance({
+    organization: input.organization,
+    inputs: input.inputs,
+    facilities: input.facilities,
+    lanes: input.lanes,
+    partnerHiddenSummaries: input.partnerHiddenSummaries,
+    laneCommercialsByLaneId: input.laneCommercialsByLaneId,
+    incotermsByLaneId: input.incotermsByLaneId,
   });
 
   // --- 4. Resilience Score & Overall Status ---

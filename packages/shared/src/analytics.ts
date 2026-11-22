@@ -1,5 +1,13 @@
 import { z } from "zod";
 import {
+  CbamSummarySchema,
+  ComplianceCheckItemSchema,
+  CompliancePackIdSchema,
+  EsgHotspotSchema,
+  PcafBucketSummarySchema,
+  TargetMarketSchema,
+} from "./esg.js";
+import {
   RiskSignalSchema,
   RiskStatusSchema,
   TransportModeSchema,
@@ -82,6 +90,20 @@ export const EsgSummarySchema = z
     totalTco2e: z.number().nonnegative(),
     confidence: ConfidenceLevelSchema,
     verifiedCoveragePct: z.number().min(0).max(100),
+    // Sub-Project 3: PCAF-scored & Multi-Region ESG extensions
+    factorMatrixVersion: z.string().min(1).optional(),
+    scope2LocationTco2e: z.number().finite().nonnegative().optional(),
+    scope2MarketTco2e: z.number().finite().nonnegative().nullable().optional(),
+    weightedPcafScore: z.number().finite().min(1).max(5).nullable().optional(),
+    pcafBreakdown: z.array(PcafBucketSummarySchema).optional(),
+    primaryDataSharePct: z.number().finite().min(0).max(100).optional(),
+    carbonIntensityPerEurMillion: z.number().finite().nonnegative().nullable().optional(),
+    carbonIntensityPerTonne: z.number().finite().nonnegative().nullable().optional(),
+    hotspots: z.array(EsgHotspotSchema).optional(),
+    cbamSummary: CbamSummarySchema.optional(),
+    activeCompliancePacks: z.array(CompliancePackIdSchema).optional(),
+    complianceChecklist: z.array(ComplianceCheckItemSchema).optional(),
+    improvementPrompts: z.array(z.string()).optional(),
   })
   .strict();
 export type EsgSummary = z.infer<typeof EsgSummarySchema>;
@@ -383,6 +405,9 @@ export const ExecutiveReportOrganizationSchema = z
     esgBadges: z.array(z.string()),
     scope1Tco2e: z.number().nonnegative().nullable(),
     scope2Tco2e: z.number().nonnegative().nullable(),
+    scope2MarketTco2e: z.number().nonnegative().nullable().optional(),
+    targetMarkets: z.array(TargetMarketSchema).optional(),
+    enabledCompliancePacks: z.array(CompliancePackIdSchema).optional(),
     openToNewBuyers: z.boolean(),
     capabilities: z.array(z.string()),
   })
@@ -428,6 +453,9 @@ export const CsrdDisclosuresSchema = z
     ]),
     totalReportedTco2e: z.number().nonnegative(),
     privacyAttestation: z.string().min(1),
+    weightedPcafScore: z.number().finite().min(1).max(5).nullable().optional(),
+    primaryDataSharePct: z.number().finite().min(0).max(100).optional(),
+    activeCompliancePacks: z.array(CompliancePackIdSchema).optional(),
   })
   .strict();
 export type CsrdDisclosures = z.infer<typeof CsrdDisclosuresSchema>;
@@ -447,6 +475,7 @@ export const ExecutiveReportSchema = z
     topRecommendedActions: z.array(RecommendedActionSchema),
     csrdDisclosures: CsrdDisclosuresSchema,
     financialExposure: FinancialRiskSummarySchema.optional(),
+    complianceChecklist: z.array(ComplianceCheckItemSchema).optional(),
   })
   .strict();
 export type ExecutiveReport = z.infer<typeof ExecutiveReportSchema>;

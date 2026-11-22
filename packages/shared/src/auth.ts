@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { CompliancePackIdSchema, TargetMarketSchema } from "./esg.js";
 
 export const UserRoleSchema = z.enum(["OWNER", "MEMBER"]);
 export type UserRole = z.infer<typeof UserRoleSchema>;
@@ -13,6 +14,10 @@ export const OrganizationSchema = z
     esgBadges: z.array(z.string()).default([]),
     scope1Tco2e: z.number().nonnegative().nullable().default(null),
     scope2Tco2e: z.number().nonnegative().nullable().default(null),
+    scope2MarketTco2e: z.number().nonnegative().nullable().optional(),
+    annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
+    targetMarkets: z.array(TargetMarketSchema).optional(),
+    enabledCompliancePacks: z.array(CompliancePackIdSchema).optional(),
     openToNewBuyers: z.boolean().default(false),
     capabilities: z.array(z.string()).default([]),
     createdAt: z.string().datetime(),
@@ -58,6 +63,10 @@ export const UpdateOrganizationProfileInputSchema = z
   .object({
     scope1Tco2e: z.number().finite().nonnegative().nullable().optional(),
     scope2Tco2e: z.number().finite().nonnegative().nullable().optional(),
+    scope2MarketTco2e: z.number().finite().nonnegative().nullable().optional(),
+    annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
+    targetMarkets: z.array(TargetMarketSchema).max(10).optional(),
+    enabledCompliancePacks: z.array(CompliancePackIdSchema).max(10).optional(),
     esgBadges: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
     openToNewBuyers: z.boolean().optional(),
     capabilities: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
@@ -123,6 +132,7 @@ export const AuditActionSchema = z.enum([
   "INVITE_ACCEPTED",
   "INVITE_REVOKED",
   "CSRD_REPORT_EXPORTED",
+  "ESG_LEDGER_EXPORTED",
 ]);
 export type AuditAction = z.infer<typeof AuditActionSchema>;
 
