@@ -15,6 +15,7 @@ import {
   ExecutiveReportSchema,
   FACTOR_MATRIX_VERSION,
   SimulateAnalyticsResponseSchema,
+  VolumeUnitSchema,
   type AnalyticsSummary,
   type Contract,
   type ContractLine,
@@ -563,6 +564,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         : baselineCommercials.windowDays /
           FINANCIAL_RISK_PARAMS_V1.dayCountBasis;
 
+    const inputsById = new Map(
+      network.inputs.map((item) => [item.inputId, item]),
+    );
     const changesByLaneId = new Map(
       request.laneChanges.map((change) => [change.laneId, change]),
     );
@@ -585,11 +589,23 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       const hasCommercialChange =
         volumeShareChanged || volumeChanged || spendChanged;
 
-      if (hasCommercialChange) {
+      const baseComm = baselineCommercials.laneSummaries.get(lane.laneId);
+      const isLapsedBaseline =
+        baseComm?.laneCommercialState === "LAPSED_UNCONTRACTED";
+      const addsExplicitCommercials =
+        (typeof change.annualVolume === "number" && change.annualVolume > 0) ||
+        (typeof change.annualSpendEur === "number" &&
+          change.annualSpendEur > 0);
+      // Preserve expired contract lines for lapsed lanes unless the edit explicitly
+      // introduces positive simulated volume or spend, so a share-only edit cannot
+      // relabel a lapsed lane as LEVEL_0_UNPRICED and revive it in HHI/SPOF.
+      const shouldBypassContracts =
+        hasCommercialChange && (!isLapsedBaseline || addsExplicitCommercials);
+
+      if (shouldBypassContracts) {
         commercialChangedLaneIds.add(lane.laneId);
       }
 
-      const baseComm = baselineCommercials.laneSummaries.get(lane.laneId);
       const ratio = volumeShareChanged
         ? lane.volumeSharePct > 0
           ? change.volumeSharePct! / lane.volumeSharePct
@@ -599,22 +615,46 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         : 1;
 
       let effectiveBaseVolume = lane.annualVolume;
+      let effectiveBaseVolumeUnit = lane.volumeUnit;
       let effectiveBaseSpend = lane.annualSpendEur;
-      if (hasCommercialChange && baseComm) {
+      if (shouldBypassContracts && baseComm) {
         if (baseComm.activeVolume !== null) {
           const annualizedVol =
             baselineScale > 0
               ? baseComm.activeVolume / baselineScale
               : baseComm.activeVolume;
           const fromUnit = baseComm.baseUnit ?? lane.volumeUnit;
-          const converted = toBaseUnit(
-            annualizedVol,
-            fromUnit,
-            lane.volumeUnit,
-          );
-          effectiveBaseVolume = !converted.unitConflict
-            ? converted.value
-            : annualizedVol;
+          const parsedBaseUnit = VolumeUnitSchema.safeParse(fromUnit);
+          if (change.annualVolume === undefined && parsedBaseUnit.success) {
+            // Keep untouched (or share-scaled) volume in its canonical baseUnit
+            // so custom input unitConversionFactors are never double-applied.
+            effectiveBaseVolume = annualizedVol;
+            effectiveBaseVolumeUnit = parsedBaseUnit.data;
+          } else {
+            const linkedInput = lane.inputId
+              ? inputsById.get(lane.inputId)
+              : undefined;
+            const converted = toBaseUnit(
+              annualizedVol,
+              fromUnit,
+              lane.volumeUnit,
+            );
+            if (!converted.unitConflict && converted.value !== null) {
+              effectiveBaseVolume = converted.value;
+            } else {
+              const forwardFactor =
+                linkedInput?.unitConversionFactors?.[lane.volumeUnit] ??
+                linkedInput?.unitConversionFactors?.[
+                  lane.volumeUnit.toUpperCase()
+                ];
+              effectiveBaseVolume =
+                forwardFactor !== undefined &&
+                Number.isFinite(forwardFactor) &&
+                forwardFactor > 0
+                  ? annualizedVol / forwardFactor
+                  : annualizedVol;
+            }
+          }
         } else {
           effectiveBaseVolume = null;
         }
@@ -628,19 +668,21 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       }
 
       let nextAnnualVolume = lane.annualVolume;
+      let nextVolumeUnit = lane.volumeUnit;
       if (change.annualVolume !== undefined) {
         nextAnnualVolume = change.annualVolume;
-      } else if (hasCommercialChange) {
+      } else if (shouldBypassContracts) {
         nextAnnualVolume =
           volumeShareChanged && effectiveBaseVolume !== null
             ? Math.max(0, effectiveBaseVolume * ratio)
             : effectiveBaseVolume;
+        nextVolumeUnit = effectiveBaseVolumeUnit;
       }
 
       let nextAnnualSpendEur = lane.annualSpendEur;
       if (change.annualSpendEur !== undefined) {
         nextAnnualSpendEur = change.annualSpendEur;
-      } else if (hasCommercialChange) {
+      } else if (shouldBypassContracts) {
         nextAnnualSpendEur =
           volumeShareChanged && effectiveBaseSpend !== null
             ? Math.max(0, effectiveBaseSpend * ratio)
@@ -661,6 +703,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         ...(change.transportMode !== undefined
           ? { transportMode: change.transportMode }
           : {}),
+        volumeUnit: nextVolumeUnit,
         annualVolume: nextAnnualVolume,
         annualSpendEur: nextAnnualSpendEur,
         ...(change.safetyStockDays !== undefined

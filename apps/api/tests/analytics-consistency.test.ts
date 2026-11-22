@@ -512,4 +512,199 @@ describe("Analytics & What-If Commercial Consistency (Issue #42)", () => {
       expect(sim.deltas.financialDeltas?.baseEalDeltaEur ?? 0).toBe(0);
     }
   });
+
+  it("preserves untouched canonical volume on a spend-only override for lanes with custom unitConversionFactors", async () => {
+    const app = createTestApp();
+    const { cookie, product, hq, supA, supB } =
+      await setupTwoSupplierNetwork(app);
+
+    // Create a custom-converted input: baseUnit TONNES, 1 UNIT = 0.02 TONNES
+    const customInputRes = await app.request("/api/v1/workspace/inputs", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        productId: product.productId,
+        name: "Preform Reels",
+        category: "Polymers",
+        unit: "TONNES",
+        baseUnit: "TONNES",
+        unitConversionFactors: { UNITS: 0.02 },
+      }),
+    });
+    expect(customInputRes.status).toBe(201);
+    const { input: customInput } = (await customInputRes.json()) as {
+      input: { inputId: string };
+    };
+
+    const createUnitLane = async (fromFacilityId: string) => {
+      const res = await app.request("/api/v1/workspace/lanes", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          fromFacilityId,
+          toFacilityId: hq.facilityId,
+          inputId: customInput.inputId,
+          materialCategory: "Polymers",
+          volumeSharePct: 50,
+          annualVolume: 1000,
+          volumeUnit: "UNITS",
+          annualSpendEur: 50_000,
+          transportMode: "ROAD",
+          leadTimeDays: 10,
+        }),
+      });
+      expect(res.status).toBe(201);
+      const body = (await res.json()) as { lane: { laneId: string } };
+      return body.lane;
+    };
+
+    const customLaneA = await createUnitLane(supA.facilityId);
+    const customLaneB = await createUnitLane(supB.facilityId);
+
+    // Contract A: 5,000 UNITS * 0.02 = 100 TONNES; Contract B: 5,000 UNITS * 0.02 = 100 TONNES
+    await createContract(app, cookie, {
+      supplierFacilityId: supA.facilityId,
+      title: "Custom Unit Contract A",
+      contractType: "FRAMEWORK",
+      startDate: "2026-01-01",
+      endDate: "2027-12-31",
+      lines: [
+        {
+          laneId: customLaneA.laneId,
+          cadence: "PER_YEAR",
+          committedVolume: 5000,
+          unit: "UNITS",
+          committedSpend: 100_000,
+          currency: "EUR",
+        },
+      ],
+    });
+    await createContract(app, cookie, {
+      supplierFacilityId: supB.facilityId,
+      title: "Custom Unit Contract B",
+      contractType: "FRAMEWORK",
+      startDate: "2026-01-01",
+      endDate: "2027-12-31",
+      lines: [
+        {
+          laneId: customLaneB.laneId,
+          cadence: "PER_YEAR",
+          committedVolume: 5000,
+          unit: "UNITS",
+          committedSpend: 100_000,
+          currency: "EUR",
+        },
+      ],
+    });
+
+    // Spend-only override on customLaneA must NOT double-apply 0.02 (100t -> 2t)
+    const simRes = await app.request("/api/v1/analytics/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        inputId: customInput.inputId,
+        viewMode: "RUN_RATE",
+        laneChanges: [{ laneId: customLaneA.laneId, annualSpendEur: 300_000 }],
+      }),
+    });
+    expect(simRes.status).toBe(200);
+    const sim = SimulateAnalyticsResponseSchema.parse(await simRes.json());
+
+    const baseLaneAComm = sim.baseline.financialRisk?.laneCommercials.find(
+      (lc) => lc.laneId === customLaneA.laneId,
+    );
+    const simLaneAComm = sim.simulated.financialRisk?.laneCommercials.find(
+      (lc) => lc.laneId === customLaneA.laneId,
+    );
+    expect(baseLaneAComm?.activeVolume).toBe(100);
+    expect(simLaneAComm?.activeVolume).toBe(100);
+    expect(simLaneAComm?.baseUnit).toBe("TONNES");
+    expect(simLaneAComm?.activeSpendEur).toBe(300_000);
+
+    // Material HHI is volume-weighted (100t vs 100t -> still 5,000),
+    // while Supplier HHI is spend-weighted (300k vs 100k -> 75/25 -> 6,250)
+    const simMatHhi = sim.simulated.hhiMetrics.find(
+      (m) => m.dimension === "MATERIAL",
+    )!;
+    const simSupHhi = sim.simulated.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    expect(simMatHhi.rawHhi).toBe(5000);
+    expect(simSupHhi.rawHhi).toBe(6250);
+  });
+
+  it("preserves LAPSED_UNCONTRACTED state on a share-only edit so lapsed lanes are not revived into HHI or SPOF", async () => {
+    const app = createTestApp();
+    const { cookie, supA, supB, laneA, laneB } =
+      await setupTwoSupplierNetwork(app);
+
+    await createContract(app, cookie, {
+      supplierFacilityId: supA.facilityId,
+      title: "Active Tampere Contract",
+      contractType: "FRAMEWORK",
+      startDate: "2026-01-01",
+      endDate: "2027-12-31",
+      lines: [
+        {
+          laneId: laneA.laneId,
+          cadence: "PER_YEAR",
+          committedVolume: 90,
+          unit: "TONNES",
+          committedSpend: 90_000,
+          currency: "EUR",
+        },
+      ],
+    });
+    await createContract(app, cookie, {
+      supplierFacilityId: supB.facilityId,
+      title: "Expired Hamburg Contract",
+      contractType: "FRAMEWORK",
+      startDate: "2025-01-01",
+      endDate: "2025-12-31",
+      expiryBehavior: "AUTO_ARCHIVE",
+      lines: [
+        {
+          laneId: laneB.laneId,
+          cadence: "PER_YEAR",
+          committedVolume: 10,
+          unit: "TONNES",
+          committedSpend: 10_000,
+          currency: "EUR",
+        },
+      ],
+    });
+
+    // Share-only edit on lapsed laneB (50 -> 30) adds no active volume or spend
+    const simRes = await app.request("/api/v1/analytics/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        viewMode: "RUN_RATE",
+        laneChanges: [{ laneId: laneB.laneId, volumeSharePct: 30 }],
+      }),
+    });
+    expect(simRes.status).toBe(200);
+    const sim = SimulateAnalyticsResponseSchema.parse(await simRes.json());
+
+    const simLaneBComm = sim.simulated.financialRisk?.laneCommercials.find(
+      (lc) => lc.laneId === laneB.laneId,
+    );
+    expect(simLaneBComm?.laneCommercialState).toBe("LAPSED_UNCONTRACTED");
+    expect(simLaneBComm?.activeVolume).toBeNull();
+    expect(simLaneBComm?.activeSpendEur).toBeNull();
+    expect(sim.simulated.financialRisk?.lapsedLaneCount).toBe(1);
+
+    const simMatHhi = sim.simulated.hhiMetrics.find(
+      (m) => m.dimension === "MATERIAL",
+    )!;
+    const simSupHhi = sim.simulated.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    expect(simMatHhi.rawHhi).toBe(10000);
+    expect(simMatHhi.isSinglePointOfFailure).toBe(true);
+    expect(simSupHhi.rawHhi).toBe(10000);
+    expect(
+      sim.simulated.alerts.some((a) => a.category === "SINGLE_SOURCE"),
+    ).toBe(true);
+  });
 });

@@ -794,6 +794,9 @@ export function simulateNetworkAnalytics(
 
     if (simulatedLaneCommercialsByLaneId && hasCommercialChange) {
       if (baseComm) {
+        const linkedInput = lane.inputId
+          ? input.inputs.find((item) => item.inputId === lane.inputId)
+          : undefined;
         let nextDerivedVolume = baseComm.activeVolume;
         let nextUnitConflict = baseComm.hasUnitConflict;
         if (change.annualVolume !== undefined) {
@@ -805,6 +808,7 @@ export function simulateNetworkAnalytics(
               change.annualVolume,
               lane.volumeUnit,
               targetUnit,
+              linkedInput?.unitConversionFactors,
             );
             nextDerivedVolume = !converted.unitConflict
               ? converted.value
@@ -835,7 +839,9 @@ export function simulateNetworkAnalytics(
           hasUnitConflict: nextUnitConflict,
           laneCommercialState: hasActiveCommercials
             ? "ACTIVE"
-            : "LEVEL_0_UNPRICED",
+            : baseComm.laneCommercialState === "LAPSED_UNCONTRACTED"
+              ? "LAPSED_UNCONTRACTED"
+              : "LEVEL_0_UNPRICED",
         });
       }
     }
