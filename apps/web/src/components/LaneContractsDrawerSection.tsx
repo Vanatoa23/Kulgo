@@ -25,6 +25,14 @@ function addOneYearIso(isoDate: string | null): string {
   return base.toISOString().slice(0, 10);
 }
 
+const ISO_DATE_RE = /^\d{4}-\d{2}-\d{2}$/;
+
+function isValidIsoDate(value: string): boolean {
+  if (!ISO_DATE_RE.test(value)) return false;
+  const parsed = new Date(`${value}T00:00:00Z`);
+  return !Number.isNaN(parsed.getTime()) && parsed.toISOString().slice(0, 10) === value;
+}
+
 export function LaneContractsDrawerSection({
   lane,
   contracts,
@@ -37,9 +45,14 @@ export function LaneContractsDrawerSection({
   const [error, setError] = useState<string | null>(null);
 
   const [title, setTitle] = useState("Spot Top-Up");
-  const [contractType, setContractType] = useState<"FRAMEWORK" | "SPOT_PO">(
-    "SPOT_PO",
-  );
+  const [contractType, setContractType] = useState<
+    "FRAMEWORK" | "SPOT_PO" | "ESTIMATE"
+  >("SPOT_PO");
+  const [pricingModel, setPricingModel] = useState<"FIXED" | "INDEXED">("FIXED");
+  const [expiryBehavior, setExpiryBehavior] = useState<
+    "HOLDOVER" | "AUTO_RENEW" | "AUTO_ARCHIVE"
+  >("AUTO_ARCHIVE");
+  const [noticePeriodDays, setNoticePeriodDays] = useState("30");
   const [cadence, setCadence] = useState<"PER_YEAR" | "TOTAL_OVER_TERM">(
     "TOTAL_OVER_TERM",
   );
@@ -63,79 +76,98 @@ export function LaneContractsDrawerSection({
 
   const handleCreateContract = async (e: React.FormEvent) => {
     e.preventDefault();
-    setSaving(true);
     setError(null);
-    try {
-      const parsedVol = volume.trim() ? Number(volume) : null;
-      const parsedSpend = spend.trim() ? Number(spend) : null;
 
-      // If this is the very first formal contract on a lane that already had quick flat-form values,
-      // preserve the base entry as Contract #1 (FRAMEWORK) before adding the new top-up.
-      if (
+    const trimmedStart = startDate.trim();
+    const trimmedEnd = endDate.trim();
+    if (!isValidIsoDate(trimmedStart)) {
+      setError("Please enter a valid start date (YYYY-MM-DD).");
+      return;
+    }
+    if (trimmedEnd && !isValidIsoDate(trimmedEnd)) {
+      setError("Please enter a valid end date (YYYY-MM-DD) or leave it blank.");
+      return;
+    }
+    if (trimmedEnd && trimmedEnd < trimmedStart) {
+      setError("End date must be on or after the start date.");
+      return;
+    }
+
+    const parsedVol = volume.trim() ? Number(volume) : null;
+    if (parsedVol !== null && (!Number.isFinite(parsedVol) || parsedVol < 0)) {
+      setError("Volume must be a non-negative number.");
+      return;
+    }
+    const parsedSpend = spend.trim() ? Number(spend) : null;
+    if (
+      parsedSpend !== null &&
+      (!Number.isFinite(parsedSpend) || parsedSpend < 0)
+    ) {
+      setError("Spend must be a non-negative number.");
+      return;
+    }
+    const parsedNotice =
+      contractType === "FRAMEWORK" && noticePeriodDays.trim()
+        ? Math.max(0, Math.round(Number(noticePeriodDays) || 0))
+        : 0;
+
+    setSaving(true);
+    try {
+      const shouldPreserveLegacyBase =
         laneContracts.length === 0 &&
         contractType === "SPOT_PO" &&
         ((lane.annualVolume !== null && lane.annualVolume > 0) ||
-          (lane.annualSpendEur !== null && lane.annualSpendEur > 0))
-      ) {
-        await createContract({
-          supplierFacilityId: lane.fromFacilityId,
-          title: "Base Agreement",
-          contractType: "FRAMEWORK",
-          pricingModel: "FIXED",
-          expiryBehavior: "HOLDOVER",
-          confidence: "ESTIMATED",
-          startDate: `${new Date().getUTCFullYear()}-01-01`,
-          endDate: null,
-          noticePeriodDays: 30,
-          nonRenewalNoticeGiven: false,
-          lines: [
-            {
-              laneId: lane.laneId,
-              inputId: lane.inputId,
-              cadence: "PER_YEAR",
-              committedVolume: lane.annualVolume,
-              unit: lane.volumeUnit,
-              committedSpend: lane.annualSpendEur,
-              currency: "EUR",
-            },
-          ],
-        });
-      }
+          (lane.annualSpendEur !== null && lane.annualSpendEur > 0));
 
+      const defaultTitle =
+        contractType === "SPOT_PO"
+          ? "Spot Top-Up"
+          : contractType === "ESTIMATE"
+            ? "Quick Commercial Estimate"
+            : "Framework Agreement";
+
+      // Single atomic/idempotent server request so partial failures or retries
+      // can never create orphaned or duplicate Base Agreements (#47).
       await createContract({
         supplierFacilityId: lane.fromFacilityId,
-        title: title.trim() || (contractType === "SPOT_PO" ? "Spot Top-Up" : "Framework Agreement"),
+        title: title.trim() || defaultTitle,
         contractType,
-        pricingModel: "FIXED",
-        expiryBehavior: contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER",
-        confidence: "CONTRACTED",
-        startDate,
-        endDate: endDate.trim() ? endDate.trim() : null,
-        noticePeriodDays: contractType === "FRAMEWORK" ? 30 : 0,
+        pricingModel: contractType === "FRAMEWORK" ? pricingModel : "FIXED",
+        expiryBehavior,
+        confidence: contractType === "ESTIMATE" ? "ESTIMATED" : "CONTRACTED",
+        startDate: trimmedStart,
+        endDate: trimmedEnd ? trimmedEnd : null,
+        noticePeriodDays: parsedNotice,
         nonRenewalNoticeGiven: false,
+        ...(shouldPreserveLegacyBase
+          ? { preserveLegacyBaseForLaneId: lane.laneId }
+          : {}),
         lines: [
           {
             laneId: lane.laneId,
             inputId: lane.inputId,
             cadence,
-            committedVolume:
-              parsedVol !== null && Number.isFinite(parsedVol) ? parsedVol : null,
+            committedVolume: parsedVol,
             unit: lane.volumeUnit,
-            committedSpend:
-              parsedSpend !== null && Number.isFinite(parsedSpend)
-                ? parsedSpend
-                : null,
+            committedSpend: parsedSpend,
             currency: "EUR",
           },
         ],
       });
 
+      // Reset draft fields ONLY after confirmed server success (#47)
       setVolume("");
       setSpend("");
       setAdding(false);
       await onChanged();
     } catch (err) {
       setError(err instanceof Error ? err.message : "Failed to save contract");
+      // Reconcile contracts state with server so retries never act on stale client state (#47)
+      try {
+        await onChanged();
+      } catch {
+        // Keep the original save error visible
+      }
     } finally {
       setSaving(false);
     }
@@ -315,24 +347,37 @@ export function LaneContractsDrawerSection({
           <div className="grid grid-cols-2 gap-2">
             <input
               type="text"
+              aria-label="Contract title"
               value={title}
               onChange={(e) => setTitle(e.target.value)}
               placeholder="Contract title"
               className="col-span-2 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
             />
             <select
+              aria-label="Contract type"
               value={contractType}
               onChange={(e) => {
-                const v = e.target.value as "FRAMEWORK" | "SPOT_PO";
+                const v = e.target.value as "FRAMEWORK" | "SPOT_PO" | "ESTIMATE";
                 setContractType(v);
-                setCadence(v === "SPOT_PO" ? "TOTAL_OVER_TERM" : "PER_YEAR");
+                if (v === "SPOT_PO") {
+                  setCadence("TOTAL_OVER_TERM");
+                  setExpiryBehavior("AUTO_ARCHIVE");
+                } else if (v === "ESTIMATE") {
+                  setCadence("PER_YEAR");
+                  setExpiryBehavior("HOLDOVER");
+                } else {
+                  setCadence("PER_YEAR");
+                  setExpiryBehavior("HOLDOVER");
+                }
               }}
               className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
             >
               <option value="SPOT_PO">Spot Top-Up (AUTO_ARCHIVE)</option>
-              <option value="FRAMEWORK">Framework (HOLDOVER)</option>
+              <option value="FRAMEWORK">Framework Agreement</option>
+              <option value="ESTIMATE">Quick Estimate (Level 1)</option>
             </select>
             <select
+              aria-label="Contract cadence"
               value={cadence}
               onChange={(e) =>
                 setCadence(e.target.value as "PER_YEAR" | "TOTAL_OVER_TERM")
@@ -342,10 +387,49 @@ export function LaneContractsDrawerSection({
               <option value="TOTAL_OVER_TERM">Total Over Term</option>
               <option value="PER_YEAR">Per Year</option>
             </select>
+            {contractType === "FRAMEWORK" && (
+              <>
+                <select
+                  aria-label="Pricing model"
+                  value={pricingModel}
+                  onChange={(e) =>
+                    setPricingModel(e.target.value as "FIXED" | "INDEXED")
+                  }
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
+                >
+                  <option value="FIXED">Fixed Price</option>
+                  <option value="INDEXED">Indexed Price</option>
+                </select>
+                <select
+                  aria-label="Expiry behavior"
+                  value={expiryBehavior}
+                  onChange={(e) =>
+                    setExpiryBehavior(
+                      e.target.value as "HOLDOVER" | "AUTO_RENEW" | "AUTO_ARCHIVE",
+                    )
+                  }
+                  className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
+                >
+                  <option value="HOLDOVER">Holdover</option>
+                  <option value="AUTO_RENEW">Auto-Renew</option>
+                  <option value="AUTO_ARCHIVE">Auto-Archive</option>
+                </select>
+                <input
+                  type="number"
+                  min="0"
+                  aria-label="Notice period days"
+                  value={noticePeriodDays}
+                  onChange={(e) => setNoticePeriodDays(e.target.value)}
+                  placeholder="Notice period (days)"
+                  className="col-span-2 rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
+                />
+              </>
+            )}
             <input
               type="number"
               step="any"
               min="0"
+              aria-label="Committed volume"
               value={volume}
               onChange={(e) => setVolume(e.target.value)}
               placeholder={`Volume (${lane.volumeUnit})`}
@@ -355,6 +439,7 @@ export function LaneContractsDrawerSection({
               type="number"
               step="any"
               min="0"
+              aria-label="Committed spend"
               value={spend}
               onChange={(e) => setSpend(e.target.value)}
               placeholder="Spend (€ EUR)"
@@ -362,12 +447,15 @@ export function LaneContractsDrawerSection({
             />
             <input
               type="date"
+              required
+              aria-label="Contract start date"
               value={startDate}
               onChange={(e) => setStartDate(e.target.value)}
               className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
             />
             <input
               type="date"
+              aria-label="Contract end date"
               value={endDate}
               onChange={(e) => setEndDate(e.target.value)}
               className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"

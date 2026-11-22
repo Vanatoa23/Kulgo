@@ -3,7 +3,6 @@ import type {
   AuthMeResponse,
   CreateFacilityInput,
   CreateInviteInput,
-  CreateInviteResponse,
   CreateProductInput,
   CreateSupplyInputInput,
   CreateSupplyLaneInput,
@@ -13,25 +12,21 @@ import type {
   WorkspaceNetworkResponse,
 } from "@kulgo/shared";
 import { AlertCircle, Globe2, Loader2, X } from "lucide-react";
-import { createRequestGuard, type RequestTicket } from "./lib/request-guard";
 import { useCallback, useEffect, useMemo, useState } from "react";
 import { AcceptInviteModal } from "./components/AcceptInviteModal.js";
 import { AlternativeDirectoryModal } from "./components/AlternativeDirectoryModal.js";
+import { AppShellNav, type AppPage } from "./components/AppShellNav.js";
 import { AuthView } from "./components/AuthView.js";
-import {
-  FilterBar,
-  type MapInteractionMode,
-  type WorkspaceViewMode,
-} from "./components/FilterBar.js";
+import { ExecutiveDashboardPage } from "./components/ExecutiveDashboardPage.js";
+import type { MapInteractionMode } from "./components/FilterBar.js";
 import { ImportExportModal } from "./components/ImportExportModal.js";
+import { LiveAlertsPanel } from "./components/LiveAlertsPanel.js";
 import { LogicalGraphView } from "./components/LogicalGraphView.js";
-import { OrgSettingsModal } from "./components/OrgSettingsModal.js";
+import { NetworkHubPage } from "./components/NetworkHubPage.js";
+import { SettingsPage } from "./components/SettingsPage.js";
 import { SupplyMap } from "./components/SupplyMap.js";
+import { TopContextBar } from "./components/TopContextBar.js";
 import { WhatIfSimulatorDrawer } from "./components/WhatIfSimulatorDrawer.js";
-import {
-  WorkspaceSidebar,
-  type SidebarTab,
-} from "./components/WorkspaceSidebar.js";
 import {
   ApiError,
   acknowledgeAlert,
@@ -42,21 +37,19 @@ import {
   createSupplyInput,
   deleteFacility,
   deleteLane,
-  deleteProduct,
-  deleteSupplyInput,
   getAlertFeed,
   getAnalyticsSummary,
   getMe,
   getNetwork,
   listInvites,
   logout,
-  revokeInvite,
   seedDemo,
   triggerAlertSweep,
   updateFacility,
   updateLane,
   type LiveAlertFeedResponse,
 } from "./lib/api.js";
+import { createRequestGuard, type RequestTicket } from "./lib/request-guard";
 import {
   extractInviteTokenFromSearch,
   filterWorkspaceNetwork,
@@ -70,6 +63,31 @@ const EMPTY_NETWORK: WorkspaceNetworkResponse = {
   riskSignals: [],
 };
 
+const VALID_PAGES: ReadonlySet<string> = new Set([
+  "hub",
+  "map",
+  "dashboard",
+  "settings",
+]);
+
+function readPageFromLocation(): AppPage {
+  if (typeof window === "undefined") return "hub";
+  const params = new URLSearchParams(window.location.search);
+  const raw = params.get("page");
+  if (raw && VALID_PAGES.has(raw)) {
+    return raw as AppPage;
+  }
+  return "hub";
+}
+
+function writePageToLocation(page: AppPage): void {
+  if (typeof window === "undefined") return;
+  const url = new URL(window.location.href);
+  if (url.searchParams.get("page") === page) return;
+  url.searchParams.set("page", page);
+  window.history.pushState({ page }, "", url.toString());
+}
+
 export function App() {
   const [bootstrapping, setBootstrapping] = useState(true);
   const [session, setSession] = useState<AuthMeResponse | null>(null);
@@ -77,11 +95,18 @@ export function App() {
     useState<WorkspaceNetworkResponse>(EMPTY_NETWORK);
   const [loadingNetwork, setLoadingNetwork] = useState(false);
 
-  // M2 Analytics & View Mode state
-  const [viewMode, setViewMode] = useState<WorkspaceViewMode>("map");
+  // 4-Page App Shell state synced with ?page=...
+  const [activePage, setActivePage] = useState<AppPage>(() =>
+    readPageFromLocation(),
+  );
+  const [navCollapsed, setNavCollapsed] = useState(false);
+  const [alertsDrawerOpen, setAlertsDrawerOpen] = useState(false);
+
+  // Map sub-view (Geo Map vs Logical Graph)
+  const [mapViewMode, setMapViewMode] = useState<"map" | "graph">("map");
   const [financialViewMode, setFinancialViewMode] = useState<
     "RUN_RATE" | "PERIOD_WINDOW"
-  >("PERIOD_WINDOW");
+  >("RUN_RATE");
   const [analytics, setAnalytics] = useState<AnalyticsSummary | null>(null);
   const [loadingAnalytics, setLoadingAnalytics] = useState(false);
   const [simulatorOpen, setSimulatorOpen] = useState(false);
@@ -93,7 +118,7 @@ export function App() {
   const [loadingAlerts, setLoadingAlerts] = useState(false);
   const [sweepingAlerts, setSweepingAlerts] = useState(false);
 
-  // M3 Partner Invites & Alternative Directory state
+  // Partner Invites & Alternative Directory state
   const [invitations, setInvitations] = useState<Invitation[]>([]);
   const [pendingInviteToken, setPendingInviteToken] = useState<string>(() =>
     typeof window !== "undefined"
@@ -108,9 +133,6 @@ export function App() {
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [directoryInitialCapability, setDirectoryInitialCapability] =
     useState("");
-
-  // M4 Org ESG Settings & Import/Export modal state
-  const [orgSettingsOpen, setOrgSettingsOpen] = useState(false);
   const [importExportOpen, setImportExportOpen] = useState(false);
 
   // Filter & selection state
@@ -120,15 +142,7 @@ export function App() {
     null,
   );
   const [selectedLaneId, setSelectedLaneId] = useState<string | null>(null);
-  const [activeTab, setActiveTab] = useState<SidebarTab>("analytics");
   const [mapMode, setMapMode] = useState<MapInteractionMode>("inspect");
-  const [refiningFacilityId, setRefiningFacilityId] = useState<string | null>(
-    null,
-  );
-  const [pickedCoords, setPickedCoords] = useState<{
-    lat: number;
-    lng: number;
-  } | null>(null);
   const [fitTrigger, setFitTrigger] = useState(0);
 
   // Action states
@@ -141,9 +155,22 @@ export function App() {
   const sessionGuard = useMemo(() => createRequestGuard(), []);
   const alertGuard = useMemo(() => createRequestGuard(), []);
 
+  // Sync browser Back/Forward with activePage
+  useEffect(() => {
+    const onPopState = () => {
+      setActivePage(readPageFromLocation());
+    };
+    window.addEventListener("popstate", onPopState);
+    return () => window.removeEventListener("popstate", onPopState);
+  }, []);
+
+  const navigateToPage = useCallback((page: AppPage) => {
+    setActivePage(page);
+    writePageToLocation(page);
+  }, []);
+
   const loadWorkspaceNetwork = useCallback(
     async (shouldFit: boolean) => {
-      // Latest-wins: a newer load or a session change supersedes this one.
       const ticket = networkGuard.begin();
       setLoadingNetwork(true);
       try {
@@ -161,37 +188,38 @@ export function App() {
         if (!ticket.isCurrent()) return;
         if (err instanceof ApiError && err.status === 401) {
           setSession(null);
-        } else {
-          setBannerError(
-            err instanceof Error
-              ? err.message
-              : "Failed to load supply network.",
-          );
+          return;
         }
+        setBannerError(
+          err instanceof Error
+            ? err.message
+            : "Failed to load workspace network.",
+        );
       } finally {
-        if (ticket.isCurrent()) setLoadingNetwork(false);
+        if (ticket.isCurrent()) {
+          setLoadingNetwork(false);
+        }
       }
     },
     [networkGuard],
   );
 
-  // Session bootstrap via /api/v1/auth/me
   useEffect(() => {
     let active = true;
-    getMe()
-      .then((me) => {
+    const init = async () => {
+      try {
+        const me = await getMe();
         if (!active) return;
         setSession(me);
-        void loadWorkspaceNetwork(true);
-      })
-      .catch(() => {
+        await loadWorkspaceNetwork(true);
+      } catch {
         if (!active) return;
         setSession(null);
-      })
-      .finally(() => {
+      } finally {
         if (active) setBootstrapping(false);
-      });
-
+      }
+    };
+    void init();
     return () => {
       active = false;
     };
@@ -206,38 +234,35 @@ export function App() {
     [network, activeProductId, activeInputId],
   );
 
-  // Sync live Risk & ESG analytics whenever session, network, or active filters change
+  // Fetch analytics whenever network, active filters, or financial time view change
   useEffect(() => {
     if (!session) {
       setAnalytics(null);
       return;
     }
-
-    let cancelled = false;
+    let active = true;
     setLoadingAnalytics(true);
-    getAnalyticsSummary({
-      productId: activeProductId ?? undefined,
-      inputId: activeInputId ?? undefined,
-      viewMode: financialViewMode,
-    })
-      .then((summary) => {
-        if (!cancelled) {
-          setAnalytics(summary);
-        }
-      })
-      .catch((err) => {
-        if (!cancelled && err instanceof ApiError && err.status === 401) {
+    const load = async () => {
+      try {
+        const summary = await getAnalyticsSummary({
+          productId: activeProductId ?? undefined,
+          inputId: activeInputId ?? undefined,
+          viewMode: financialViewMode,
+        });
+        if (!active) return;
+        setAnalytics(summary);
+      } catch (err) {
+        if (!active) return;
+        if (err instanceof ApiError && err.status === 401) {
           setSession(null);
         }
-      })
-      .finally(() => {
-        if (!cancelled) {
-          setLoadingAnalytics(false);
-        }
-      });
-
+      } finally {
+        if (active) setLoadingAnalytics(false);
+      }
+    };
+    void load();
     return () => {
-      cancelled = true;
+      active = false;
     };
   }, [session, network, activeProductId, activeInputId, financialViewMode]);
 
@@ -246,9 +271,10 @@ export function App() {
     setLoadingAlerts(true);
     try {
       const feed = await getAlertFeed();
-      if (ticket.isCurrent()) setAlertFeed(feed);
+      if (!ticket.isCurrent()) return;
+      setAlertFeed(feed);
     } catch {
-      // Non-fatal; keep existing feed state
+      // Non-fatal
     } finally {
       if (ticket.isCurrent()) setLoadingAlerts(false);
     }
@@ -264,24 +290,41 @@ export function App() {
 
   const handleAcknowledgeAlert = useCallback(
     async (signalId: string, status: "ACKNOWLEDGED" | "MUTED") => {
-      await acknowledgeAlert(signalId, { status });
-      await refreshAlertFeed();
+      const sessionTicket = sessionGuard.capture();
+      try {
+        await acknowledgeAlert(signalId, { status });
+        if (!sessionTicket.isCurrent()) return;
+        await refreshAlertFeed();
+      } catch (err) {
+        if (!sessionTicket.isCurrent()) return;
+        setBannerError(
+          err instanceof Error ? err.message : "Failed to update alert status.",
+        );
+      }
     },
-    [refreshAlertFeed],
+    [refreshAlertFeed, sessionGuard],
   );
 
   const handleTriggerAlertSweep = useCallback(async () => {
+    const sessionTicket = sessionGuard.capture();
     setSweepingAlerts(true);
     try {
       await triggerAlertSweep();
+      if (!sessionTicket.isCurrent()) return;
       await Promise.all([loadWorkspaceNetwork(false), refreshAlertFeed()]);
+    } catch (err) {
+      if (!sessionTicket.isCurrent()) return;
+      setBannerError(
+        err instanceof Error
+          ? err.message
+          : "Failed to run live disruption sweep.",
+      );
     } finally {
-      setSweepingAlerts(false);
+      if (sessionTicket.isCurrent()) setSweepingAlerts(false);
     }
-  }, [loadWorkspaceNetwork, refreshAlertFeed]);
+  }, [loadWorkspaceNetwork, refreshAlertFeed, sessionGuard]);
 
   const resetTenantState = () => {
-    // Reject any in-flight loads from the previous session/account.
     sessionGuard.invalidate();
     networkGuard.invalidate();
     alertGuard.invalidate();
@@ -304,7 +347,6 @@ export function App() {
 
   const handleLogout = async () => {
     setLoggingOut(true);
-    // Invalidate immediately so nothing in flight can land during/after logout.
     resetTenantState();
     try {
       await logout();
@@ -315,6 +357,7 @@ export function App() {
       setSession(null);
       resetTenantState();
       setSimulatorOpen(false);
+      setAlertsDrawerOpen(false);
       setActiveProductId(null);
       setActiveInputId(null);
       setSelectedFacilityId(null);
@@ -349,8 +392,6 @@ export function App() {
       setActiveInputId(null);
       setSelectedFacilityId(null);
       setSelectedLaneId(null);
-      setActiveTab("overview");
-      setMapMode("inspect");
       setFitTrigger((n) => n + 1);
     } catch (err) {
       setBannerError(
@@ -361,35 +402,37 @@ export function App() {
     }
   };
 
-  /**
-   * Runs a mutation bound to the session it started in. `commit` applies the
-   * result only if the session is unchanged, and invalidates any older
-   * in-flight workspace loads so they cannot overwrite the mutation result.
-   */
-  const makeCommit = (session: RequestTicket) => (apply: () => void) => {
-    if (!session.isCurrent()) return;
+  const makeCommit = (sessionTicket: RequestTicket) => (apply: () => void) => {
+    if (!sessionTicket.isCurrent()) return;
     networkGuard.invalidate();
     setLoadingNetwork(false);
     apply();
   };
 
+  /**
+   * Runs a workspace mutation and returns `true` ONLY when the server confirms
+   * success in the current session. Returns `false` on any validation/network
+   * failure so calling forms preserve user-entered drafts (#47B).
+   */
   const runMutation = async (
     fn: (commit: (apply: () => void) => void) => Promise<void>,
-  ) => {
+  ): Promise<boolean> => {
     const sessionTicket = sessionGuard.capture();
     setBusy(true);
     setBannerError(null);
     try {
       await fn(makeCommit(sessionTicket));
+      return sessionTicket.isCurrent();
     } catch (err) {
-      if (!sessionTicket.isCurrent()) return;
+      if (!sessionTicket.isCurrent()) return false;
       if (err instanceof ApiError && err.status === 401) {
         setSession(null);
-        return;
+        return false;
       }
       setBannerError(
         err instanceof Error ? err.message : "Action failed. Please try again.",
       );
+      return false;
     } finally {
       setBusy(false);
     }
@@ -404,8 +447,6 @@ export function App() {
           facilities: [...prev.facilities, created],
         }));
         setSelectedFacilityId(created.facilityId);
-        setMapMode("inspect");
-        setPickedCoords(null);
       });
     });
 
@@ -422,11 +463,6 @@ export function App() {
             f.facilityId === facilityId ? updated : f,
           ),
         }));
-        if (refiningFacilityId === facilityId) {
-          setRefiningFacilityId(null);
-        }
-        setMapMode("inspect");
-        setPickedCoords(null);
       });
       if (input.lat !== undefined || input.lng !== undefined) {
         const refreshed = await getNetwork();
@@ -502,23 +538,6 @@ export function App() {
       });
     });
 
-  const handleDeleteProduct = (productId: string) =>
-    runMutation(async (commit) => {
-      await deleteProduct(productId);
-      commit(() => {
-        setNetwork((prev) => ({
-          ...prev,
-          products: prev.products.filter((p) => p.productId !== productId),
-          inputs: prev.inputs.map((i) =>
-            i.productId === productId ? { ...i, productId: null } : i,
-          ),
-        }));
-        if (activeProductId === productId) {
-          setActiveProductId(null);
-        }
-      });
-    });
-
   const handleCreateSupplyInput = (input: CreateSupplyInputInput) =>
     runMutation(async (commit) => {
       const created = await createSupplyInput(input);
@@ -530,59 +549,12 @@ export function App() {
       });
     });
 
-  const handleDeleteSupplyInput = (inputId: string) =>
+  const handleCreateInvite = (input: CreateInviteInput) =>
     runMutation(async (commit) => {
-      await deleteSupplyInput(inputId);
-      commit(() => {
-        setNetwork((prev) => ({
-          ...prev,
-          inputs: prev.inputs.filter((i) => i.inputId !== inputId),
-          lanes: prev.lanes.map((l) =>
-            l.inputId === inputId ? { ...l, inputId: null } : l,
-          ),
-        }));
-        if (activeInputId === inputId) {
-          setActiveInputId(null);
-        }
-      });
-    });
-
-  const handleCreateInvite = async (
-    input: CreateInviteInput,
-  ): Promise<CreateInviteResponse | null> => {
-    const sessionTicket = sessionGuard.capture();
-    setBusy(true);
-    setBannerError(null);
-    try {
       const result = await createInvite(input);
-      if (!sessionTicket.isCurrent()) return null;
-      setInvitations((prev) => [result.invitation, ...prev]);
-      return result;
-    } catch (err) {
-      if (!sessionTicket.isCurrent()) return null;
-      if (err instanceof ApiError && err.status === 401) {
-        setSession(null);
-        return null;
-      }
-      setBannerError(
-        err instanceof Error
-          ? err.message
-          : "Failed to create partner invitation.",
-      );
-      return null;
-    } finally {
-      setBusy(false);
-    }
-  };
-
-  const handleRevokeInvite = (inviteId: string) =>
-    runMutation(async () => {
-      const result = await revokeInvite(inviteId);
-      setInvitations((prev) =>
-        prev.map((inv) =>
-          inv.inviteId === inviteId ? result.invitation : inv,
-        ),
-      );
+      commit(() => {
+        setInvitations((prev) => [result.invitation, ...prev]);
+      });
     });
 
   const clearInviteQueryParam = () => {
@@ -613,302 +585,353 @@ export function App() {
     return <AuthView onAuthenticated={handleAuthenticated} />;
   }
 
-  const refiningFacilityName =
-    network.facilities.find((f) => f.facilityId === refiningFacilityId)?.name ??
-    null;
+  const ackedSignalIds = new Set(
+    (alertFeed?.acknowledgements ?? []).map((a) => a.signalId),
+  );
+  const unreadRedCount = (alertFeed?.signals ?? []).filter(
+    (s) => s.severity === "RED" && !ackedSignalIds.has(s.signalId),
+  ).length;
+  const unreadAmberCount = (alertFeed?.signals ?? []).filter(
+    (s) => s.severity === "YELLOW" && !ackedSignalIds.has(s.signalId),
+  ).length;
 
   return (
-    <div className="h-screen bg-slate-950 text-slate-100 flex flex-col overflow-hidden">
-      <FilterBar
-        user={session.user}
-        userRole={session.user.role}
-        organization={session.organization}
-        products={network.products}
-        inputs={filtered.inputs}
-        activeProductId={activeProductId}
-        activeInputId={activeInputId}
-        stats={filtered.stats}
-        analytics={analytics}
-        viewMode={viewMode}
-        mapMode={mapMode}
+    <div className="h-screen w-screen flex overflow-hidden bg-slate-950 text-slate-100">
+      {/* Slim Persistent Left Icon-Rail */}
+      <AppShellNav
+        activePage={activePage}
+        onSelectPage={navigateToPage}
+        collapsed={navCollapsed}
+        onToggleCollapse={() => setNavCollapsed((v) => !v)}
+        onOpenImportExport={() => setImportExportOpen(true)}
+        onSeedDemo={() => void handleSeedDemo()}
         seedingDemo={seedingDemo}
-        loggingOut={loggingOut}
-        onChangeViewMode={(nextMode) => {
-          setViewMode(nextMode);
-          if (nextMode === "graph") {
-            setMapMode("inspect");
-          }
-        }}
-        onSelectProduct={handleSelectProduct}
-        onSelectInput={setActiveInputId}
-        onSeedDemo={handleSeedDemo}
-        onToggleAddFacility={() => {
-          if (mapMode === "pick-new-facility") {
-            setMapMode("inspect");
-          } else {
-            setViewMode("map");
-            setSelectedFacilityId(null);
-            setActiveTab("facility");
-            setMapMode("pick-new-facility");
-          }
-        }}
-        onOpenAddLane={() => {
-          setSelectedLaneId(null);
-          setMapMode("inspect");
-          setActiveTab("lane");
-        }}
-        onOpenAnalytics={() => {
-          setActiveTab("analytics");
-        }}
-        onOpenSimulator={() => {
-          setSimulatorOpen(true);
-        }}
-        onOpenDirectory={() => {
-          setDirectoryInitialCapability("");
-          setDirectoryOpen(true);
-        }}
-        onOpenAcceptInvite={() => {
-          setAcceptInviteOpen(true);
-        }}
-        onOpenOrgSettings={() => {
-          setOrgSettingsOpen(true);
-        }}
-        onOpenImportExport={() => {
-          setImportExportOpen(true);
-        }}
-        onFitNetwork={() => setFitTrigger((n) => n + 1)}
-        onFocusUnverifiedHq={() => {
-          setMapMode("inspect");
-          setActiveTab("overview");
-        }}
-        onLogout={handleLogout}
+        hasNetworkData={network.facilities.length > 0}
+        unreadAlertCount={unreadRedCount + unreadAmberCount}
       />
 
-      {bannerError && (
-        <div
-          role="alert"
-          className="shrink-0 flex items-center justify-between gap-3 bg-red-950/90 border-b border-red-500/40 px-4 py-2 text-xs text-red-200"
-        >
-          <span className="inline-flex items-center gap-2">
-            <AlertCircle className="h-4 w-4 text-red-400 shrink-0" />
-            {bannerError}
-          </span>
-          <button
-            type="button"
-            onClick={() => setBannerError(null)}
-            className="rounded p-0.5 hover:bg-red-500/20 cursor-pointer"
-          >
-            <X className="h-3.5 w-3.5" />
-          </button>
-        </div>
-      )}
+      {/* Right Main Column: Minimal Top Context Bar + Active Page */}
+      <div className="flex-1 flex flex-col min-w-0 min-h-0 overflow-hidden">
+        <TopContextBar
+          organization={session.organization}
+          user={session.user}
+          products={network.products}
+          inputs={network.inputs}
+          activeProductId={activeProductId}
+          activeInputId={activeInputId}
+          onSelectProduct={handleSelectProduct}
+          onSelectInput={setActiveInputId}
+          financialViewMode={financialViewMode}
+          onChangeFinancialViewMode={setFinancialViewMode}
+          unreadRedCount={unreadRedCount}
+          unreadAmberCount={unreadAmberCount}
+          alertsOpen={alertsDrawerOpen}
+          onToggleAlerts={() => setAlertsDrawerOpen((v) => !v)}
+          onOpenAcceptInvite={() => setAcceptInviteOpen(true)}
+          onLogout={() => void handleLogout()}
+          loggingOut={loggingOut}
+        />
 
-      <div className="flex-1 flex flex-col lg:flex-row min-h-0 relative">
-        {viewMode === "map" ? (
-          <SupplyMap
-            facilities={filtered.facilities}
-            lanes={filtered.lanes}
-            inputs={network.inputs}
-            riskSignals={network.riskSignals}
-            selectedFacilityId={selectedFacilityId}
-            selectedLaneId={selectedLaneId}
-            mapMode={mapMode}
-            refiningFacilityName={refiningFacilityName}
-            fitTrigger={fitTrigger}
-            onSelectFacility={(facilityId) => {
-              setSelectedFacilityId(facilityId);
-              setSelectedLaneId(null);
-              setActiveTab("facility");
-            }}
-            onSelectLane={(laneId) => {
-              setSelectedLaneId(laneId);
-              setSelectedFacilityId(null);
-              setActiveTab("lane");
-            }}
-            onMapPickCoordinates={(coords) => {
-              setPickedCoords(coords);
-              if (mapMode === "pick-new-facility") {
-                setSelectedFacilityId(null);
-                setActiveTab("facility");
-              } else if (mapMode === "refine-site") {
-                setActiveTab("overview");
-              }
-              setMapMode("inspect");
-            }}
-            onCancelMapMode={() => {
-              setMapMode("inspect");
-              setRefiningFacilityId(null);
-            }}
-            onAcknowledgeSignal={handleAcknowledgeAlert}
-          />
-        ) : (
-          <LogicalGraphView
-            products={network.products}
-            inputs={filtered.inputs}
-            facilities={filtered.facilities}
-            lanes={filtered.lanes}
-            activeProductId={activeProductId}
-            activeInputId={activeInputId}
-            selectedFacilityId={selectedFacilityId}
-            selectedLaneId={selectedLaneId}
-            onSelectProduct={handleSelectProduct}
-            onSelectInput={setActiveInputId}
-            onSelectFacility={(facilityId) => {
-              setSelectedFacilityId(facilityId);
-              setSelectedLaneId(null);
-              setActiveTab("facility");
-            }}
-            onSelectLane={(laneId) => {
-              setSelectedLaneId(laneId);
-              setSelectedFacilityId(null);
-              setActiveTab("lane");
-            }}
-          />
-        )}
-
-        {loadingNetwork && (
-          <div className="pointer-events-none absolute top-3 left-3 z-20 inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/90 px-3 py-1.5 text-xs text-slate-300">
-            <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
-            <span>Syncing network...</span>
+        {bannerError && (
+          <div className="shrink-0 bg-red-950/90 border-b border-red-800 px-4 py-2 text-xs text-red-200 flex items-center justify-between gap-2 z-20">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="h-4 w-4 text-red-400 shrink-0" />
+              <span>{bannerError}</span>
+            </div>
+            <button
+              type="button"
+              onClick={() => setBannerError(null)}
+              className="p-0.5 rounded hover:bg-red-900/60 cursor-pointer"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
           </div>
         )}
 
-        <WorkspaceSidebar
-          activeTab={activeTab}
-          onChangeTab={setActiveTab}
-          userRole={session.user.role}
-          organization={session.organization}
-          products={network.products}
-          inputs={network.inputs}
-          facilities={network.facilities}
-          visibleLanes={filtered.lanes}
-          contracts={network.contracts ?? []}
-          contractLines={network.contractLines ?? []}
-          invitations={invitations}
-          stats={filtered.stats}
-          analytics={analytics}
-          loadingAnalytics={loadingAnalytics}
-          financialViewMode={financialViewMode}
-          onChangeFinancialViewMode={setFinancialViewMode}
-          onContractsChanged={() => loadWorkspaceNetwork(false)}
-          selectedFacilityId={selectedFacilityId}
-          selectedLaneId={selectedLaneId}
-          pickedCoords={pickedCoords}
-          mapMode={mapMode}
-          refiningFacilityId={refiningFacilityId}
-          busy={busy}
-          onSelectFacility={(facilityId) => {
-            setSelectedFacilityId(facilityId);
-            setSelectedLaneId(null);
-            setActiveTab("facility");
-          }}
-          onSelectLane={(laneId) => {
-            setSelectedLaneId(laneId);
-            setSelectedFacilityId(null);
-            setActiveTab("lane");
-          }}
-          onOpenSimulator={() => setSimulatorOpen(true)}
-          onOpenDirectory={(cap) => {
-            setDirectoryInitialCapability(cap ?? "");
-            setDirectoryOpen(true);
-          }}
-          onStartPickNewFacility={() => {
-            setViewMode("map");
-            setMapMode("pick-new-facility");
-          }}
-          onStartRefineFacilityOnMap={(facilityId) => {
-            setViewMode("map");
-            setRefiningFacilityId(facilityId);
-            setMapMode("refine-site");
-          }}
-          onCreateFacility={handleCreateFacility}
-          onUpdateFacility={handleUpdateFacility}
-          onDeleteFacility={handleDeleteFacility}
-          onCreateLane={handleCreateLane}
-          onUpdateLane={handleUpdateLane}
-          onDeleteLane={handleDeleteLane}
-          onCreateProduct={handleCreateProduct}
-          onDeleteProduct={handleDeleteProduct}
-          onCreateSupplyInput={handleCreateSupplyInput}
-          onDeleteSupplyInput={handleDeleteSupplyInput}
-          onCreateInvite={handleCreateInvite}
-          onRevokeInvite={handleRevokeInvite}
-          alertFeed={alertFeed}
-          loadingAlerts={loadingAlerts}
-          sweepingAlerts={sweepingAlerts}
-          onAcknowledgeAlert={handleAcknowledgeAlert}
-          onTriggerAlertSweep={handleTriggerAlertSweep}
-          onOpenOrgSettings={() => setOrgSettingsOpen(true)}
-        />
+        {/* Active Page Canvas */}
+        <main className="relative flex-1 flex min-h-0 overflow-hidden">
+          {loadingNetwork && (
+            <div className="pointer-events-none absolute top-3 left-3 z-20 inline-flex items-center gap-2 rounded-lg border border-slate-800 bg-slate-950/90 px-3 py-1.5 text-xs text-slate-300">
+              <Loader2 className="h-3.5 w-3.5 animate-spin text-emerald-400" />
+              <span>Syncing network...</span>
+            </div>
+          )}
 
-        <WhatIfSimulatorDrawer
-          open={simulatorOpen}
-          lanes={filtered.lanes}
-          facilities={network.facilities}
-          inputs={network.inputs}
-          activeProductId={activeProductId}
-          activeInputId={activeInputId}
-          financialViewMode={financialViewMode}
-          onClose={() => setSimulatorOpen(false)}
-        />
+          {/* PAGE 1: Network Hub */}
+          {activePage === "hub" && (
+            <NetworkHubPage
+              products={network.products}
+              inputs={filtered.inputs}
+              facilities={filtered.facilities}
+              lanes={filtered.lanes}
+              contracts={network.contracts ?? []}
+              contractLines={network.contractLines ?? []}
+              invitations={invitations}
+              analytics={analytics}
+              userRole={session.user.role}
+              busy={busy}
+              seedingDemo={seedingDemo}
+              selectedFacilityId={selectedFacilityId}
+              selectedLaneId={selectedLaneId}
+              onSelectFacility={(facilityId) => {
+                setSelectedFacilityId(facilityId);
+                setSelectedLaneId(null);
+              }}
+              onViewFacilityOnMap={(facilityId) => {
+                setSelectedFacilityId(facilityId);
+                setMapViewMode("map");
+                navigateToPage("map");
+              }}
+              onOpenDirectory={(cap) => {
+                setDirectoryInitialCapability(cap ?? "");
+                setDirectoryOpen(true);
+              }}
+              onSeedDemo={() => void handleSeedDemo()}
+              onCreateFacility={handleCreateFacility}
+              onUpdateFacility={handleUpdateFacility}
+              onDeleteFacility={handleDeleteFacility}
+              onCreateLane={handleCreateLane}
+              onUpdateLane={handleUpdateLane}
+              onDeleteLane={handleDeleteLane}
+              onCreateProduct={handleCreateProduct}
+              onCreateSupplyInput={handleCreateSupplyInput}
+              onCreateInvite={handleCreateInvite}
+              onContractsChanged={() => loadWorkspaceNetwork(false)}
+            />
+          )}
 
-        <AcceptInviteModal
-          open={acceptInviteOpen && session.user.role === "OWNER"}
-          initialToken={pendingInviteToken}
-          organization={session.organization}
-          onClose={() => {
-            setAcceptInviteOpen(false);
-            setPendingInviteToken("");
-            clearInviteQueryParam();
-          }}
-          onAccepted={(result) => {
-            setSession((prev) =>
-              prev
-                ? {
-                    ...prev,
-                    organization: {
-                      ...prev.organization,
-                      openToNewBuyers: result.organization.openToNewBuyers,
-                      capabilities: result.organization.capabilities,
-                    },
-                  }
-                : prev,
-            );
-            setPendingInviteToken("");
-            clearInviteQueryParam();
-            void loadWorkspaceNetwork(false);
-          }}
-        />
+          {/* PAGE 2: Strategy-Game Supply Map (+ Logical Graph toggle) */}
+          {activePage === "map" && (
+            <div className="relative flex-1 flex min-h-0 overflow-hidden">
+              {mapViewMode === "map" ? (
+                <SupplyMap
+                  facilities={filtered.facilities}
+                  lanes={filtered.lanes}
+                  inputs={network.inputs}
+                  riskSignals={network.riskSignals}
+                  analytics={analytics}
+                  selectedFacilityId={selectedFacilityId}
+                  selectedLaneId={selectedLaneId}
+                  mapMode={mapMode}
+                  refiningFacilityName={null}
+                  fitTrigger={fitTrigger}
+                  onSelectFacility={(facilityId) => {
+                    setSelectedFacilityId(facilityId);
+                    setSelectedLaneId(null);
+                  }}
+                  onSelectLane={(laneId) => {
+                    setSelectedLaneId(laneId);
+                    setSelectedFacilityId(null);
+                  }}
+                  onMapPickCoordinates={() => {
+                    setMapMode("inspect");
+                  }}
+                  onCancelMapMode={() => setMapMode("inspect")}
+                  onAcknowledgeSignal={handleAcknowledgeAlert}
+                  onToggleLogicalGraph={() => setMapViewMode("graph")}
+                  onOpenSimulator={() => setSimulatorOpen(true)}
+                  onInspectLaneInHub={(lane) => {
+                    setSelectedFacilityId(lane.fromFacilityId);
+                    setSelectedLaneId(lane.laneId);
+                    navigateToPage("hub");
+                  }}
+                />
+              ) : (
+                <div className="relative flex-1 flex min-h-0">
+                  <LogicalGraphView
+                    products={network.products}
+                    inputs={filtered.inputs}
+                    facilities={filtered.facilities}
+                    lanes={filtered.lanes}
+                    activeProductId={activeProductId}
+                    activeInputId={activeInputId}
+                    selectedFacilityId={selectedFacilityId}
+                    selectedLaneId={selectedLaneId}
+                    onSelectProduct={handleSelectProduct}
+                    onSelectInput={setActiveInputId}
+                    onSelectFacility={(facilityId) => {
+                      setSelectedFacilityId(facilityId);
+                      navigateToPage("hub");
+                    }}
+                    onSelectLane={(laneId) => {
+                      const lane = network.lanes.find(
+                        (l) => l.laneId === laneId,
+                      );
+                      if (lane) {
+                        setSelectedFacilityId(lane.fromFacilityId);
+                        setSelectedLaneId(laneId);
+                        navigateToPage("hub");
+                      }
+                    }}
+                  />
+                  <div className="absolute bottom-4 left-4 z-20 flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => setMapViewMode("map")}
+                      className="rounded-lg border border-emerald-500/40 bg-slate-950/90 hover:bg-slate-900 px-3 py-1.5 text-xs font-medium text-emerald-300 shadow-lg cursor-pointer"
+                    >
+                      Map View
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setSimulatorOpen(true)}
+                      className="rounded-lg border border-sky-500/40 bg-slate-950/90 hover:bg-slate-900 px-3 py-1.5 text-xs font-medium text-sky-300 shadow-lg cursor-pointer"
+                    >
+                      What-If Simulator
+                    </button>
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
-        <AlternativeDirectoryModal
-          open={directoryOpen}
-          initialCapability={directoryInitialCapability}
-          onClose={() => setDirectoryOpen(false)}
-        />
+          {/* PAGE 3: Executive Dashboard */}
+          {activePage === "dashboard" && (
+            <ExecutiveDashboardPage
+              analytics={analytics}
+              loading={loadingAnalytics}
+              organization={session.organization}
+              facilities={network.facilities}
+              financialViewMode={financialViewMode}
+              activeRedDisruptions={unreadRedCount}
+              activeAmberDisruptions={unreadAmberCount}
+              onSelectFacility={(facilityId) => {
+                setSelectedFacilityId(facilityId);
+                navigateToPage("hub");
+              }}
+              onOpenSimulator={() => setSimulatorOpen(true)}
+              onOpenDirectory={(cap) => {
+                setDirectoryInitialCapability(cap ?? "");
+                setDirectoryOpen(true);
+              }}
+              onOpenImportExport={() => setImportExportOpen(true)}
+              onOpenSettings={() => navigateToPage("settings")}
+            />
+          )}
 
-        <OrgSettingsModal
-          open={orgSettingsOpen}
-          currentUser={session.user}
-          organization={session.organization}
-          onClose={() => setOrgSettingsOpen(false)}
-          onUpdated={(updatedOrg) => {
-            setSession((prev) =>
-              prev ? { ...prev, organization: updatedOrg } : prev,
-            );
-          }}
-        />
+          {/* PAGE 4: User & Organization Settings */}
+          {activePage === "settings" && (
+            <SettingsPage
+              currentUser={session.user}
+              organization={session.organization}
+              onUpdated={(updatedOrg) => {
+                setSession((prev) =>
+                  prev ? { ...prev, organization: updatedOrg } : prev,
+                );
+              }}
+            />
+          )}
 
-        <ImportExportModal
-          open={importExportOpen}
-          organization={session.organization}
-          activeProductId={activeProductId}
-          activeInputId={activeInputId}
-          onClose={() => setImportExportOpen(false)}
-          onImported={() => {
-            void loadWorkspaceNetwork(true);
-          }}
-        />
+          {/* Live Alerts Slide-Over Drawer (triggered by TopContextBar Alert Bell) */}
+          {alertsDrawerOpen && (
+            <aside
+              aria-label="Live disruption alerts"
+              className="absolute top-0 right-0 bottom-0 w-full max-w-md z-30 border-l border-slate-800 bg-slate-950/98 shadow-2xl flex flex-col"
+            >
+              <div className="px-4 py-3 border-b border-slate-800 flex items-center justify-between">
+                <span className="text-xs font-bold uppercase tracking-wider text-slate-200">
+                  Live Disruption Alerts
+                </span>
+                <button
+                  type="button"
+                  aria-label="Close live alerts"
+                  onClick={() => setAlertsDrawerOpen(false)}
+                  className="p-1 rounded text-slate-400 hover:text-white hover:bg-slate-800 cursor-pointer"
+                >
+                  <X className="h-4 w-4" />
+                </button>
+              </div>
+              <div className="flex-1 overflow-y-auto p-4">
+                <LiveAlertsPanel
+                  feed={alertFeed}
+                  loading={loadingAlerts}
+                  sweeping={sweepingAlerts}
+                  userRole={session.user.role}
+                  facilities={network.facilities}
+                  lanes={network.lanes}
+                  onAcknowledge={handleAcknowledgeAlert}
+                  onTriggerSweep={handleTriggerAlertSweep}
+                  onOpenSettings={() => {
+                    setAlertsDrawerOpen(false);
+                    navigateToPage("settings");
+                  }}
+                  onSelectFacility={(facilityId) => {
+                    setAlertsDrawerOpen(false);
+                    setSelectedFacilityId(facilityId);
+                    navigateToPage("hub");
+                  }}
+                  onSelectLane={(laneId) => {
+                    const lane = network.lanes.find((l) => l.laneId === laneId);
+                    setAlertsDrawerOpen(false);
+                    if (lane) {
+                      setSelectedFacilityId(lane.fromFacilityId);
+                      setSelectedLaneId(laneId);
+                      navigateToPage("hub");
+                    }
+                  }}
+                />
+              </div>
+            </aside>
+          )}
+        </main>
       </div>
+
+      {/* Global Drawers & Modals */}
+      <WhatIfSimulatorDrawer
+        open={simulatorOpen}
+        lanes={filtered.lanes}
+        facilities={network.facilities}
+        inputs={network.inputs}
+        activeProductId={activeProductId}
+        activeInputId={activeInputId}
+        financialViewMode={financialViewMode}
+        onClose={() => setSimulatorOpen(false)}
+      />
+
+      <AcceptInviteModal
+        open={acceptInviteOpen && session.user.role === "OWNER"}
+        initialToken={pendingInviteToken}
+        organization={session.organization}
+        onClose={() => {
+          setAcceptInviteOpen(false);
+          setPendingInviteToken("");
+          clearInviteQueryParam();
+        }}
+        onAccepted={(result) => {
+          setSession((prev) =>
+            prev
+              ? {
+                  ...prev,
+                  organization: {
+                    ...prev.organization,
+                    openToNewBuyers: result.organization.openToNewBuyers,
+                    capabilities: result.organization.capabilities,
+                  },
+                }
+              : prev,
+          );
+          setPendingInviteToken("");
+          clearInviteQueryParam();
+          void loadWorkspaceNetwork(false);
+        }}
+      />
+
+      <AlternativeDirectoryModal
+        open={directoryOpen}
+        initialCapability={directoryInitialCapability}
+        onClose={() => setDirectoryOpen(false)}
+      />
+
+      <ImportExportModal
+        open={importExportOpen}
+        organization={session.organization}
+        activeProductId={activeProductId}
+        activeInputId={activeInputId}
+        onClose={() => setImportExportOpen(false)}
+        onImported={() => {
+          void loadWorkspaceNetwork(true);
+        }}
+      />
     </div>
   );
 }

@@ -444,6 +444,7 @@ export async function listContracts(): Promise<{
 export async function createContract(
   input: CreateContractInput & {
     lines?: Array<Omit<CreateContractLineInput, "contractId">>;
+    preserveLegacyBaseForLaneId?: string;
   },
 ): Promise<{ contract: Contract; lines: ContractLine[] }> {
   return apiRequest(
