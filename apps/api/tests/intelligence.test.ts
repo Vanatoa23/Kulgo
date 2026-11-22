@@ -329,11 +329,16 @@ describe("Anti-fatigue RED alert dispatch & scheduler", () => {
       },
     ];
 
+    const publicDnsLookup = async () => [
+      { address: "93.184.216.34", family: 4 as const },
+    ];
+
     const run1 = await dispatchInstantRedAlerts(bundles, {
       alertRepo,
       redEmailProvider: emailProvider,
       fromEmail: "alerts@kulgo.eu",
       fetchFn: mockFetch,
+      webhookDnsLookup: publicDnsLookup,
     });
     expect(run1.skippedUnverified).toBe(1);
     expect(run1.emailsSent).toBe(1);
@@ -352,6 +357,7 @@ describe("Anti-fatigue RED alert dispatch & scheduler", () => {
       redEmailProvider: emailProvider,
       fromEmail: "alerts@kulgo.eu",
       fetchFn: mockFetch,
+      webhookDnsLookup: publicDnsLookup,
     });
     expect(run2.emailsSent).toBe(0);
     expect(run2.webhooksSent).toBe(0);
