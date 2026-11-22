@@ -1,6 +1,7 @@
 import {
   FinancialRiskSummarySchema,
   FinancialSimulationDeltaSchema,
+  resolveLaneDirection,
   type Contract,
   type ContractLine,
   type DefectBufferRecommendation,
@@ -472,10 +473,23 @@ export function computeFinancialRiskSummary(
   const contractLines = input.contractLines ?? [];
   const riskSignals = input.riskSignals ?? [];
 
+  const facilityById = new Map(input.facilities.map((f) => [f.facilityId, f]));
+  const productById = new Map(input.products.map((p) => [p.productId, p]));
+  const inputById = new Map(input.inputs.map((i) => [i.inputId, i]));
+
+  const sourcingLanes = input.lanes.filter(
+    (lane) =>
+      resolveLaneDirection(
+        lane,
+        facilityById.get(lane.fromFacilityId),
+        facilityById.get(lane.toFacilityId),
+      ) !== "DOWNSTREAM",
+  );
+
   const commercials =
     input.commercials ??
     deriveNetworkCommercials(
-      input.lanes,
+      sourcingLanes,
       input.inputs,
       contracts,
       contractLines,
@@ -488,10 +502,6 @@ export function computeFinancialRiskSummary(
       },
     );
 
-  const facilityById = new Map(input.facilities.map((f) => [f.facilityId, f]));
-  const productById = new Map(input.products.map((p) => [p.productId, p]));
-  const inputById = new Map(input.inputs.map((i) => [i.inputId, i]));
-
   const horizonDays =
     commercials.viewMode === "RUN_RATE"
       ? DAY_COUNT_BASIS
@@ -499,7 +509,7 @@ export function computeFinancialRiskSummary(
 
   // Determine per-lane live risk multiplier from matched RiskSignals if not overridden
   const signalsByLane = matchNetworkRiskSignals(
-    input.lanes, input.facilities, riskSignals, input.asOfDate,
+    sourcingLanes, input.facilities, riskSignals, input.asOfDate,
   );
   const resolveLaneLiveMultiplier = (lane: SupplyLane): number => {
     const override = input.liveRiskMultiplierByLaneId?.get(lane.laneId);
@@ -535,7 +545,7 @@ export function computeFinancialRiskSummary(
 
   // Count active non-lapsed lanes per material for warm-backup readiness
   const activeLanesByInput = new Map<string, SupplyLane[]>();
-  for (const lane of input.lanes) {
+  for (const lane of sourcingLanes) {
     const summary = commercials.laneSummaries.get(lane.laneId);
     if (summary?.laneCommercialState === "LAPSED_UNCONTRACTED") continue;
     if (lane.inputId) {
@@ -552,7 +562,7 @@ export function computeFinancialRiskSummary(
   let anyFormalContract = false;
   const orgMissingReasons = new Set<string>();
 
-  for (const lane of input.lanes) {
+  for (const lane of sourcingLanes) {
     const laneComm = commercials.laneSummaries.get(lane.laneId)!;
     if (laneComm.laneCommercialState === "LAPSED_UNCONTRACTED") continue;
 

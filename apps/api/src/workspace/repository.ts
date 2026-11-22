@@ -8,6 +8,8 @@ import {
   SupplyInputSchema,
   SupplyLaneSchema,
   WorkspaceNetworkResponseSchema,
+  resolveFacilityRole,
+  resolveLaneDirection,
   type Contract,
   type ContractLine,
   type CreateContractInput,
@@ -338,7 +340,76 @@ function mapSupplyInputRow(row: Record<string, unknown>): SupplyInput {
   });
 }
 
+function normalizeFacilityRoleAndOwn(input: {
+  relationshipRole?: Facility["relationshipRole"];
+  isOwnFacility?: boolean;
+  kind?: Facility["kind"];
+}): {
+  relationshipRole: NonNullable<Facility["relationshipRole"]>;
+  isOwnFacility: boolean;
+} {
+  if (input.relationshipRole) {
+    return {
+      relationshipRole: input.relationshipRole,
+      isOwnFacility: input.relationshipRole === "OWN",
+    };
+  }
+  const role = resolveFacilityRole(input);
+  return {
+    relationshipRole: role,
+    isOwnFacility: role === "OWN",
+  };
+}
+
+function resolveUpdatedFacilityRoleAndOwn(
+  existing: Facility,
+  input: UpdateFacilityInput,
+  nextKind: Facility["kind"],
+): {
+  relationshipRole: NonNullable<Facility["relationshipRole"]>;
+  isOwnFacility: boolean;
+} {
+  if (input.relationshipRole !== undefined) {
+    return {
+      relationshipRole: input.relationshipRole,
+      isOwnFacility: input.relationshipRole === "OWN",
+    };
+  }
+  const existingRole = resolveFacilityRole(existing);
+  if (input.isOwnFacility !== undefined) {
+    if (input.isOwnFacility) {
+      return { relationshipRole: "OWN", isOwnFacility: true };
+    }
+    return {
+      relationshipRole:
+        existingRole === "OWN"
+          ? nextKind === "CUSTOMER"
+            ? "CLIENT"
+            : "SUPPLIER"
+          : existingRole,
+      isOwnFacility: false,
+    };
+  }
+  return {
+    relationshipRole: existingRole,
+    isOwnFacility: existingRole === "OWN",
+  };
+}
+
 function mapFacilityRow(row: Record<string, unknown>): Facility {
+  const isOwnFacility = Boolean(row.isOwnFacility);
+  const rawRole =
+    row.relationshipRole === "SUPPLIER" ||
+    row.relationshipRole === "OWN" ||
+    row.relationshipRole === "CLIENT"
+      ? row.relationshipRole
+      : undefined;
+  const normalized = normalizeFacilityRoleAndOwn({
+    relationshipRole: rawRole,
+    isOwnFacility,
+    kind: row.kind as Facility["kind"],
+  });
+
   return FacilitySchema.parse({
     facilityId: row.facilityId,
     ownerOrgId: row.ownerOrgId,
@@ -349,7 +420,8 @@ function mapFacilityRow(row: Record<string, unknown>): Facility {
     regionCode: typeof row.regionCode === "string" ? row.regionCode : null,
     lat: Number(row.lat),
     lng: Number(row.lng),
-    isOwnFacility: Boolean(row.isOwnFacility),
+    isOwnFacility: normalized.isOwnFacility,
+    relationshipRole: normalized.relationshipRole,
     isPartnerVerified: Boolean(row.isPartnerVerified),
     sector: typeof row.sector === "string" ? row.sector : null,
     esgBadges: Array.isArray(row.esgBadges) ? row.esgBadges : [],
@@ -376,11 +448,21 @@ function mapFacilityRow(row: Record<string, unknown>): Facility {
 }
 
 function mapSupplyLaneRow(row: Record<string, unknown>): SupplyLane {
+  const rawDirection =
+    row.direction === "UPSTREAM" ||
+    row.direction === "INTERNAL" ||
+    row.direction === "DOWNSTREAM"
+      ? row.direction
+      : undefined;
   return SupplyLaneSchema.parse({
     laneId: row.laneId,
     ownerOrgId: row.ownerOrgId,
     fromFacilityId: row.fromFacilityId,
     toFacilityId: row.toFacilityId,
+    ...(rawDirection !== undefined ? { direction: rawDirection } : {}),
+    ...(typeof row.allocationSplitPct === "number"
+      ? { allocationSplitPct: row.allocationSplitPct }
+      : {}),
     inputId: typeof row.inputId === "string" ? row.inputId : null,
     materialCategory: row.materialCategory,
     transportMode: row.transportMode,
@@ -948,6 +1030,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     importedId?: string,
   ): Promise<Facility> {
     const safeOrgId = assertOrgId(orgId);
+    const roleState = normalizeFacilityRoleAndOwn({
+      relationshipRole: input.relationshipRole,
+      isOwnFacility: input.isOwnFacility,
+      kind: input.kind,
+    });
     const facility = FacilitySchema.parse({
       facilityId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
@@ -958,7 +1045,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       regionCode: input.regionCode ?? null,
       lat: input.lat,
       lng: input.lng,
-      isOwnFacility: input.isOwnFacility,
+      isOwnFacility: roleState.isOwnFacility,
+      relationshipRole: roleState.relationshipRole,
       isPartnerVerified: false,
       sector: input.sector ?? null,
       esgBadges: input.esgBadges ?? [],
@@ -996,6 +1084,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         lng = :lng,
         locationWkt = :locationWkt,
         isOwnFacility = :isOwnFacility,
+        relationshipRole = :relationshipRole,
         isPartnerVerified = :isPartnerVerified,
         sector = :sector,
         esgBadges = :esgBadges,
@@ -1017,6 +1106,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         lng: facility.lng,
         locationWkt,
         isOwnFacility: facility.isOwnFacility,
+        relationshipRole: facility.relationshipRole ?? roleState.relationshipRole,
         isPartnerVerified: facility.isPartnerVerified,
         sector: facility.sector,
         esgBadges: facility.esgBadges,
@@ -1042,10 +1132,13 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const existing = await this.findFacility(safeOrgId, facilityId);
     if (!existing) return null;
 
+    const nextKind = input.kind !== undefined ? input.kind : existing.kind;
+    const roleState = resolveUpdatedFacilityRoleAndOwn(existing, input, nextKind);
+
     const updated = FacilitySchema.parse({
       ...existing,
       name: input.name !== undefined ? input.name : existing.name,
-      kind: input.kind !== undefined ? input.kind : existing.kind,
+      kind: nextKind,
       locationPrecision:
         input.locationPrecision !== undefined
           ? input.locationPrecision
@@ -1058,10 +1151,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         input.regionCode !== undefined ? input.regionCode : existing.regionCode,
       lat: input.lat !== undefined ? input.lat : existing.lat,
       lng: input.lng !== undefined ? input.lng : existing.lng,
-      isOwnFacility:
-        input.isOwnFacility !== undefined
-          ? input.isOwnFacility
-          : existing.isOwnFacility,
+      isOwnFacility: roleState.isOwnFacility,
+      relationshipRole: roleState.relationshipRole,
       sector: input.sector !== undefined ? input.sector : existing.sector,
       esgBadges:
         input.esgBadges !== undefined ? input.esgBadges : existing.esgBadges,
@@ -1099,6 +1190,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         lng = :lng,
         locationWkt = :locationWkt,
         isOwnFacility = :isOwnFacility,
+        relationshipRole = :relationshipRole,
         sector = :sector,
         esgBadges = :esgBadges,
         estimatedScope12Tco2e = :estimatedScope12Tco2e,
@@ -1118,6 +1210,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         lng: updated.lng,
         locationWkt,
         isOwnFacility: updated.isOwnFacility,
+        relationshipRole: updated.relationshipRole ?? roleState.relationshipRole,
         sector: updated.sector,
         esgBadges: updated.esgBadges,
         estimatedScope12Tco2e: updated.estimatedScope12Tco2e,
@@ -1397,11 +1490,17 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       explicitEstimatedLaneCo2e: input.estimatedLaneCo2e,
     });
 
+    const direction =
+      input.direction ?? resolveLaneDirection({}, fromFacility, toFacility);
     const lane = SupplyLaneSchema.parse({
       laneId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       fromFacilityId: input.fromFacilityId,
       toFacilityId: input.toFacilityId,
+      direction,
+      ...(input.allocationSplitPct !== undefined
+        ? { allocationSplitPct: input.allocationSplitPct }
+        : {}),
       inputId,
       materialCategory: input.materialCategory,
       transportMode: input.transportMode,
@@ -1461,6 +1560,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
          ownerOrgId = :ownerOrgId,
          fromFacilityId = :fromFacilityId,
          toFacilityId = :toFacilityId,
+         direction = :direction,
+         allocationSplitPct = :allocationSplitPct,
          inputId = :inputId,
          materialCategory = :materialCategory,
          transportMode = :transportMode,
@@ -1490,6 +1591,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         ownerOrgId: lane.ownerOrgId,
         fromFacilityId: lane.fromFacilityId,
         toFacilityId: lane.toFacilityId,
+        direction: lane.direction ?? "UPSTREAM",
+        allocationSplitPct: lane.allocationSplitPct ?? null,
         inputId: lane.inputId,
         materialCategory: lane.materialCategory,
         transportMode: lane.transportMode,
@@ -1605,10 +1708,20 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
             : existing.estimatedLaneCo2e,
     });
 
+    const nextDirection =
+      input.direction !== undefined
+        ? input.direction
+        : endpointsChanged
+          ? resolveLaneDirection({}, fromFacility, toFacility)
+          : (existing.direction ?? resolveLaneDirection({}, fromFacility, toFacility));
     const updated = SupplyLaneSchema.parse({
       ...existing,
       fromFacilityId: nextFromId,
       toFacilityId: nextToId,
+      direction: nextDirection,
+      ...(input.allocationSplitPct !== undefined
+        ? { allocationSplitPct: input.allocationSplitPct }
+        : {}),
       inputId: nextInputId,
       materialCategory:
         input.materialCategory !== undefined
@@ -1709,6 +1822,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       await this.db.command(
         "sql",
         `UPDATE SUPPLIES_LANE SET
+          direction = :direction,
+          allocationSplitPct = :allocationSplitPct,
           inputId = :inputId,
           materialCategory = :materialCategory,
           transportMode = :transportMode,
@@ -1735,6 +1850,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           economicAttributionRatio = :economicAttributionRatio
          WHERE laneId = :laneId AND ownerOrgId = :orgId`,
         {
+          direction: updated.direction ?? nextDirection,
+          allocationSplitPct: updated.allocationSplitPct ?? null,
           inputId: updated.inputId,
           materialCategory: updated.materialCategory,
           transportMode: updated.transportMode,
@@ -2397,6 +2514,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     importedId?: string,
   ): Promise<Facility> {
     const safeOrgId = assertOrgId(orgId);
+    const roleState = normalizeFacilityRoleAndOwn({
+      relationshipRole: input.relationshipRole,
+      isOwnFacility: input.isOwnFacility,
+      kind: input.kind,
+    });
     const facility = FacilitySchema.parse({
       facilityId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
@@ -2407,7 +2529,8 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       regionCode: input.regionCode ?? null,
       lat: input.lat,
       lng: input.lng,
-      isOwnFacility: input.isOwnFacility,
+      isOwnFacility: roleState.isOwnFacility,
+      relationshipRole: roleState.relationshipRole,
       isPartnerVerified: false,
       sector: input.sector ?? null,
       esgBadges: input.esgBadges ?? [],
@@ -2445,10 +2568,12 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
     if (!record || record.facility.ownerOrgId !== safeOrgId) return null;
 
     const existing = record.facility;
+    const nextKind = input.kind !== undefined ? input.kind : existing.kind;
+    const roleState = resolveUpdatedFacilityRoleAndOwn(existing, input, nextKind);
     const updated = FacilitySchema.parse({
       ...existing,
       name: input.name !== undefined ? input.name : existing.name,
-      kind: input.kind !== undefined ? input.kind : existing.kind,
+      kind: nextKind,
       locationPrecision:
         input.locationPrecision !== undefined
           ? input.locationPrecision
@@ -2461,10 +2586,8 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
         input.regionCode !== undefined ? input.regionCode : existing.regionCode,
       lat: input.lat !== undefined ? input.lat : existing.lat,
       lng: input.lng !== undefined ? input.lng : existing.lng,
-      isOwnFacility:
-        input.isOwnFacility !== undefined
-          ? input.isOwnFacility
-          : existing.isOwnFacility,
+      isOwnFacility: roleState.isOwnFacility,
+      relationshipRole: roleState.relationshipRole,
       sector: input.sector !== undefined ? input.sector : existing.sector,
       esgBadges:
         input.esgBadges !== undefined ? input.esgBadges : existing.esgBadges,
@@ -2693,11 +2816,18 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       explicitEstimatedLaneCo2e: input.estimatedLaneCo2e,
     });
 
+    const direction =
+      input.direction ??
+      resolveLaneDirection({}, fromRecord.facility, toRecord.facility);
     const lane = SupplyLaneSchema.parse({
       laneId: importedId ?? randomUUID(),
       ownerOrgId: safeOrgId,
       fromFacilityId: input.fromFacilityId,
       toFacilityId: input.toFacilityId,
+      direction,
+      ...(input.allocationSplitPct !== undefined
+        ? { allocationSplitPct: input.allocationSplitPct }
+        : {}),
       inputId,
       materialCategory: input.materialCategory,
       transportMode: input.transportMode,
@@ -2834,10 +2964,21 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
             : existing.estimatedLaneCo2e,
     });
 
+    const nextDirection =
+      input.direction !== undefined
+        ? input.direction
+        : endpointsChanged
+          ? resolveLaneDirection({}, fromRecord.facility, toRecord.facility)
+          : (existing.direction ??
+            resolveLaneDirection({}, fromRecord.facility, toRecord.facility));
     const updated = SupplyLaneSchema.parse({
       ...existing,
       fromFacilityId: nextFromId,
       toFacilityId: nextToId,
+      direction: nextDirection,
+      ...(input.allocationSplitPct !== undefined
+        ? { allocationSplitPct: input.allocationSplitPct }
+        : {}),
       inputId: nextInputId,
       materialCategory:
         input.materialCategory !== undefined

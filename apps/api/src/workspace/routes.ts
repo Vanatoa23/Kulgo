@@ -571,7 +571,19 @@ export function createWorkspaceRoutes({
 
   const CreateContractWithLinesSchema = CreateContractInputSchema.extend({
     lines: z.array(CreateContractLineBodySchema).max(50).optional(),
-  });
+    preserveLegacyBaseForLaneId: z.string().uuid().optional(),
+  }).refine(
+    (data) => {
+      if (data.endDate && data.startDate && data.endDate < data.startDate) {
+        return false;
+      }
+      return true;
+    },
+    {
+      message: "endDate must be on or after startDate",
+      path: ["endDate"],
+    },
+  );
 
   routes.post("/contracts", async (c) => {
     const orgId = c.get("auth").organization.orgId;
@@ -591,7 +603,72 @@ export function createWorkspaceRoutes({
     }
 
     try {
-      const { lines, ...contractInput } = parsed.data;
+      const { lines, preserveLegacyBaseForLaneId, ...contractInput } =
+        parsed.data;
+
+      // Pre-validate references before writing any contract so partial failures
+      // cannot leave orphaned Base Agreements behind (#47).
+      const allLanes = await workspaceRepo.listLanes(orgId);
+      const laneById = new Map(allLanes.map((l) => [l.laneId, l]));
+      for (const lineInput of lines ?? []) {
+        if (!laneById.has(lineInput.laneId)) {
+          return c.json(
+            { error: "Referenced laneId does not exist in this organization" },
+            400,
+          );
+        }
+      }
+
+      let preservedBase:
+        | { contract: Awaited<ReturnType<typeof workspaceRepo.createContract>>; lines: Awaited<ReturnType<typeof workspaceRepo.createContractLine>>[] }
+        | undefined;
+
+      if (
+        preserveLegacyBaseForLaneId &&
+        contractInput.contractType === "SPOT_PO"
+      ) {
+        const targetLane = laneById.get(preserveLegacyBaseForLaneId);
+        if (!targetLane) {
+          return c.json(
+            { error: "Referenced preserveLegacyBaseForLaneId does not exist in this organization" },
+            400,
+          );
+        }
+        const existingLines = await workspaceRepo.listContractLines(orgId);
+        const laneHasContracts = existingLines.some(
+          (l) => l.laneId === targetLane.laneId,
+        );
+        const hasLegacyValues =
+          (targetLane.annualVolume !== null && targetLane.annualVolume > 0) ||
+          (targetLane.annualSpendEur !== null && targetLane.annualSpendEur > 0);
+
+        if (!laneHasContracts && hasLegacyValues) {
+          const baseContract = await workspaceRepo.createContract(orgId, {
+            supplierFacilityId: targetLane.fromFacilityId,
+            title: "Base Agreement",
+            contractType: "FRAMEWORK",
+            pricingModel: "FIXED",
+            expiryBehavior: "HOLDOVER",
+            confidence: "ESTIMATED",
+            startDate: `${new Date().getUTCFullYear()}-01-01`,
+            endDate: null,
+            noticePeriodDays: 30,
+            nonRenewalNoticeGiven: false,
+          });
+          const baseLine = await workspaceRepo.createContractLine(orgId, {
+            contractId: baseContract.contractId,
+            laneId: targetLane.laneId,
+            inputId: targetLane.inputId,
+            cadence: "PER_YEAR",
+            committedVolume: targetLane.annualVolume,
+            unit: targetLane.volumeUnit,
+            committedSpend: targetLane.annualSpendEur,
+            currency: "EUR",
+          });
+          preservedBase = { contract: baseContract, lines: [baseLine] };
+        }
+      }
+
       const contract = await workspaceRepo.createContract(
         orgId,
         contractInput as Parameters<typeof workspaceRepo.createContract>[1],
@@ -607,7 +684,14 @@ export function createWorkspaceRoutes({
         });
         createdLines.push(line);
       }
-      return c.json({ contract, lines: createdLines }, 201);
+      return c.json(
+        {
+          contract,
+          lines: createdLines,
+          ...(preservedBase ? { preservedBase } : {}),
+        },
+        201,
+      );
     } catch (err) {
       if (err instanceof WorkspaceValidationError) {
         return c.json({ error: err.message }, 400);

@@ -553,6 +553,8 @@ export async function executeBulkImport(
       await workspaceRepo.createLane(orgId, {
         fromFacilityId,
         toFacilityId,
+        direction: row.direction,
+        allocationSplitPct: row.allocationSplitPct,
         inputId: row.inputId ? (inputIds.get(row.inputId) ?? row.inputId) : null,
         materialCategory: row.materialCategory,
         transportMode: row.transportMode,

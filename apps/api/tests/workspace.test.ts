@@ -359,7 +359,21 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     );
     expect(filtered.inputs).toHaveLength(1);
     expect(filtered.lanes).toHaveLength(2);
-    expect(filtered.facilities).toHaveLength(3); // FI, DE, Tallinn HQ
+    expect(filtered.facilities).toHaveLength(4); // FI, DE, Tallinn HQ, Tartu Warehouse
+
+    // Verify 30/70 multi-warehouse allocation split & downstream clients in demo
+    const splitLanes = network1.lanes.filter(
+      (l) => l.direction === "UPSTREAM" && l.allocationSplitPct != null,
+    );
+    expect(splitLanes.map((l) => l.allocationSplitPct).sort()).toEqual([30, 70]);
+    const clientFacilities = network1.facilities.filter(
+      (f) => f.relationshipRole === "CLIENT",
+    );
+    expect(clientFacilities.length).toBeGreaterThanOrEqual(2);
+    const downstreamLanes = network1.lanes.filter(
+      (l) => l.direction === "DOWNSTREAM",
+    );
+    expect(downstreamLanes.length).toBeGreaterThanOrEqual(2);
   });
 
   it("preserves isOwnFacility when filtering network by a productId or inputId with zero lanes", async () => {
@@ -510,5 +524,125 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     const repo = new InMemoryWorkspaceRepository();
     await expect(repo.listProducts("")).rejects.toThrow();
     await expect(repo.listFacilities("   ")).rejects.toThrow();
+  });
+
+  it("prevents orphaned or duplicate Base Agreements on invalid dates and retries (#47)", async () => {
+    const app = createTestApp();
+    const { cookie } = await registerAndGetCookie(
+      app,
+      "contracts-47@tallinn-mfg.ee",
+      "Estonia Contracts 47 OU",
+    );
+
+    const seedRes = await app.request("/api/v1/workspace/seed-demo", {
+      method: "POST",
+      headers: { Cookie: cookie },
+    });
+    expect(seedRes.status).toBe(201);
+    const network = WorkspaceNetworkResponseSchema.parse(await seedRes.json());
+    const legacyLane = network.lanes.find(
+      (l) => l.direction === "UPSTREAM" && (l.annualVolume ?? 0) > 0,
+    );
+    expect(legacyLane).toBeDefined();
+
+    // 1. Invalid empty startDate must reject cleanly and leave ZERO contracts written
+    const badRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({
+        supplierFacilityId: legacyLane!.fromFacilityId,
+        title: "Spot Top-Up",
+        contractType: "SPOT_PO",
+        pricingModel: "FIXED",
+        expiryBehavior: "AUTO_ARCHIVE",
+        confidence: "CONTRACTED",
+        startDate: "",
+        endDate: "2027-06-01",
+        preserveLegacyBaseForLaneId: legacyLane!.laneId,
+        lines: [
+          {
+            laneId: legacyLane!.laneId,
+            inputId: legacyLane!.inputId,
+            cadence: "TOTAL_OVER_TERM",
+            committedVolume: 20,
+            unit: legacyLane!.volumeUnit,
+            committedSpend: 50000,
+            currency: "EUR",
+          },
+        ],
+      }),
+    });
+    expect(badRes.status).toBe(400);
+
+    const afterBadList = await app.request("/api/v1/workspace/contracts", {
+      headers: { Cookie: cookie },
+    });
+    const afterBadBody = (await afterBadList.json()) as {
+      contracts: unknown[];
+      contractLines: unknown[];
+    };
+    expect(afterBadBody.contracts).toHaveLength(0);
+    expect(afterBadBody.contractLines).toHaveLength(0);
+
+    // 2. Valid retry creates exactly ONE Base Agreement + ONE Spot Top-Up
+    const validPayload = {
+      supplierFacilityId: legacyLane!.fromFacilityId,
+      title: "Spot Top-Up",
+      contractType: "SPOT_PO",
+      pricingModel: "FIXED",
+      expiryBehavior: "AUTO_ARCHIVE",
+      confidence: "CONTRACTED",
+      startDate: "2026-06-01",
+      endDate: "2026-12-31",
+      preserveLegacyBaseForLaneId: legacyLane!.laneId,
+      lines: [
+        {
+          laneId: legacyLane!.laneId,
+          inputId: legacyLane!.inputId,
+          cadence: "TOTAL_OVER_TERM",
+          committedVolume: 20,
+          unit: legacyLane!.volumeUnit,
+          committedSpend: 50000,
+          currency: "EUR",
+        },
+      ],
+    };
+
+    const okRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify(validPayload),
+    });
+    expect(okRes.status).toBe(201);
+
+    // 3. A second request with preserveLegacyBaseForLaneId must NOT duplicate Base Agreement
+    const retryRes = await app.request("/api/v1/workspace/contracts", {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: cookie,
+      },
+      body: JSON.stringify({ ...validPayload, title: "Spot Top-Up #2" }),
+    });
+    expect(retryRes.status).toBe(201);
+
+    const finalList = await app.request("/api/v1/workspace/contracts", {
+      headers: { Cookie: cookie },
+    });
+    const finalBody = (await finalList.json()) as {
+      contracts: Array<{ title: string; contractType: string }>;
+      contractLines: unknown[];
+    };
+    const baseAgreements = finalBody.contracts.filter(
+      (c) => c.title === "Base Agreement",
+    );
+    expect(baseAgreements).toHaveLength(1);
+    expect(finalBody.contracts).toHaveLength(3); // 1 Base + 2 Spot Top-Ups
   });
 });

@@ -1,5 +1,7 @@
 import {
   FACTOR_MATRIX_VERSION,
+  resolveFacilityRole,
+  resolveLaneDirection,
   type CbamCoveredCategory,
   type CbamFlaggedLane,
   type CbamSummary,
@@ -496,8 +498,18 @@ export function evaluateEsgAndCompliance(
 
   const facilitiesById = new Map(input.facilities.map((f) => [f.facilityId, f]));
   const inputsById = new Map(input.inputs.map((i) => [i.inputId, i]));
-  const ownFacilities = input.facilities.filter((f) => f.isOwnFacility);
-  const activeLanes = input.lanes.filter((l) => l.volumeSharePct > 0);
+  const ownFacilities = input.facilities.filter(
+    (f) => resolveFacilityRole(f) === "OWN",
+  );
+  const activeLanes = input.lanes.filter(
+    (l) =>
+      l.volumeSharePct > 0 &&
+      resolveLaneDirection(
+        l,
+        facilitiesById.get(l.fromFacilityId),
+        facilitiesById.get(l.toFacilityId),
+      ) !== "DOWNSTREAM",
+  );
 
   const ledgerEntries: EsgLedgerEntry[] = [];
 
@@ -808,7 +820,7 @@ export function evaluateEsgAndCompliance(
   // --- 2. Scope 3 Category 1 (Per-Lane 6-Step Waterfall) & Category 4 (Freight) ---
   const activeSupplierIds = new Set(activeLanes.map((l) => l.fromFacilityId));
   const activeSuppliers = input.facilities.filter(
-    (f) => !f.isOwnFacility && activeSupplierIds.has(f.facilityId),
+    (f) => resolveFacilityRole(f) === "SUPPLIER" && activeSupplierIds.has(f.facilityId),
   );
   const verifiedSupplierCount = activeSuppliers.filter((f) => f.isPartnerVerified).length;
 
