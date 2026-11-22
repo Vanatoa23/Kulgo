@@ -278,7 +278,77 @@ test.describe("Kulgo Browser E2E Smoke Suite", () => {
     });
     await expect(page.getByTestId("whatif-eal-delta")).toContainText("€");
   });
+
+  test("ESG & Multi-Region Compliance: market-based pack switching, PCAF score display, and CSV/PDF export", async ({
+    page,
+  }) => {
+    const unique = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    const email = `esg-e2e-${unique}@kulgo.ee`;
+
+    await page.goto("/");
+    await page.getByRole("tab", { name: "Create Workspace" }).click();
+    await page.locator("#auth-email").fill(email);
+    await page.locator("#auth-password").fill("EsgCompliance2026!");
+    await page.locator("#auth-org-name").fill("Tallinn ESG E2E OÜ");
+    await page.locator("#auth-country").fill("EE");
+    await page.locator("#auth-sector").fill("Manufacturing");
+    await page
+      .getByRole("button", { name: "Create Private Workspace" })
+      .click();
+
+    await expect(page.getByText("Tallinn ESG E2E OÜ")).toBeVisible({
+      timeout: 15_000,
+    });
+
+    await page
+      .getByRole("button", { name: "Load Estonia Product X Demo" })
+      .click();
+    await expect(
+      page.getByRole("button", { name: "Product X", exact: true }),
+    ).toBeVisible({ timeout: 15_000 });
+
+    // Open Org Settings -> enable US & UK Target Export Markets + Save
+    await page.getByRole("button", { name: "Org ESG" }).click();
+    const orgDialog = page.getByRole("dialog", {
+      name: /Org ESG, Directory & Team Settings/i,
+    });
+    await expect(orgDialog).toBeVisible();
+    await orgDialog.getByTestId("target-market-US").click();
+    await orgDialog.getByTestId("target-market-UK").click();
+    await orgDialog.getByRole("button", { name: "Save Org Settings" }).click();
+    await expect(
+      orgDialog.getByText(/Organization ESG & directory settings saved/i),
+    ).toBeVisible({ timeout: 10_000 });
+    await orgDialog
+      .getByRole("button", { name: "Close organization settings" })
+      .click();
+
+    // Open ESG/Risk analytics tab and verify PCAF score + EU/US/UK compliance packs
+    await page.getByRole("button", { name: "ESG/Risk" }).click();
+    const esgPanel = page.getByTestId("esg-compliance-panel");
+    await expect(esgPanel).toBeVisible({ timeout: 10_000 });
+    await expect(page.getByTestId("pcaf-weighted-score")).toContainText("/ 5.0");
+    const packs = page.getByTestId("active-compliance-packs");
+    await expect(packs).toContainText("EU");
+    await expect(packs).toContainText("US");
+    await expect(packs).toContainText("UK");
+
+    // Verify CSV Ledger export downloads a CSV file
+    const csvDownloadPromise = page.waitForEvent("download");
+    await page.getByTestId("export-esg-csv-btn").click();
+    const csvDownload = await csvDownloadPromise;
+    expect(csvDownload.suggestedFilename()).toContain("kulgo-esg-ledger");
+    expect(csvDownload.suggestedFilename()).toContain(".csv");
+
+    // Verify PDF Executive Summary export downloads a PDF file
+    const pdfDownloadPromise = page.waitForEvent("download");
+    await page.getByTestId("export-esg-pdf-btn").click();
+    const pdfDownload = await pdfDownloadPromise;
+    expect(pdfDownload.suggestedFilename()).toContain("kulgo-esg-executive-summary");
+    expect(pdfDownload.suggestedFilename()).toContain(".pdf");
+  });
 });
+
 
 
 

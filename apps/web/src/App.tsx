@@ -700,6 +700,7 @@ export function App() {
           activeTab={activeTab}
           onChangeTab={setActiveTab}
           userRole={session.user.role}
+          organization={session.organization}
           products={network.products}
           inputs={network.inputs}
           facilities={network.facilities}
