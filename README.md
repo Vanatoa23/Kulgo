@@ -33,6 +33,7 @@ pnpm build                           # Build web + verify API & packages
 pnpm test                            # Run all unit and API tests
 pnpm test:privacy                    # Run mandatory Tier-2+ privacy boundary test suite
 pnpm --filter @kulgo/web test:e2e    # Run live Playwright browser E2E suite
+pnpm --filter @kulgo/web test:e2e:map # Verify worker loading & GeoJSON rendering in dev and production
 ```
 
 ## Documentation
