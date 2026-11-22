@@ -1,4 +1,4 @@
-export type QueryLanguage = "sql" | "cypher";
+export type QueryLanguage = "sql" | "cypher" | "sqlscript";
 
 export interface ArcadeDbConfig {
   url: string;

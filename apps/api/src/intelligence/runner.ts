@@ -26,6 +26,7 @@ import {
   type EmailProvider,
   type OrgSignalMatchBundle,
 } from "./notifications.js";
+import type { WebhookDnsLookup } from "./webhook-security.js";
 
 export interface OrgMatchedFeed {
   signals: RiskSignal[];
@@ -59,6 +60,8 @@ export interface IntelligenceRunnerDeps {
   fetchStage1?: () => Promise<{ signals: RiskSignal[]; errors: string[] }>;
   fetchStage2Raw?: () => Promise<UnstructuredFeedItem[]>;
   fetchFn?: typeof fetch;
+  webhookDnsLookup?: WebhookDnsLookup;
+  webhookTimeoutMs?: number;
 }
 
 /**
@@ -241,6 +244,8 @@ export class IntelligenceRunner {
       digestEmailProvider: this.deps.digestEmailProvider,
       fromEmail: this.deps.fromEmail,
       fetchFn: this.deps.fetchFn,
+      webhookDnsLookup: this.deps.webhookDnsLookup,
+      webhookTimeoutMs: this.deps.webhookTimeoutMs,
       nowIso: startedAt,
     });
 

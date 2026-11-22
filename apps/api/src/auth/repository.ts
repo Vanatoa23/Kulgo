@@ -62,12 +62,20 @@ export interface UpdateOrganizationDirectoryInput {
   capabilities?: string[];
 }
 
+export type RemoveOrgMemberResult = "deleted" | "not_found" | "last_owner";
+export type RemovalActor = Pick<User, "userId" | "email">;
+
 export interface AuthRepository {
   findUserByEmail(email: string): Promise<StoredUser | null>;
   findUserById(userId: string): Promise<User | null>;
   listOrgMembers(orgId: string): Promise<User[]>;
   createOrgMember(input: CreateOrgMemberInput): Promise<User>;
-  deleteOrgMember(orgId: string, userId: string): Promise<boolean>;
+  /** Atomically protects the last owner, revokes sessions, and records removal. */
+  deleteOrgMember(
+    orgId: string,
+    userId: string,
+    actor: RemovalActor,
+  ): Promise<RemoveOrgMemberResult>;
   findOrganizationById(orgId: string): Promise<Organization | null>;
   updateOrganizationProfile(
     orgId: string,
@@ -281,27 +289,56 @@ export class ArcadeDbAuthRepository implements AuthRepository {
     return user;
   }
 
-  async deleteOrgMember(orgId: string, userId: string): Promise<boolean> {
-    const rows = await this.db.query<Record<string, unknown>>(
-      "sql",
-      "SELECT userId FROM User WHERE userId = :userId AND orgId = :orgId LIMIT 1",
-      { userId, orgId },
+  async deleteOrgMember(
+    orgId: string,
+    userId: string,
+    actor: RemovalActor,
+  ): Promise<RemoveOrgMemberResult> {
+    // Lock all written types before reading the owner set. A transaction alone
+    // would allow write skew when concurrent requests delete different owners.
+    // These database locks also work across API processes/repository instances.
+    // Declare the outcome outside BEGIN so SELECT can read it after COMMIT RETRY;
+    // reset it inside the block so each retry computes a fresh outcome.
+    const rows = await this.db.command<{ status: RemoveOrgMemberResult }>(
+      "sqlscript",
+      `LET removalStatus = 'not_found';
+       BEGIN;
+       LOCK TYPE User, Session, AuditEvent;
+       LET removalStatus = 'not_found';
+       LET target = SELECT userId, email, role FROM User WHERE userId = :userId AND orgId = :orgId;
+       IF ($target.size() > 0) {
+         LET owners = SELECT userId FROM User WHERE orgId = :orgId AND role = 'OWNER';
+         IF ($target[0].role = 'OWNER' AND $owners.size() <= 1) {
+           LET removalStatus = 'last_owner';
+         } ELSE {
+           DELETE VERTEX FROM Session WHERE userId = :userId AND orgId = :orgId;
+           DELETE VERTEX FROM User WHERE userId = :userId AND orgId = :orgId;
+           CREATE VERTEX AuditEvent SET
+             eventId = :eventId, orgId = :orgId,
+             actorUserId = :actorUserId, actorEmail = :actorEmail,
+             action = 'MEMBER_REMOVED',
+             summary = 'Removed team member ' + $target[0].email + ' (' + $target[0].role + ')',
+             metadataJson = convert.toJson({'removedUserId': :userId, 'removedEmail': $target[0].email.substring(0, 240), 'role': $target[0].role}),
+             createdAt = :createdAt;
+           LET removalStatus = 'deleted';
+         }
+       }
+       COMMIT RETRY 10;
+       RETURN (SELECT $removalStatus AS status);`,
+      {
+        orgId,
+        userId,
+        eventId: randomUUID(),
+        actorUserId: actor.userId,
+        actorEmail: normalizeEmail(actor.email),
+        createdAt: new Date().toISOString(),
+      },
     );
-    if (rows.length === 0) {
-      return false;
+    const result = rows[0]?.status;
+    if (result !== "deleted" && result !== "not_found" && result !== "last_owner") {
+      throw new Error("Invalid atomic member removal result");
     }
-
-    await this.db.command(
-      "sql",
-      "DELETE VERTEX FROM Session WHERE userId = :userId AND orgId = :orgId",
-      { userId, orgId },
-    );
-    await this.db.command(
-      "sql",
-      "DELETE VERTEX FROM User WHERE userId = :userId AND orgId = :orgId",
-      { userId, orgId },
-    );
-    return true;
+    return result;
   }
 
   async findOrganizationById(orgId: string): Promise<Organization | null> {
@@ -697,12 +734,32 @@ export class InMemoryAuthRepository implements AuthRepository {
     return { ...user };
   }
 
-  async deleteOrgMember(orgId: string, userId: string): Promise<boolean> {
+  async deleteOrgMember(
+    orgId: string,
+    userId: string,
+    actor: RemovalActor,
+  ): Promise<RemoveOrgMemberResult> {
+    // No awaits in this critical section: validation, audit, and mutation happen
+    // in one turn, so concurrent requests cannot observe the same owner set.
     const stored = this.users.get(userId);
-    if (!stored || stored.orgId !== orgId) {
-      return false;
-    }
+    if (!stored || stored.orgId !== orgId) return "not_found";
+    const ownerCount = Array.from(this.users.values()).filter(
+      (user) => user.orgId === orgId && user.role === "OWNER",
+    ).length;
+    if (stored.role === "OWNER" && ownerCount <= 1) return "last_owner";
 
+    this.storeAuditEvent({
+      orgId,
+      actorUserId: actor.userId,
+      actorEmail: actor.email,
+      action: "MEMBER_REMOVED",
+      summary: `Removed team member ${stored.email} (${stored.role})`,
+      metadata: {
+        removedUserId: stored.userId,
+        removedEmail: stored.email,
+        role: stored.role,
+      },
+    });
     this.users.delete(userId);
     this.emailToUserId.delete(stored.email);
     for (const [tokenHash, session] of this.sessions.entries()) {
@@ -710,7 +767,7 @@ export class InMemoryAuthRepository implements AuthRepository {
         this.sessions.delete(tokenHash);
       }
     }
-    return true;
+    return "deleted";
   }
 
   async findOrganizationById(orgId: string): Promise<Organization | null> {
@@ -899,6 +956,10 @@ export class InMemoryAuthRepository implements AuthRepository {
   }
 
   async recordAuditEvent(input: RecordAuditEventInput): Promise<AuditEvent> {
+    return this.storeAuditEvent(input);
+  }
+
+  private storeAuditEvent(input: RecordAuditEventInput): AuditEvent {
     const event = AuditEventSchema.parse({
       eventId: randomUUID(),
       orgId: input.orgId,

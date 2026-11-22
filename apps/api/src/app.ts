@@ -39,6 +39,7 @@ import {
 } from "./intelligence/notifications.js";
 import { createAlertRoutes } from "./intelligence/routes.js";
 import { IntelligenceRunner } from "./intelligence/runner.js";
+import type { WebhookDnsLookup } from "./intelligence/webhook-security.js";
 import {
   ArcadeDbInvitationRepository,
   InMemoryInvitationRepository,
@@ -69,6 +70,8 @@ export interface AppDependencies {
   analyticsRepo?: AnalyticsRepository;
   alertRepo?: AlertRepository;
   intelligenceRunner?: IntelligenceRunner;
+  webhookDnsLookup?: WebhookDnsLookup;
+  webhookValidationTimeoutMs?: number;
   onRequestLog?: (entry: RequestLogEntry) => void;
 }
 
@@ -98,6 +101,8 @@ export function createApp({
     }),
   }),
   alertRepo = new ArcadeDbAlertRepository(db),
+  webhookDnsLookup,
+  webhookValidationTimeoutMs,
   intelligenceRunner = new IntelligenceRunner({
     authRepo,
     workspaceRepo,
@@ -117,6 +122,7 @@ export function createApp({
       ? createBrevoEmailProvider(config.BREVO_API_KEY)
       : null,
     fromEmail: config.ALERT_FROM_EMAIL,
+    webhookDnsLookup,
   }),
   onRequestLog,
 }: AppDependencies): Hono {
@@ -233,7 +239,13 @@ export function createApp({
   );
   app.route(
     "/api/v1/alerts",
-    createAlertRoutes({ authRepo, alertRepo, intelligenceRunner }),
+    createAlertRoutes({
+      authRepo,
+      alertRepo,
+      intelligenceRunner,
+      webhookDnsLookup,
+      webhookValidationTimeoutMs,
+    }),
   );
 
   app.notFound((c) => c.json({ error: "Not Found" }, 404));
@@ -248,7 +260,14 @@ export function createApp({
 
 export interface CreateTestAppOptions {
   onRequestLog?: (entry: RequestLogEntry) => void;
+  webhookDnsLookup?: WebhookDnsLookup;
+  webhookValidationTimeoutMs?: number;
+  fetchFn?: typeof fetch;
 }
+
+const DEFAULT_TEST_WEBHOOK_DNS_LOOKUP: WebhookDnsLookup = async () => [
+  { address: "93.184.216.34", family: 4 },
+];
 
 /**
  * Creates an isolated Hono app backed by InMemory repositories,
@@ -300,6 +319,8 @@ export function createTestApp(
       inviteRepo,
     }),
   });
+  const webhookDnsLookup =
+    options.webhookDnsLookup ?? DEFAULT_TEST_WEBHOOK_DNS_LOOKUP;
   const intelligenceRunner = new IntelligenceRunner({
     authRepo,
     workspaceRepo,
@@ -309,6 +330,8 @@ export function createTestApp(
     llmRouter: new LlmRouter([]),
     fromEmail: config.ALERT_FROM_EMAIL,
     fetchStage1: async () => ({ signals: [], errors: [] }),
+    fetchFn: options.fetchFn,
+    webhookDnsLookup,
   });
 
   return createApp({
@@ -322,6 +345,8 @@ export function createTestApp(
     analyticsRepo,
     alertRepo,
     intelligenceRunner,
+    webhookDnsLookup,
+    webhookValidationTimeoutMs: options.webhookValidationTimeoutMs,
     onRequestLog: options.onRequestLog,
   });
 }

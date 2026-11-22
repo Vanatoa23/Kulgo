@@ -1,4 +1,9 @@
+import { createInvitationFixture, invitationConcurrencyCases } from "../invitation-concurrency-cases.js";
+import { ArcadeDbInvitationRepository } from "../../src/invites/repository.js";
 import { randomUUID } from "node:crypto";
+import { verifyConcurrentOwnerRemoval } from "../helpers/member-removal.js";
+import { memberRemovalCases } from "../helpers/member-removal-cases.js";
+import { ArcadeDbAuthRepository } from "../../src/auth/repository.js";
 import {
   AcceptInviteResponseSchema,
   AnalyticsSummarySchema,
@@ -12,13 +17,10 @@ import {
 } from "@kulgo/shared";
 import { beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.js";
-import { ArcadeDbAuthRepository } from "../../src/auth/repository.js";
 import { loadConfig } from "../../src/config.js";
 import { HttpArcadeDbClient, type ArcadeDbClient, type QueryLanguage } from "../../src/db/client.js";
 import { bootstrapSchema } from "../../src/db/schema.js";
 import { ArcadeDbWorkspaceRepository } from "../../src/workspace/repository.js";
-import { ArcadeDbInvitationRepository } from "../../src/invites/repository.js";
-import { createInvitationFixture, invitationConcurrencyCases } from "../invitation-concurrency-cases.js";
 
 const ARCADEDB_URL = process.env.ARCADEDB_URL;
 const describeWithArcadeDb = ARCADEDB_URL ? describe : describe.skip;
@@ -56,6 +58,42 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
   beforeAll(async () => {
     await bootstrapSchema(db);
   }, 30_000);
+
+  describe("Atomic member removal", () => {
+    memberRemovalCases(() => [new ArcadeDbAuthRepository(db), new ArcadeDbAuthRepository(db)]);
+
+    it("rolls back deletion and session revocation if the audit write fails", async () => {
+      const repo = new ArcadeDbAuthRepository(db);
+      const { user: owner, organization } = await repo.createOrganizationAndOwner({
+        email: `${randomUUID()}@example.ee`, passwordHash: "test-only",
+        organizationName: "Removal rollback", countryCode: "EE", sector: "Electronics",
+      });
+      const member = await repo.createOrgMember({ orgId: organization.orgId,
+        email: `${randomUUID()}@example.ee`, passwordHash: "test-only", role: "MEMBER" });
+      const session = await repo.createSession({ userId: member.userId, orgId: organization.orgId,
+        tokenHash: randomUUID(), expiresAt: "2099-01-01T00:00:00.000Z" });
+      // A duplicate audit key forces an actual database failure after the deletes.
+      const audit = await repo.recordAuditEvent({ orgId: organization.orgId, actorUserId: owner.userId,
+        actorEmail: owner.email, action: "MEMBER_ADDED", summary: "Rollback fixture" });
+      const failingRepo = new ArcadeDbAuthRepository({
+        healthCheck: () => db.healthCheck(), ensureDatabase: () => db.ensureDatabase(),
+        query: db.query.bind(db),
+        command: (language, statement, params) => db.command(language, statement, { ...params, eventId: audit.eventId }),
+      });
+      await expect(failingRepo.deleteOrgMember(organization.orgId, member.userId, owner)).rejects.toThrow();
+      expect(await repo.findUserById(member.userId)).toEqual(member);
+      expect(await repo.findSessionByTokenHash(session.tokenHash)).not.toBeNull();
+      expect(await repo.listAuditEvents(organization.orgId)).toEqual([audit]);
+    });
+  });
+
+  it("preserves an owner and atomic session/audit effects across concurrent API instances", async () => {
+    const otherDb = new HttpArcadeDbClient({
+      url: config.ARCADEDB_URL, database: config.ARCADEDB_DATABASE,
+      user: config.ARCADEDB_USER, password: config.ARCADEDB_PASSWORD,
+    });
+    await verifyConcurrentOwnerRemoval(app, createApp({ config, db: otherDb }));
+  });
 
   // Separate repository instances ensure this exercises database concurrency,
   // rather than accidentally passing because of a per-instance JavaScript lock.

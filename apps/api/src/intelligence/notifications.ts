@@ -6,6 +6,10 @@ import type {
 } from "@kulgo/engine";
 import type { RiskSignal } from "@kulgo/shared";
 import type { AlertRepository } from "./alert-repository.js";
+import {
+  deliverSafeWebhook,
+  type WebhookDnsLookup,
+} from "./webhook-security.js";
 
 export interface OutboundEmailMessage {
   from: string;
@@ -123,6 +127,8 @@ export interface AlertDispatchDeps {
   digestEmailProvider?: EmailProvider | null;
   fromEmail: string;
   fetchFn?: typeof fetch;
+  webhookDnsLookup?: WebhookDnsLookup;
+  webhookTimeoutMs?: number;
   nowIso?: string;
 }
 
@@ -146,7 +152,6 @@ export async function dispatchInstantRedAlerts(
   deps: AlertDispatchDeps,
 ): Promise<DispatchSummary> {
   const nowIso = deps.nowIso ?? new Date().toISOString();
-  const fetchFn = deps.fetchFn ?? fetch;
   const summary: DispatchSummary = {
     emailsSent: 0,
     webhooksSent: 0,
@@ -294,14 +299,14 @@ export async function dispatchInstantRedAlerts(
           );
         }
         try {
-          const res = await fetchFn(storedPref.preference.webhookUrl, {
-            method: "POST",
+          await deliverSafeWebhook({
+            url: storedPref.preference.webhookUrl,
             headers,
             body,
+            fetchFn: deps.fetchFn,
+            dnsLookup: deps.webhookDnsLookup,
+            timeoutMs: deps.webhookTimeoutMs,
           });
-          if (!res.ok) {
-            throw new Error(`Webhook HTTP ${res.status}`);
-          }
           await deps.alertRepo.recordDelivery({
             orgId,
             signalId: signal.signalId,
@@ -313,13 +318,14 @@ export async function dispatchInstantRedAlerts(
           });
           summary.webhooksSent++;
         } catch (err) {
+          const rawMessage = err instanceof Error ? err.message : String(err);
           await deps.alertRepo.recordDelivery({
             orgId,
             signalId: signal.signalId,
             channel: "WEBHOOK",
             status: "FAILED",
             provider: "webhook",
-            errorMessage: err instanceof Error ? err.message : String(err),
+            errorMessage: rawMessage.slice(0, 500),
             deliveredAt: nowIso,
           });
         }
