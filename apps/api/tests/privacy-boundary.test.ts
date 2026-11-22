@@ -1,6 +1,7 @@
 import {
   AnalyticsSummarySchema,
   AnonymizedRiskAlertSchema,
+  EsgLedgerResponseSchema,
   ExecutiveReportSchema,
   SimulateAnalyticsResponseSchema,
   WorkspaceExportJsonSchema,
@@ -1766,5 +1767,182 @@ describe("Privacy Boundary Contract (Sub-Project 2 Financial Risk & Contracts)",
     expect(summaryText).not.toContain("eventGroupId");
   });
 });
+
+describe("Privacy Boundary Contract (Sub-Project 3 ESG Ledger & Partner Economic Intensity)", () => {
+  it("computes server-side ECONOMIC_INTENSITY attribution for a verified partner without ever leaking partner annualRevenueEur across summary, report, JSON/CSV ledger, or directory", async () => {
+    const app = createTestApp();
+
+    // Unauthenticated access to /api/v1/analytics/esg-ledger is rejected
+    expect((await app.request("/api/v1/analytics/esg-ledger")).status).toBe(401);
+
+    const orgA = await registerOrg(app, "buyer-sp3@tallinn.ee", "Tallinn Buyer SP3");
+    const orgB = await registerOrg(app, "partner-sp3@shenzhen.cn", "Shenzhen Partner SP3");
+
+    // Org B sets Scope 1+2 (10,000 tCO2e) and PRIVATE annualRevenueEur (20,000,000 EUR -> intensity = 0.0005 tCO2e/EUR)
+    // and opts into the directory
+    const orgBProfileRes = await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        scope1Tco2e: 4000,
+        scope2Tco2e: 6000,
+        annualRevenueEur: 20_000_000,
+        openToNewBuyers: true,
+        capabilities: ["PCB Assembly"],
+      }),
+    });
+    expect(orgBProfileRes.status).toBe(200);
+
+    // Org A sets targetMarkets and creates own facility + Tier-1 supplier + spend-based lane (€1,000,000 -> 5% of Org B -> 500 tCO2e)
+    await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        scope1Tco2e: 100,
+        scope2Tco2e: 150,
+        scope2MarketTco2e: 180,
+        annualRevenueEur: 5_000_000,
+        targetMarkets: ["EU", "UK"],
+      }),
+    });
+
+    const ownRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Tallinn HQ Plant",
+        kind: "FACTORY",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: ownFac } = (await ownRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const supRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Shenzhen PCB Tier-1",
+        kind: "FACTORY",
+        countryCode: "CN",
+        lat: 22.5431,
+        lng: 114.0579,
+        isOwnFacility: false,
+        sector: "Electronics",
+      }),
+    });
+    const { facility: supFac } = (await supRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: supFac.facilityId,
+        toFacilityId: ownFac.facilityId,
+        materialCategory: "Driver PCBs",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+        annualVolume: 50_000,
+        volumeUnit: "UNITS",
+        annualSpendEur: 1_000_000,
+      }),
+    });
+
+    // Link Org A's Tier-1 facility to Org B via verified partner invite
+    const invRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        targetFacilityId: supFac.facilityId,
+        inviteeEmail: "partner-sp3@shenzhen.cn",
+      }),
+    });
+    const { inviteToken } = (await invRes.json()) as { inviteToken: string };
+    const accRes = await app.request(`/api/v1/invites/${inviteToken}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({}),
+    });
+    expect(accRes.status).toBe(200);
+
+    // 1. Check /api/v1/analytics/summary
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summaryText = await summaryRes.text();
+    const summary = AnalyticsSummarySchema.parse(JSON.parse(summaryText));
+    // €1,000,000 * (10,000 / 20,000,000 = 0.0005 tCO2e/EUR) = 500 tCO2e (NOT 10,000 tCO2e!)
+    expect(summary.esg.upstreamScope3Tco2e).toBe(500);
+    expect(summary.esg.weightedPcafScore).toBe(2);
+    expect(summary.esg.activeCompliancePacks).toEqual(
+      expect.arrayContaining(["GLOBAL_GHG_ISSB", "EU", "UK"]),
+    );
+    expect(summaryText).not.toContain("20000000");
+    expect(summaryText).not.toContain("20,000,000");
+
+    // 2. Check /api/v1/analytics/esg-ledger?format=json
+    const ledgerJsonRes = await app.request("/api/v1/analytics/esg-ledger?format=json", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(ledgerJsonRes.status).toBe(200);
+    const ledgerText = await ledgerJsonRes.text();
+    const ledger = EsgLedgerResponseSchema.parse(JSON.parse(ledgerText));
+    const cat1Entry = ledger.entries.find((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(cat1Entry?.attributionMethod).toBe("ECONOMIC_INTENSITY");
+    expect(cat1Entry?.pcafScore).toBe(2);
+    expect(cat1Entry?.tco2e).toBe(500);
+    expect(ledgerText).not.toContain("20000000");
+
+    // 3. Check /api/v1/analytics/esg-ledger?format=csv
+    const ledgerCsvRes = await app.request("/api/v1/analytics/esg-ledger?format=csv", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(ledgerCsvRes.status).toBe(200);
+    expect(ledgerCsvRes.headers.get("content-type")).toContain("text/csv");
+    const csvText = await ledgerCsvRes.text();
+    expect(csvText).toContain("ECONOMIC_INTENSITY");
+    expect(csvText).not.toContain("20000000");
+
+    // 4. Check /api/v1/directory/alternatives never leaks Org B's annualRevenueEur
+    const dirRes = await app.request("/api/v1/directory/alternatives", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(dirRes.status).toBe(200);
+    const dirText = await dirRes.text();
+    expect(dirText).not.toContain("20000000");
+    expect(dirText).not.toContain("annualRevenueEur");
+
+    // 5. Check /api/v1/analytics/report includes complianceChecklist & PCAF
+    const reportRes = await app.request("/api/v1/analytics/report", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(reportRes.status).toBe(200);
+    const reportText = await reportRes.text();
+    const report = ExecutiveReportSchema.parse(JSON.parse(reportText));
+    expect(report.csrdDisclosures.weightedPcafScore).toBe(2);
+    expect(report.complianceChecklist?.length).toBeGreaterThan(0);
+    expect(reportText).not.toContain("20000000");
+
+    // 6. Check ESG_LEDGER_EXPORTED audit event was recorded
+    const auditRes = await app.request("/api/v1/auth/audit-log", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(auditRes.status).toBe(200);
+    const auditBody = (await auditRes.json()) as {
+      events: Array<{ action: string }>;
+    };
+    expect(auditBody.events.some((e) => e.action === "ESG_LEDGER_EXPORTED")).toBe(
+      true,
+    );
+  });
+});
+
 
 

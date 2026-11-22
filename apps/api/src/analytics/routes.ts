@@ -1,5 +1,7 @@
+import { formatEsgLedgerCsv } from "@kulgo/engine";
 import {
   AnalyticsSummarySchema,
+  EsgLedgerResponseSchema,
   ExecutiveReportSchema,
   FinancialViewModeSchema,
   SimulateAnalyticsRequestSchema,
@@ -23,6 +25,10 @@ const AnalyticsQuerySchema = z.object({
   productId: z.string().uuid().optional(),
   inputId: z.string().uuid().optional(),
   viewMode: FinancialViewModeSchema.optional(),
+});
+
+const EsgLedgerQuerySchema = AnalyticsQuerySchema.extend({
+  format: z.enum(["json", "csv"]).default("json"),
 });
 
 export function createAnalyticsRoutes({
@@ -62,6 +68,70 @@ export function createAnalyticsRoutes({
       parsedQuery.data.viewMode,
     );
     return c.json(AnalyticsSummarySchema.parse(summary), 200);
+  });
+
+  routes.get("/esg-ledger", async (c) => {
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
+    const parsedQuery = EsgLedgerQuerySchema.safeParse({
+      productId: c.req.query("productId") || undefined,
+      inputId: c.req.query("inputId") || undefined,
+      viewMode: c.req.query("viewMode") || undefined,
+      format: c.req.query("format") || undefined,
+    });
+    if (!parsedQuery.success) {
+      return c.json(
+        {
+          error: "Invalid query parameters",
+          details: parsedQuery.error.flatten(),
+        },
+        400,
+      );
+    }
+
+    try {
+      const ledger = await analyticsRepo.getEsgLedger(
+        orgId,
+        { productId: parsedQuery.data.productId, inputId: parsedQuery.data.inputId },
+        undefined,
+        parsedQuery.data.viewMode,
+      );
+      const validated = EsgLedgerResponseSchema.parse(ledger);
+
+      await authRepo.recordAuditEvent({
+        orgId,
+        actorUserId: auth.user.userId,
+        actorEmail: auth.user.email,
+        action: "ESG_LEDGER_EXPORTED",
+        summary: `Exported auditor-ready ESG ledger (${parsedQuery.data.format.toUpperCase()}, ${validated.entries.length} entries, ${validated.totalTco2e} tCO2e, PCAF ${validated.weightedPcafScore ?? "N/A"})`,
+        metadata: {
+          format: parsedQuery.data.format,
+          entryCount: validated.entries.length,
+          totalTco2e: validated.totalTco2e,
+          weightedPcafScore: validated.weightedPcafScore,
+          factorMatrixVersion: validated.factorMatrixVersion,
+        },
+      });
+
+      if (parsedQuery.data.format === "csv") {
+        const csv = formatEsgLedgerCsv(validated.entries);
+        return new Response(csv, {
+          status: 200,
+          headers: {
+            "Content-Type": "text/csv; charset=utf-8",
+            "Content-Disposition": `attachment; filename="kulgo-esg-ledger-${validated.factorMatrixVersion}.csv"`,
+            "X-Content-Type-Options": "nosniff",
+          },
+        });
+      }
+
+      return c.json(validated, 200);
+    } catch (err) {
+      if (err instanceof AnalyticsValidationError) {
+        return c.json({ error: err.message }, 400);
+      }
+      throw err;
+    }
   });
 
   routes.get("/report", async (c) => {

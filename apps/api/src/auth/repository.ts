@@ -116,6 +116,14 @@ function mapOrganizationRow(row: Record<string, unknown>): Organization {
       typeof row.scope1Tco2e === "number" ? row.scope1Tco2e : null,
     scope2Tco2e:
       typeof row.scope2Tco2e === "number" ? row.scope2Tco2e : null,
+    scope2MarketTco2e:
+      typeof row.scope2MarketTco2e === "number" ? row.scope2MarketTco2e : null,
+    annualRevenueEur:
+      typeof row.annualRevenueEur === "number" ? row.annualRevenueEur : null,
+    targetMarkets: Array.isArray(row.targetMarkets) ? row.targetMarkets : [],
+    enabledCompliancePacks: Array.isArray(row.enabledCompliancePacks)
+      ? row.enabledCompliancePacks
+      : [],
     openToNewBuyers: Boolean(row.openToNewBuyers),
     capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
     createdAt: row.createdAt,
@@ -299,7 +307,7 @@ export class ArcadeDbAuthRepository implements AuthRepository {
   async findOrganizationById(orgId: string): Promise<Organization | null> {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, openToNewBuyers, capabilities, createdAt FROM Organization WHERE orgId = :orgId LIMIT 1",
+      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, scope2MarketTco2e, annualRevenueEur, targetMarkets, enabledCompliancePacks, openToNewBuyers, capabilities, createdAt FROM Organization WHERE orgId = :orgId LIMIT 1",
       { orgId },
     );
     const row = rows[0];
@@ -328,6 +336,22 @@ export class ArcadeDbAuthRepository implements AuthRepository {
       input.scope2Tco2e !== undefined
         ? input.scope2Tco2e
         : existing.scope2Tco2e;
+    const nextScope2Market =
+      input.scope2MarketTco2e !== undefined
+        ? input.scope2MarketTco2e
+        : (existing.scope2MarketTco2e ?? null);
+    const nextAnnualRevenueEur =
+      input.annualRevenueEur !== undefined
+        ? input.annualRevenueEur
+        : (existing.annualRevenueEur ?? null);
+    const nextTargetMarkets =
+      input.targetMarkets !== undefined
+        ? Array.from(new Set(input.targetMarkets))
+        : (existing.targetMarkets ?? []);
+    const nextEnabledCompliancePacks =
+      input.enabledCompliancePacks !== undefined
+        ? Array.from(new Set(input.enabledCompliancePacks))
+        : (existing.enabledCompliancePacks ?? []);
     const nextEsgBadges =
       input.esgBadges !== undefined
         ? dedupeList(input.esgBadges)
@@ -346,6 +370,10 @@ export class ArcadeDbAuthRepository implements AuthRepository {
       `UPDATE Organization SET
         scope1Tco2e = :scope1Tco2e,
         scope2Tco2e = :scope2Tco2e,
+        scope2MarketTco2e = :scope2MarketTco2e,
+        annualRevenueEur = :annualRevenueEur,
+        targetMarkets = :targetMarkets,
+        enabledCompliancePacks = :enabledCompliancePacks,
         esgBadges = :esgBadges,
         openToNewBuyers = :openToNewBuyers,
         capabilities = :capabilities
@@ -353,6 +381,10 @@ export class ArcadeDbAuthRepository implements AuthRepository {
       {
         scope1Tco2e: nextScope1,
         scope2Tco2e: nextScope2,
+        scope2MarketTco2e: nextScope2Market,
+        annualRevenueEur: nextAnnualRevenueEur,
+        targetMarkets: nextTargetMarkets,
+        enabledCompliancePacks: nextEnabledCompliancePacks,
         esgBadges: nextEsgBadges,
         openToNewBuyers: nextOpenToNewBuyers,
         capabilities: nextCapabilities,
@@ -374,6 +406,7 @@ export class ArcadeDbAuthRepository implements AuthRepository {
   }
 
   async listDirectoryOrganizations(): Promise<Organization[]> {
+    // Privacy invariant: NEVER select annualRevenueEur for cross-org directory listings
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
       "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, openToNewBuyers, capabilities, createdAt FROM Organization WHERE openToNewBuyers = true",
@@ -714,6 +747,22 @@ export class InMemoryAuthRepository implements AuthRepository {
         input.scope2Tco2e !== undefined
           ? input.scope2Tco2e
           : existing.scope2Tco2e,
+      scope2MarketTco2e:
+        input.scope2MarketTco2e !== undefined
+          ? input.scope2MarketTco2e
+          : (existing.scope2MarketTco2e ?? null),
+      annualRevenueEur:
+        input.annualRevenueEur !== undefined
+          ? input.annualRevenueEur
+          : (existing.annualRevenueEur ?? null),
+      targetMarkets:
+        input.targetMarkets !== undefined
+          ? Array.from(new Set(input.targetMarkets))
+          : (existing.targetMarkets ?? []),
+      enabledCompliancePacks:
+        input.enabledCompliancePacks !== undefined
+          ? Array.from(new Set(input.enabledCompliancePacks))
+          : (existing.enabledCompliancePacks ?? []),
       esgBadges:
         input.esgBadges !== undefined
           ? dedupeList(input.esgBadges)
@@ -732,6 +781,8 @@ export class InMemoryAuthRepository implements AuthRepository {
       ...updated,
       esgBadges: [...updated.esgBadges],
       capabilities: [...updated.capabilities],
+      targetMarkets: [...(updated.targetMarkets ?? [])],
+      enabledCompliancePacks: [...(updated.enabledCompliancePacks ?? [])],
     };
   }
 
@@ -751,6 +802,8 @@ export class InMemoryAuthRepository implements AuthRepository {
       .map((org) =>
         OrganizationSchema.parse({
           ...org,
+          // Privacy invariant: NEVER expose annualRevenueEur in directory listings
+          annualRevenueEur: null,
           esgBadges: [...org.esgBadges],
           capabilities: [...org.capabilities],
         }),

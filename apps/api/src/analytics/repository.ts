@@ -1,6 +1,7 @@
 import {
   computeFinancialRiskSummary,
   computeFinancialSimulationDelta,
+  evaluateEsgAndCompliance,
   evaluateNetworkAnalytics,
   simulateNetworkAnalytics,
   type HiddenFinancialRiskInput,
@@ -8,11 +9,19 @@ import {
 } from "@kulgo/engine";
 import {
   AnalyticsSummarySchema,
+  EsgLedgerResponseSchema,
   ExecutiveReportSchema,
+  FACTOR_MATRIX_VERSION,
   SimulateAnalyticsResponseSchema,
   type AnalyticsSummary,
+  type Contract,
+  type ContractLine,
+  type DerivedLaneCommercialSummary,
+  type EsgLedgerResponse,
   type ExecutiveReport,
   type FinancialViewMode,
+  type Organization,
+  type Product,
   type RecommendedAction,
   type RiskSignal,
   type SimulateAnalyticsRequest,
@@ -40,6 +49,60 @@ function toIsoDateUtc(date: Date): string {
   const mm = String(date.getUTCMonth() + 1).padStart(2, "0");
   const dd = String(date.getUTCDate()).padStart(2, "0");
   return `${yyyy}-${mm}-${dd}`;
+}
+
+function buildOrgAnalyticsContext(
+  organization: Organization | null,
+  products: readonly Product[],
+) {
+  const productRevSum = products.reduce(
+    (sum, p) =>
+      sum +
+      (typeof p.annualRevenueEur === "number" &&
+      Number.isFinite(p.annualRevenueEur) &&
+      p.annualRevenueEur > 0
+        ? p.annualRevenueEur
+        : 0),
+    0,
+  );
+  const annualRevenueEur =
+    typeof organization?.annualRevenueEur === "number" &&
+    Number.isFinite(organization.annualRevenueEur) &&
+    organization.annualRevenueEur > 0
+      ? organization.annualRevenueEur
+      : productRevSum > 0
+        ? productRevSum
+        : null;
+
+  return {
+    orgId: organization?.orgId,
+    name: organization?.name,
+    countryCode: organization?.countryCode,
+    scope1Tco2e: organization?.scope1Tco2e ?? null,
+    scope2Tco2e: organization?.scope2Tco2e ?? null,
+    scope2MarketTco2e: organization?.scope2MarketTco2e ?? null,
+    annualRevenueEur,
+    targetMarkets: organization?.targetMarkets ?? [],
+    enabledCompliancePacks: organization?.enabledCompliancePacks ?? [],
+  };
+}
+
+function buildLaneIncotermsMap(
+  contracts?: readonly Contract[],
+  contractLines?: readonly ContractLine[],
+): Map<string, string | null> {
+  const incotermsByLaneId = new Map<string, string | null>();
+  if (!contracts || !contractLines) return incotermsByLaneId;
+  const contractsById = new Map(contracts.map((c) => [c.contractId, c]));
+  for (const line of contractLines) {
+    const contract = contractsById.get(line.contractId);
+    if (contract && !contract.isManuallyArchived && contract.incoterms) {
+      if (!incotermsByLaneId.has(line.laneId)) {
+        incotermsByLaneId.set(line.laneId, contract.incoterms);
+      }
+    }
+  }
+  return incotermsByLaneId;
 }
 
 /**
@@ -97,6 +160,13 @@ export interface AnalyticsRepository {
     asOfDate?: Date,
     viewMode?: FinancialViewMode,
   ): Promise<ExecutiveReport>;
+
+  getEsgLedger(
+    orgId: string,
+    filters?: NetworkFilters,
+    asOfDate?: Date,
+    viewMode?: FinancialViewMode,
+  ): Promise<EsgLedgerResponse>;
 
   simulate(
     orgId: string,
@@ -164,18 +234,64 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
       : undefined;
 
+    const financialRisk = computeFinancialRiskSummary({
+      products: network.products,
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: network.lanes,
+      contracts: network.contracts,
+      contractLines: network.contractLines,
+      riskSignals,
+      hiddenRiskByLaneId: buildHiddenFinancialRiskMap(
+        network.lanes,
+        partnerHiddenSummaries,
+      ),
+      asOfDate: toIsoDateUtc(asOfDate ?? new Date()),
+      viewMode,
+    });
+
+    const laneCommercialsByLaneId = new Map<string, DerivedLaneCommercialSummary>(
+      financialRisk.laneCommercials.map((lc) => [lc.laneId, lc]),
+    );
+    const incotermsByLaneId = buildLaneIncotermsMap(
+      network.contracts,
+      network.contractLines,
+    );
+
     const summary = evaluateNetworkAnalytics({
-      organization: {
-        scope1Tco2e: organization?.scope1Tco2e ?? null,
-        scope2Tco2e: organization?.scope2Tco2e ?? null,
-      },
+      organization: buildOrgAnalyticsContext(organization, network.products),
       inputs: network.inputs,
       facilities: network.facilities,
       lanes: network.lanes,
       riskSignals,
       partnerHiddenSummaries,
+      laneCommercialsByLaneId,
+      incotermsByLaneId,
       asOfDate,
     });
+
+    return AnalyticsSummarySchema.parse({ ...summary, financialRisk });
+  }
+
+  async getEsgLedger(
+    orgId: string,
+    filters?: NetworkFilters,
+    asOfDate?: Date,
+    viewMode: FinancialViewMode = "PERIOD_WINDOW",
+  ): Promise<EsgLedgerResponse> {
+    const safeOrgId = assertOrgId(orgId);
+    const [organization, network, riskSignals] = await Promise.all([
+      this.authRepo.findOrganizationById(safeOrgId),
+      this.workspaceRepo.getNetwork(safeOrgId, filters),
+      this.riskSignalRepo.listActive(),
+    ]);
+    if (!organization) {
+      throw new AnalyticsValidationError("Organization not found");
+    }
+
+    const partnerHiddenSummaries = this.resolvePartnerHiddenSummaries
+      ? await this.resolvePartnerHiddenSummaries(safeOrgId, network)
+      : undefined;
 
     const financialRisk = computeFinancialRiskSummary({
       products: network.products,
@@ -193,7 +309,35 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       viewMode,
     });
 
-    return AnalyticsSummarySchema.parse({ ...summary, financialRisk });
+    const laneCommercialsByLaneId = new Map<string, DerivedLaneCommercialSummary>(
+      financialRisk.laneCommercials.map((lc) => [lc.laneId, lc]),
+    );
+    const incotermsByLaneId = buildLaneIncotermsMap(
+      network.contracts,
+      network.contractLines,
+    );
+
+    const { summary, ledgerEntries } = evaluateEsgAndCompliance({
+      organization: buildOrgAnalyticsContext(organization, network.products),
+      inputs: network.inputs,
+      facilities: network.facilities,
+      lanes: network.lanes,
+      partnerHiddenSummaries,
+      laneCommercialsByLaneId,
+      incotermsByLaneId,
+    });
+
+    return EsgLedgerResponseSchema.parse({
+      ledgerVersion: "1.0",
+      factorMatrixVersion: FACTOR_MATRIX_VERSION,
+      generatedAt: (asOfDate ?? new Date()).toISOString(),
+      organizationId: organization.orgId,
+      organizationName: organization.name,
+      activeCompliancePacks: summary.activeCompliancePacks ?? ["GLOBAL_GHG_ISSB"],
+      weightedPcafScore: summary.weightedPcafScore ?? null,
+      totalTco2e: summary.totalTco2e,
+      entries: ledgerEntries,
+    });
   }
 
   async getExecutiveReport(
@@ -232,17 +376,24 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       viewMode,
     });
 
+    const laneCommercialsByLaneId = new Map<string, DerivedLaneCommercialSummary>(
+      financialRisk.laneCommercials.map((lc) => [lc.laneId, lc]),
+    );
+    const incotermsByLaneId = buildLaneIncotermsMap(
+      network.contracts,
+      network.contractLines,
+    );
+
     const summary = AnalyticsSummarySchema.parse({
       ...evaluateNetworkAnalytics({
-        organization: {
-          scope1Tco2e: organization.scope1Tco2e,
-          scope2Tco2e: organization.scope2Tco2e,
-        },
+        organization: buildOrgAnalyticsContext(organization, network.products),
         inputs: network.inputs,
         facilities: network.facilities,
         lanes: network.lanes,
         riskSignals,
         partnerHiddenSummaries,
+        laneCommercialsByLaneId,
+        incotermsByLaneId,
         asOfDate,
       }),
       financialRisk,
@@ -327,6 +478,9 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         esgBadges: organization.esgBadges,
         scope1Tco2e: organization.scope1Tco2e,
         scope2Tco2e: organization.scope2Tco2e,
+        scope2MarketTco2e: organization.scope2MarketTco2e ?? null,
+        targetMarkets: organization.targetMarkets ?? [],
+        enabledCompliancePacks: organization.enabledCompliancePacks ?? [],
         openToNewBuyers: organization.openToNewBuyers,
         capabilities: organization.capabilities,
       },
@@ -348,9 +502,13 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
         scope3Methodology,
         totalReportedTco2e: summary.esg.totalTco2e,
         privacyAttestation:
-          "All Tier-2+ upstream risk alerts and Scope 3 roll-ups are computed strictly server-side and anonymized per Kulgo Privacy Contract. No hidden upstream supplier identities, emails, or exact coordinates are disclosed.",
+          "All Tier-2+ upstream risk alerts and Scope 3 roll-ups are computed strictly server-side and anonymized per Kulgo Privacy Contract. No hidden upstream supplier identities, partner revenues, emails, or exact coordinates are disclosed.",
+        weightedPcafScore: summary.esg.weightedPcafScore ?? null,
+        primaryDataSharePct: summary.esg.primaryDataSharePct ?? 0,
+        activeCompliancePacks: summary.esg.activeCompliancePacks ?? ["GLOBAL_GHG_ISSB"],
       },
       financialExposure: financialRisk,
+      complianceChecklist: summary.esg.complianceChecklist ?? [],
     });
   }
 

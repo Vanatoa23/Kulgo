@@ -930,6 +930,38 @@ export function evaluateEsgAndCompliance(
       activityUnit = "tCO2e pool";
       formulaTrace = `Allocated share (${round2(explicitRatio * 100)}%) of reported emissions = ${cat1Tco2e} tCO2e`;
     }
+    // Priority 3b: Verified partner primary rollup (when partner-resolver returned hidden rollup, and no PCF/intensity/ratio yet)
+    else if (
+      supplier.isPartnerVerified &&
+      hidden &&
+      (finitePositive(supplier.estimatedScope12Tco2e) ||
+        finitePositive(hidden.hiddenUpstreamScope3Tco2e))
+    ) {
+      if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
+        skipLedgerEmission = true;
+      } else {
+        level0BaselineEmittedForFacility.add(supplier.facilityId);
+        const reconciledTotal = round2(
+          finiteNonNegative(supplier.estimatedScope12Tco2e) +
+            finiteNonNegative(hidden.hiddenUpstreamScope3Tco2e),
+        );
+        unscaledReportedWarningCount += 1;
+        method = "ALLOCATION_RATIO";
+        cat1Tco2e = reconciledTotal;
+        pcafScore = 2;
+        factorId = `verified_partner_rollup_${supplier.facilityId.slice(0, 8)}`;
+        factorValue = 1;
+        factorUnit = "reconciled partner rollup";
+        sourceCitation =
+          "Verified Kulgo Tier-1 Partner Reconciled Rollup (add partner revenue or PCF for proportional allocation)";
+        licenseId = "PARTNER-PRIMARY";
+        provenanceStatus = "PARTNER_PRIMARY";
+        matchConfidence = "PRIMARY_PARTNER";
+        activityValue = reconciledTotal;
+        activityUnit = "tCO2e";
+        formulaTrace = `Verified partner reconciled rollup = ${reconciledTotal} tCO2e`;
+      }
+    }
     // Priority 4: PHYSICAL_FACTOR (Rank #1 Open Physical Core — PCAF 3)
     else if (massTonnes !== null && taxonomy.archetype !== null) {
       method = "PHYSICAL_FACTOR";
@@ -1015,38 +1047,6 @@ export function evaluateEsgAndCompliance(
           : `€${round2(activeSpendEur)} × ${kgPerEur} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`;
       }
     }
-    // Verified partner topology-only fallback (when buyer has no spend/volume yet & partner has no revenue/PCF yet)
-    else if (
-      supplier.isPartnerVerified &&
-      hidden &&
-      (finitePositive(supplier.estimatedScope12Tco2e) ||
-        finitePositive(hidden.hiddenUpstreamScope3Tco2e))
-    ) {
-      if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
-        skipLedgerEmission = true;
-      } else {
-        level0BaselineEmittedForFacility.add(supplier.facilityId);
-        const reconciledTotal = round2(
-          finiteNonNegative(supplier.estimatedScope12Tco2e) +
-            finiteNonNegative(hidden.hiddenUpstreamScope3Tco2e),
-        );
-        unscaledReportedWarningCount += 1;
-        method = "ALLOCATION_RATIO";
-        cat1Tco2e = reconciledTotal;
-        pcafScore = 2;
-        factorId = `verified_partner_rollup_${supplier.facilityId.slice(0, 8)}`;
-        factorValue = 1;
-        factorUnit = "reconciled partner rollup";
-        sourceCitation =
-          "Verified Kulgo Tier-1 Partner Reconciled Rollup (add spend/revenue or PCF for proportional allocation)";
-        licenseId = "PARTNER-PRIMARY";
-        provenanceStatus = "PARTNER_PRIMARY";
-        matchConfidence = "PRIMARY_PARTNER";
-        activityValue = reconciledTotal;
-        activityUnit = "tCO2e";
-        formulaTrace = `Verified partner reconciled rollup = ${reconciledTotal} tCO2e`;
-      }
-    }
     // Priority 6: SECTOR_BASELINE (Level-0 Country × Sector proxy scaled by buyer share prior — PCAF 5)
     else {
       method = "SECTOR_BASELINE";
@@ -1054,30 +1054,45 @@ export function evaluateEsgAndCompliance(
         skipLedgerEmission = true;
       } else {
         level0BaselineEmittedForFacility.add(supplier.facilityId);
-        const sectorKey = supplier.sector ?? "Manufacturing";
-        const facilityBaseline =
-          SECTOR_BASELINE_SCOPE12_TCO2E[sectorKey] ??
-          SECTOR_BASELINE_SCOPE12_TCO2E.Manufacturing!;
-        const eu27Grid = COUNTRY_GRID_FACTORS.EU27!.locationTco2ePerMwh;
-        const supplierGrid = resolveCountryGridFactor(supplier.countryCode).locationTco2ePerMwh;
-        const countryMod = Math.min(2.2, Math.max(0.35, supplierGrid / eu27Grid));
-
-        if (finitePositive(supplier.estimatedScope12Tco2e)) {
+        if (supplier.isPartnerVerified && !hidden && !finitePositive(supplier.estimatedScope12Tco2e)) {
+          // Cycle-broken verified partner with no activity data: emit 0 to prevent circular double-counting
+          skipLedgerEmission = true;
+        } else if (finitePositive(supplier.estimatedScope12Tco2e)) {
           unscaledReportedWarningCount += 1;
-        }
+          cat1Tco2e = round2(supplier.estimatedScope12Tco2e);
+          pcafScore = 5;
+          factorId = `supplier_reported_unscaled_${supplier.facilityId.slice(0, 8)}`;
+          factorValue = cat1Tco2e;
+          factorUnit = "tCO2e (unscaled supplier estimate)";
+          sourceCitation =
+            "User-entered supplier facility Scope 1+2 estimate (add spend, volume, or allocation share for proportional attribution)";
+          licenseId = "ORG-REPORTED";
+          provenanceStatus = "ORG_REPORTED";
+          activityValue = cat1Tco2e;
+          activityUnit = "tCO2e";
+          formulaTrace = `Unscaled supplier estimate = ${cat1Tco2e} tCO2e (add spend/volume/ratio)`;
+        } else {
+          const sectorKey = supplier.sector ?? "Manufacturing";
+          const facilityBaseline =
+            SECTOR_BASELINE_SCOPE12_TCO2E[sectorKey] ??
+            SECTOR_BASELINE_SCOPE12_TCO2E.Manufacturing!;
+          const eu27Grid = COUNTRY_GRID_FACTORS.EU27!.locationTco2ePerMwh;
+          const supplierGrid = resolveCountryGridFactor(supplier.countryCode).locationTco2ePerMwh;
+          const countryMod = Math.min(2.2, Math.max(0.35, supplierGrid / eu27Grid));
 
-        cat1Tco2e = round2(facilityBaseline * countryMod * LEVEL0_DEFAULT_BUYER_SHARE);
-        pcafScore = 5;
-        factorId = `kulgo_level0_proxy_${sectorKey.toLowerCase()}_${supplier.countryCode.toLowerCase()}_2026`;
-        factorValue = round2(facilityBaseline * countryMod);
-        factorUnit = "tCO2e / supplier-year (8% SME buyer-share prior)";
-        sourceCitation =
-          "Kulgo Level-0 Country-Grid-Adjusted Sector Proxy (8% provisional SME buyer-share prior; prevents 100% over-attribution)";
-        licenseId = "CC-BY-4.0";
-        provenanceStatus = "CALIBRATED_BASELINE_V1";
-        activityValue = LEVEL0_DEFAULT_BUYER_SHARE;
-        activityUnit = "buyer-share prior";
-        formulaTrace = `${facilityBaseline} tCO2e × ${round2(countryMod)} grid-mod × 8% buyer-share prior = ${cat1Tco2e} tCO2e`;
+          cat1Tco2e = round2(facilityBaseline * countryMod * LEVEL0_DEFAULT_BUYER_SHARE);
+          pcafScore = 5;
+          factorId = `kulgo_level0_proxy_${sectorKey.toLowerCase()}_${supplier.countryCode.toLowerCase()}_2026`;
+          factorValue = round2(facilityBaseline * countryMod);
+          factorUnit = "tCO2e / supplier-year (8% SME buyer-share prior)";
+          sourceCitation =
+            "Kulgo Level-0 Country-Grid-Adjusted Sector Proxy (8% provisional SME buyer-share prior; prevents 100% over-attribution)";
+          licenseId = "CC-BY-4.0";
+          provenanceStatus = "CALIBRATED_BASELINE_V1";
+          activityValue = LEVEL0_DEFAULT_BUYER_SHARE;
+          activityUnit = "buyer-share prior";
+          formulaTrace = `${facilityBaseline} tCO2e × ${round2(countryMod)} grid-mod × 8% buyer-share prior = ${cat1Tco2e} tCO2e`;
+        }
       }
     }
 

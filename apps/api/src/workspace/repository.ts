@@ -323,6 +323,17 @@ function mapSupplyInputRow(row: Record<string, unknown>): SupplyInput {
     ...(typeof row.materialCriticality === "number"
       ? { materialCriticality: row.materialCriticality }
       : {}),
+    ...(typeof row.cnCode === "string" ? { cnCode: row.cnCode } : {}),
+    ...(typeof row.materialArchetype === "string"
+      ? { materialArchetype: row.materialArchetype }
+      : {}),
+    ...(typeof row.unitMassKg === "number" ? { unitMassKg: row.unitMassKg } : {}),
+    ...(typeof row.productEmissionFactorTco2ePerUnit === "number"
+      ? { productEmissionFactorTco2ePerUnit: row.productEmissionFactorTco2ePerUnit }
+      : {}),
+    ...(typeof row.pcfVerified === "boolean"
+      ? { pcfVerified: row.pcfVerified }
+      : {}),
   });
 }
 
@@ -347,6 +358,18 @@ function mapFacilityRow(row: Record<string, unknown>): Facility {
         : null,
     ...(typeof row.defaultCarryingCostPct === "number"
       ? { defaultCarryingCostPct: row.defaultCarryingCostPct }
+      : {}),
+    ...(typeof row.annualElectricityMwh === "number"
+      ? { annualElectricityMwh: row.annualElectricityMwh }
+      : {}),
+    ...(typeof row.renewableElectricityPct === "number"
+      ? { renewableElectricityPct: row.renewableElectricityPct }
+      : {}),
+    ...(typeof row.renewableInstrumentsVerified === "boolean"
+      ? { renewableInstrumentsVerified: row.renewableInstrumentsVerified }
+      : {}),
+    ...(typeof row.annualRevenueEur === "number"
+      ? { annualRevenueEur: row.annualRevenueEur }
       : {}),
   });
 }
@@ -397,6 +420,15 @@ function mapSupplyLaneRow(row: Record<string, unknown>): SupplyLane {
       : {}),
     ...(typeof row.customTtrDays === "number"
       ? { customTtrDays: row.customTtrDays }
+      : {}),
+    ...(typeof row.productEmissionFactorTco2ePerUnit === "number"
+      ? { productEmissionFactorTco2ePerUnit: row.productEmissionFactorTco2ePerUnit }
+      : {}),
+    ...(typeof row.pcfVerified === "boolean"
+      ? { pcfVerified: row.pcfVerified }
+      : {}),
+    ...(typeof row.economicAttributionRatio === "number"
+      ? { economicAttributionRatio: row.economicAttributionRatio }
       : {}),
   });
 }
@@ -2133,6 +2165,15 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       ...(input.materialCriticality !== undefined
         ? { materialCriticality: input.materialCriticality }
         : {}),
+      ...(input.cnCode !== undefined ? { cnCode: input.cnCode } : {}),
+      ...(input.materialArchetype !== undefined
+        ? { materialArchetype: input.materialArchetype }
+        : {}),
+      ...(input.unitMassKg !== undefined ? { unitMassKg: input.unitMassKg } : {}),
+      ...(input.productEmissionFactorTco2ePerUnit !== undefined
+        ? { productEmissionFactorTco2ePerUnit: input.productEmissionFactorTco2ePerUnit }
+        : {}),
+      ...(input.pcfVerified !== undefined ? { pcfVerified: input.pcfVerified } : {}),
     });
     this.inputs.set(created.inputId, created);
     return { ...created };
@@ -2176,6 +2217,15 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       ...(input.materialCriticality !== undefined
         ? { materialCriticality: input.materialCriticality }
         : {}),
+      ...(input.cnCode !== undefined ? { cnCode: input.cnCode } : {}),
+      ...(input.materialArchetype !== undefined
+        ? { materialArchetype: input.materialArchetype }
+        : {}),
+      ...(input.unitMassKg !== undefined ? { unitMassKg: input.unitMassKg } : {}),
+      ...(input.productEmissionFactorTco2ePerUnit !== undefined
+        ? { productEmissionFactorTco2ePerUnit: input.productEmissionFactorTco2ePerUnit }
+        : {}),
+      ...(input.pcfVerified !== undefined ? { pcfVerified: input.pcfVerified } : {}),
     });
     this.inputs.set(inputId, updated);
     return { ...updated };
@@ -2243,6 +2293,18 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       ...(input.defaultCarryingCostPct !== undefined
         ? { defaultCarryingCostPct: input.defaultCarryingCostPct }
         : {}),
+      ...(input.annualElectricityMwh !== undefined
+        ? { annualElectricityMwh: input.annualElectricityMwh }
+        : {}),
+      ...(input.renewableElectricityPct !== undefined
+        ? { renewableElectricityPct: input.renewableElectricityPct }
+        : {}),
+      ...(input.renewableInstrumentsVerified !== undefined
+        ? { renewableInstrumentsVerified: input.renewableInstrumentsVerified }
+        : {}),
+      ...(input.annualRevenueEur !== undefined
+        ? { annualRevenueEur: input.annualRevenueEur }
+        : {}),
     });
     this.facilities.set(facility.facilityId, {
       facility,
@@ -2290,6 +2352,18 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
           : existing.estimatedScope12Tco2e,
       ...(input.defaultCarryingCostPct !== undefined
         ? { defaultCarryingCostPct: input.defaultCarryingCostPct }
+        : {}),
+      ...(input.annualElectricityMwh !== undefined
+        ? { annualElectricityMwh: input.annualElectricityMwh }
+        : {}),
+      ...(input.renewableElectricityPct !== undefined
+        ? { renewableElectricityPct: input.renewableElectricityPct }
+        : {}),
+      ...(input.renewableInstrumentsVerified !== undefined
+        ? { renewableInstrumentsVerified: input.renewableInstrumentsVerified }
+        : {}),
+      ...(input.annualRevenueEur !== undefined
+        ? { annualRevenueEur: input.annualRevenueEur }
         : {}),
     });
 
@@ -2536,6 +2610,13 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       ...(input.customTtrDays !== undefined
         ? { customTtrDays: input.customTtrDays }
         : {}),
+      ...(input.productEmissionFactorTco2ePerUnit !== undefined
+        ? { productEmissionFactorTco2ePerUnit: input.productEmissionFactorTco2ePerUnit }
+        : {}),
+      ...(input.pcfVerified !== undefined ? { pcfVerified: input.pcfVerified } : {}),
+      ...(input.economicAttributionRatio !== undefined
+        ? { economicAttributionRatio: input.economicAttributionRatio }
+        : {}),
     });
 
     this.lanes.set(lane.laneId, lane);
@@ -2688,6 +2769,13 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
         : {}),
       ...(input.customTtrDays !== undefined
         ? { customTtrDays: input.customTtrDays }
+        : {}),
+      ...(input.productEmissionFactorTco2ePerUnit !== undefined
+        ? { productEmissionFactorTco2ePerUnit: input.productEmissionFactorTco2ePerUnit }
+        : {}),
+      ...(input.pcfVerified !== undefined ? { pcfVerified: input.pcfVerified } : {}),
+      ...(input.economicAttributionRatio !== undefined
+        ? { economicAttributionRatio: input.economicAttributionRatio }
         : {}),
     });
 
