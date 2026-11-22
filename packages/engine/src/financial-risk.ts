@@ -26,7 +26,10 @@ import {
   type ExpeditingShiftKey,
   type SwitchingReadinessTier,
 } from "./baselines.js";
-import { deriveNetworkCommercials } from "./contracts.js";
+import {
+  deriveNetworkCommercials,
+  type CommercialDerivationResult,
+} from "./contracts.js";
 
 const DAY_COUNT_BASIS = FINANCIAL_RISK_PARAMS_V1.dayCountBasis;
 const WEIGHTS = FINANCIAL_RISK_PARAMS_V1.ttrSupportMass;
@@ -74,6 +77,12 @@ export interface FinancialRiskInput {
    * in OrgScopedAnalyticsRepository, keyed by buyer's Tier-1 laneId or fromFacilityId.
    */
   hiddenRiskByLaneId?: ReadonlyMap<string, HiddenFinancialRiskInput>;
+  /**
+   * Optional precomputed commercial snapshot from deriveNetworkCommercials()
+   * so callers can derive commercials once and reuse them across HHI, ESG,
+   * and financial risk calculations.
+   */
+  commercials?: CommercialDerivationResult;
   asOfDate: string; // ISO YYYY-MM-DD
   viewMode?: FinancialViewMode;
   windowStart?: string;
@@ -462,19 +471,21 @@ export function computeFinancialRiskSummary(
   const contractLines = input.contractLines ?? [];
   const riskSignals = input.riskSignals ?? [];
 
-  const commercials = deriveNetworkCommercials(
-    input.lanes,
-    input.inputs,
-    contracts,
-    contractLines,
-    {
-      asOfDate: input.asOfDate,
-      viewMode: input.viewMode ?? "PERIOD_WINDOW",
-      windowStart: input.windowStart,
-      windowEndExclusive: input.windowEndExclusive,
-      fxRatesToEur: input.fxRatesToEur,
-    },
-  );
+  const commercials =
+    input.commercials ??
+    deriveNetworkCommercials(
+      input.lanes,
+      input.inputs,
+      contracts,
+      contractLines,
+      {
+        asOfDate: input.asOfDate,
+        viewMode: input.viewMode ?? "PERIOD_WINDOW",
+        windowStart: input.windowStart,
+        windowEndExclusive: input.windowEndExclusive,
+        fxRatesToEur: input.fxRatesToEur,
+      },
+    );
 
   const facilityById = new Map(input.facilities.map((f) => [f.facilityId, f]));
   const productById = new Map(input.products.map((p) => [p.productId, p]));

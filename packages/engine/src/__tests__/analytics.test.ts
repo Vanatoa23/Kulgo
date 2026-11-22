@@ -1,5 +1,7 @@
 import {
   RiskSignalSchema,
+  type Contract,
+  type ContractLine,
   type Facility,
   type RiskSignal,
   type SupplyInput,
@@ -10,6 +12,7 @@ import {
   evaluateNetworkAnalytics,
   simulateNetworkAnalytics,
 } from "../analytics.js";
+import { deriveNetworkCommercials } from "../contracts.js";
 import { isPointInWktPolygon, parseWktPolygon } from "../geo.js";
 
 const ORG_ID = "11111111-1111-4111-8111-111111111111";
@@ -545,6 +548,325 @@ describe("evaluateNetworkAnalytics & simulateNetworkAnalytics", () => {
     expect(matCHhi.rawHhi).toBe(5000);
     expect(matCHhi.weightingBasis).toBe("SPEND_EUR");
     expect(matCHhi.coveragePct).toBe(100);
+  });
+
+  it("uses contract-derived 90/10 volumes and spend over stale 50/50 lane fields for HHI", () => {
+    const stale5050Lanes: SupplyLane[] = [
+      {
+        ...LANES[1]!,
+        volumeSharePct: 50,
+        annualVolume: 50,
+        volumeUnit: "TONNES",
+        annualSpendEur: 50_000,
+      },
+      {
+        ...LANES[2]!,
+        volumeSharePct: 50,
+        annualVolume: 50,
+        volumeUnit: "TONNES",
+        annualSpendEur: 50_000,
+      },
+    ];
+
+    const contracts: Contract[] = [
+      {
+        contractId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa1",
+        ownerOrgId: ORG_ID,
+        supplierFacilityId: FAC_TAMPERE_ID,
+        title: "Tampere Primary Framework",
+        contractType: "FRAMEWORK",
+        pricingModel: "FIXED",
+        expiryBehavior: "AUTO_ARCHIVE",
+        confidence: "CONTRACTED",
+        startDate: "2026-01-01",
+        endDate: "2027-12-31",
+        noticePeriodDays: 60,
+        nonRenewalNoticeGiven: false,
+        archiveEffectiveDate: null,
+        isManuallyArchived: false,
+        incoterms: "DAP",
+        notes: null,
+      },
+      {
+        contractId: "aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaa2",
+        ownerOrgId: ORG_ID,
+        supplierFacilityId: FAC_HAMBURG_ID,
+        title: "Hamburg Secondary Framework",
+        contractType: "FRAMEWORK",
+        pricingModel: "FIXED",
+        expiryBehavior: "AUTO_ARCHIVE",
+        confidence: "CONTRACTED",
+        startDate: "2026-01-01",
+        endDate: "2027-12-31",
+        noticePeriodDays: 60,
+        nonRenewalNoticeGiven: false,
+        archiveEffectiveDate: null,
+        isManuallyArchived: false,
+        incoterms: "DAP",
+        notes: null,
+      },
+    ];
+
+    const contractLines: ContractLine[] = [
+      {
+        contractLineId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb1",
+        ownerOrgId: ORG_ID,
+        contractId: contracts[0]!.contractId,
+        laneId: LANE_TAMPERE_ID,
+        inputId: INPUT_CHIPS_ID,
+        cadence: "PER_YEAR",
+        committedVolume: 90,
+        unit: "TONNES",
+        committedSpend: 90_000,
+        unitPrice: 1000,
+        currency: "EUR",
+        startDateOverride: null,
+        endDateOverride: null,
+      },
+      {
+        contractLineId: "bbbbbbbb-bbbb-4bbb-8bbb-bbbbbbbbbbb2",
+        ownerOrgId: ORG_ID,
+        contractId: contracts[1]!.contractId,
+        laneId: LANE_HAMBURG_ID,
+        inputId: INPUT_CHIPS_ID,
+        cadence: "PER_YEAR",
+        committedVolume: 10,
+        unit: "TONNES",
+        committedSpend: 10_000,
+        unitPrice: 1000,
+        currency: "EUR",
+        startDateOverride: null,
+        endDateOverride: null,
+      },
+    ];
+
+    const commercials = deriveNetworkCommercials(
+      stale5050Lanes,
+      INPUTS,
+      contracts,
+      contractLines,
+      { asOfDate: "2026-06-01", viewMode: "RUN_RATE" },
+    );
+
+    const summary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: stale5050Lanes,
+      riskSignals: [],
+      laneCommercialsByLaneId: commercials.laneSummaries,
+      asOfDate,
+    });
+
+    const materialHhi = summary.hhiMetrics.find(
+      (m) => m.dimension === "MATERIAL" && m.label.includes("Material C"),
+    )!;
+    const supplierHhi = summary.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    const countryHhi = summary.hhiMetrics.find(
+      (m) => m.dimension === "COUNTRY",
+    )!;
+
+    // 90^2 + 10^2 = 8200 (not 5000 from stale 50/50 lane fields)
+    expect(materialHhi.rawHhi).toBe(8200);
+    expect(materialHhi.weightingBasis).toBe("VOLUME");
+    expect(supplierHhi.rawHhi).toBe(8200);
+    expect(supplierHhi.weightingBasis).toBe("SPEND_EUR");
+    expect(countryHhi.rawHhi).toBe(8200);
+  });
+
+  it("excludes expired (LAPSED_UNCONTRACTED) lanes from HHI and SPOF without reviving stale 50/50 lane shares", () => {
+    const stale5050Lanes: SupplyLane[] = [
+      {
+        ...LANES[1]!,
+        volumeSharePct: 50,
+        annualVolume: 50,
+        volumeUnit: "TONNES",
+        annualSpendEur: 50_000,
+      },
+      {
+        ...LANES[2]!,
+        volumeSharePct: 50,
+        annualVolume: 50,
+        volumeUnit: "TONNES",
+        annualSpendEur: 50_000,
+      },
+    ];
+
+    const contracts: Contract[] = [
+      {
+        contractId: "cccccccc-cccc-4ccc-8ccc-ccccccccccc1",
+        ownerOrgId: ORG_ID,
+        supplierFacilityId: FAC_TAMPERE_ID,
+        title: "Active Tampere Contract",
+        contractType: "FRAMEWORK",
+        pricingModel: "FIXED",
+        expiryBehavior: "AUTO_ARCHIVE",
+        confidence: "CONTRACTED",
+        startDate: "2026-01-01",
+        endDate: "2027-12-31",
+        noticePeriodDays: 60,
+        nonRenewalNoticeGiven: false,
+        archiveEffectiveDate: null,
+        isManuallyArchived: false,
+        incoterms: null,
+        notes: null,
+      },
+      {
+        contractId: "cccccccc-cccc-4ccc-8ccc-ccccccccccc2",
+        ownerOrgId: ORG_ID,
+        supplierFacilityId: FAC_HAMBURG_ID,
+        title: "Expired Hamburg Contract",
+        contractType: "FRAMEWORK",
+        pricingModel: "FIXED",
+        expiryBehavior: "AUTO_ARCHIVE",
+        confidence: "CONTRACTED",
+        startDate: "2025-01-01",
+        endDate: "2025-12-31",
+        noticePeriodDays: 60,
+        nonRenewalNoticeGiven: false,
+        archiveEffectiveDate: null,
+        isManuallyArchived: false,
+        incoterms: null,
+        notes: null,
+      },
+    ];
+
+    const contractLines: ContractLine[] = [
+      {
+        contractLineId: "dddddddd-dddd-4ddd-8ddd-ddddddddddd1",
+        ownerOrgId: ORG_ID,
+        contractId: contracts[0]!.contractId,
+        laneId: LANE_TAMPERE_ID,
+        inputId: INPUT_CHIPS_ID,
+        cadence: "PER_YEAR",
+        committedVolume: 90,
+        unit: "TONNES",
+        committedSpend: 90_000,
+        unitPrice: 1000,
+        currency: "EUR",
+        startDateOverride: null,
+        endDateOverride: null,
+      },
+      {
+        contractLineId: "dddddddd-dddd-4ddd-8ddd-ddddddddddd2",
+        ownerOrgId: ORG_ID,
+        contractId: contracts[1]!.contractId,
+        laneId: LANE_HAMBURG_ID,
+        inputId: INPUT_CHIPS_ID,
+        cadence: "PER_YEAR",
+        committedVolume: 10,
+        unit: "TONNES",
+        committedSpend: 10_000,
+        unitPrice: 1000,
+        currency: "EUR",
+        startDateOverride: null,
+        endDateOverride: null,
+      },
+    ];
+
+    const oneActiveComm = deriveNetworkCommercials(
+      stale5050Lanes,
+      INPUTS,
+      contracts,
+      contractLines,
+      { asOfDate: "2026-06-01", viewMode: "RUN_RATE" },
+    );
+    expect(
+      oneActiveComm.laneSummaries.get(LANE_HAMBURG_ID)?.laneCommercialState,
+    ).toBe("LAPSED_UNCONTRACTED");
+
+    const oneActiveSummary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: stale5050Lanes,
+      riskSignals: [],
+      laneCommercialsByLaneId: oneActiveComm.laneSummaries,
+      asOfDate,
+    });
+
+    const materialHhi = oneActiveSummary.hhiMetrics.find(
+      (m) => m.dimension === "MATERIAL",
+    )!;
+    const supplierHhi = oneActiveSummary.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    expect(materialHhi.rawHhi).toBe(10000);
+    expect(materialHhi.isSinglePointOfFailure).toBe(true);
+    expect(materialHhi.totalActiveLanesCount).toBe(1);
+    expect(supplierHhi.rawHhi).toBe(10000);
+    expect(
+      oneActiveSummary.alerts.some((a) => a.category === "SINGLE_SOURCE"),
+    ).toBe(true);
+
+    // When all contracts have expired, HHI must not fabricate 5,000 from stale 50/50 shares
+    const allExpiredComm = deriveNetworkCommercials(
+      stale5050Lanes,
+      INPUTS,
+      contracts,
+      contractLines,
+      { asOfDate: "2028-06-01", viewMode: "RUN_RATE" },
+    );
+    const allExpiredSummary = evaluateNetworkAnalytics({
+      organization: { scope1Tco2e: 100, scope2Tco2e: 100 },
+      inputs: INPUTS,
+      facilities: FACILITIES,
+      lanes: stale5050Lanes,
+      riskSignals: [],
+      laneCommercialsByLaneId: allExpiredComm.laneSummaries,
+      asOfDate: new Date("2028-06-01T00:00:00Z"),
+    });
+    expect(allExpiredSummary.hhiMetrics).toEqual([]);
+  });
+
+  it("honors explicit annualSpendEur overrides in simulateNetworkAnalytics across HHI and spend-based ESG", () => {
+    const spendOnlyLanes: SupplyLane[] = [
+      {
+        ...LANES[1]!,
+        volumeSharePct: 50,
+        annualVolume: null,
+        annualSpendEur: 50_000,
+      },
+      {
+        ...LANES[2]!,
+        volumeSharePct: 50,
+        annualVolume: null,
+        annualSpendEur: 50_000,
+      },
+    ];
+
+    const result = simulateNetworkAnalytics(
+      {
+        organization: { scope1Tco2e: 0, scope2Tco2e: 0 },
+        inputs: INPUTS,
+        facilities: FACILITIES,
+        lanes: spendOnlyLanes,
+        riskSignals: [],
+        asOfDate,
+      },
+      [{ laneId: LANE_TAMPERE_ID, annualSpendEur: 450_000 }],
+    );
+
+    const baseSupplierHhi = result.baseline.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    const simSupplierHhi = result.simulated.hhiMetrics.find(
+      (m) => m.dimension === "SUPPLIER",
+    )!;
+    const simMaterialHhi = result.simulated.hhiMetrics.find(
+      (m) => m.dimension === "MATERIAL",
+    )!;
+
+    // 50k/50k -> 5000; 450k/50k (90%/10%) -> 8200
+    expect(baseSupplierHhi.rawHhi).toBe(5000);
+    expect(simSupplierHhi.rawHhi).toBe(8200);
+    expect(simMaterialHhi.rawHhi).toBe(8200);
+    // Spend-based Scope 3 upstream must increase when spend jumps from €100k to €500k
+    expect(result.simulated.esg.upstreamScope3Tco2e).toBeGreaterThan(
+      result.baseline.esg.upstreamScope3Tco2e * 3,
+    );
   });
 });
 

@@ -346,6 +346,7 @@ export const SimulateAnalyticsRequestSchema = z
   .object({
     productId: z.string().uuid().optional(),
     inputId: z.string().uuid().optional(),
+    viewMode: FinancialViewModeSchema.optional(),
     laneChanges: z.array(SimulatedLaneChangeSchema).min(1).max(100),
     oneTimeQualificationEur: z.number().finite().nonnegative().optional(),
   })

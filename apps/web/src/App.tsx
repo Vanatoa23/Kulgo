@@ -848,6 +848,7 @@ export function App() {
           inputs={network.inputs}
           activeProductId={activeProductId}
           activeInputId={activeInputId}
+          financialViewMode={financialViewMode}
           onClose={() => setSimulatorOpen(false)}
         />
 
