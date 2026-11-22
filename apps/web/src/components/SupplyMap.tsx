@@ -15,6 +15,7 @@ import type {
 import { AlertTriangle, Crosshair, ExternalLink, X } from "lucide-react";
 import * as maplibregl from "maplibre-gl";
 import "maplibre-gl/dist/maplibre-gl.css";
+import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import { useEffect, useMemo, useRef, useState } from "react";
 import {
   buildCorridorArcs,
@@ -27,6 +28,10 @@ import {
   type RiskSignalPolygonDatum,
 } from "../lib/workspace-utils.js";
 import type { MapInteractionMode } from "./FilterBar.js";
+
+// MapLibre 6's runtime sibling URL is invisible to Vite's asset graph.
+// Bundle the worker (including its shared module) before constructing any maps.
+maplibregl.setWorkerUrl(maplibreWorkerUrl);
 
 const DARK_BASEMAP_STYLE =
   "https://basemaps.cartocdn.com/gl/dark-matter-gl-style/style.json";
