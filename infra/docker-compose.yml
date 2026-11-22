@@ -47,6 +47,14 @@ services:
       RATE_LIMIT_IMPORT_MAX: ${RATE_LIMIT_IMPORT_MAX:-10}
       MAX_JSON_BODY_BYTES: ${MAX_JSON_BODY_BYTES:-1048576}
       MAX_IMPORT_BODY_BYTES: ${MAX_IMPORT_BODY_BYTES:-5242880}
+      INTELLIGENCE_SWEEP_ENABLED: ${INTELLIGENCE_SWEEP_ENABLED:-false}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
+      GROQ_API_KEY: ${GROQ_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      RESEND_API_KEY: ${RESEND_API_KEY:-}
+      BREVO_API_KEY: ${BREVO_API_KEY:-}
+      ALERT_FROM_EMAIL: ${ALERT_FROM_EMAIL:-alerts@kulgo.eu}
     # Bound to loopback for host health checks; `web` proxies `/api/*` over `kulgo-internal`.
     ports:
       - "127.0.0.1:4000:4000"
