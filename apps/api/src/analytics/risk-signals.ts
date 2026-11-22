@@ -129,9 +129,6 @@ export class ArcadeDbRiskSignalRepository implements RiskSignalRepository {
        FROM RiskSignal
        WHERE active = true`,
     );
-    if (rows.length === 0) {
-      return [...DEMO_RISK_SIGNALS];
-    }
     return rows.map(mapRiskSignalRow);
   }
 
