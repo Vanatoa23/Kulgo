@@ -512,7 +512,8 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       lane: { laneId: string };
     };
 
-    // Baseline Org A summary before partner verification (no hidden upstream Scope 3 or sanction alert)
+    // Baseline before verification: Baltic corridor signals may match directly,
+    // but no hidden partner warning is available yet.
     const beforeSummaryRes = await app.request("/api/v1/analytics/summary", {
       headers: { Cookie: orgA.cookie },
     });
@@ -521,7 +522,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       await beforeSummaryRes.json(),
     );
     expect(
-      beforeSummary.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
+      beforeSummary.alerts.some((a) => a.alertId.startsWith("partner-upstream-")),
     ).toBe(false);
 
     // 2. Org B sets private revenue and maps its own private upstream network with hidden Tier-2 supplier Org C (in sanctioned RU)
@@ -716,7 +717,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
 
     // Org A receives anonymized hidden-upstream secondary-sanction alert referencing ONLY aTier1
     const hiddenSanctionAlert = afterSummary.alerts.find(
-      (a) => a.category === "SECONDARY_SANCTION",
+      (a) => a.alertId === `partner-upstream-${aTier1.facilityId}`,
     );
     expect(hiddenSanctionAlert).toBeDefined();
     expect(hiddenSanctionAlert?.confidence).toBe("NETWORK_VERIFIED");

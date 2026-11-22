@@ -27,6 +27,7 @@ import {
   type SwitchingReadinessTier,
 } from "./baselines.js";
 import { deriveNetworkCommercials } from "./contracts.js";
+import { matchNetworkRiskSignals } from "./chokepoints.js";
 
 const DAY_COUNT_BASIS = FINANCIAL_RISK_PARAMS_V1.dayCountBasis;
 const WEIGHTS = FINANCIAL_RISK_PARAMS_V1.ttrSupportMass;
@@ -486,21 +487,15 @@ export function computeFinancialRiskSummary(
       : commercials.windowDays;
 
   // Determine per-lane live risk multiplier from matched RiskSignals if not overridden
+  const signalsByLane = matchNetworkRiskSignals(
+    input.lanes, input.facilities, riskSignals, input.asOfDate,
+  );
   const resolveLaneLiveMultiplier = (lane: SupplyLane): number => {
     const override = input.liveRiskMultiplierByLaneId?.get(lane.laneId);
     if (override !== undefined && Number.isFinite(override)) {
       return clamp(override, 0, 5);
     }
-    const fromFac = facilityById.get(lane.fromFacilityId);
-    if (!fromFac) return 1;
-    const matched = riskSignals.filter(
-      (s) =>
-        s.active &&
-        s.lifecycle !== "RESOLVED" &&
-        (s.affectedCountryCodes.includes(fromFac.countryCode) ||
-          (fromFac.sector && s.affectedSectors.includes(fromFac.sector))),
-    );
-    return deriveLiveRiskMultiplierFromSignals(matched);
+    return deriveLiveRiskMultiplierFromSignals(signalsByLane.get(lane.laneId) ?? []);
   };
 
   interface LaneRiskSpec {
