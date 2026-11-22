@@ -1,3 +1,4 @@
+import { resolveLaneDirection } from "@kulgo/shared";
 import type {
   Contract,
   ContractConfidence,
@@ -6,6 +7,7 @@ import type {
   DerivedLaneCommercialSummary,
   FinancialConfidenceBadge,
   FinancialViewMode,
+  Facility,
   HhiWeightingBasis,
   LaneCommercialState,
   SupplyInput,
@@ -190,6 +192,7 @@ export function toEur(
 
 export interface ContractDerivationOptions {
   asOfDate: string;
+  facilities?: readonly Facility[];
   viewMode?: FinancialViewMode;
   windowStart?: string;
   windowEndExclusive?: string;
@@ -753,8 +756,13 @@ export function deriveNetworkCommercials(
   // Apply allocationSplitPct to derived active quantities across sibling split groups
   // (same origin facility, direction, and material) WITHOUT mutating signed ContractLines.
   const splitGroups = new Map<string, SupplyLane[]>();
+  const facilitiesById = new Map(options.facilities?.map((f) => [f.facilityId, f]));
   for (const lane of lanes) {
-    const dir = lane.direction ?? "UPSTREAM";
+    const dir = resolveLaneDirection(
+      lane,
+      facilitiesById.get(lane.fromFacilityId),
+      facilitiesById.get(lane.toFacilityId),
+    );
     const matKey = lane.inputId ?? lane.materialCategory.trim().toLowerCase();
     const key = `${lane.fromFacilityId}::${dir}::${matKey}`;
     const arr = splitGroups.get(key) ?? [];
@@ -785,6 +793,13 @@ export function deriveNetworkCommercials(
       .filter((r): r is NonNullable<typeof r> => r !== undefined);
     const nonLapsed = rawEntries.filter((r) => r.state !== "LAPSED_UNCONTRACTED");
     if (nonLapsed.length === 0) continue;
+    // Lapsed destinations cannot receive active commercials. Normalize over the
+    // eligible destinations so their percentages cannot make the pool disappear.
+    const eligibleSplitSum = nonLapsed.reduce(
+      (sum, r) => sum + (r.lane.allocationSplitPct ?? 0), 0,
+    );
+    // With no eligible allocation, retain the original active quantities.
+    if (eligibleSplitSum <= 0) continue;
 
     // Pool volume in a common reference unit (the first lane's baseUnit)
     const refUnit = nonLapsed[0]!.baseUnit;
@@ -850,7 +865,7 @@ export function deriveNetworkCommercials(
 
     for (const r of rawEntries) {
       if (r.state === "LAPSED_UNCONTRACTED") continue;
-      const frac = (r.lane.allocationSplitPct ?? 0) / 100;
+      const frac = (r.lane.allocationSplitPct ?? 0) / eligibleSplitSum;
 
       if (canPoolVolume && anyVolume) {
         const backConv = toBaseUnit(1, refUnit, r.baseUnit);

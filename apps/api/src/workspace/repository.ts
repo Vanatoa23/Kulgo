@@ -313,37 +313,6 @@ function deterministicUuid(namespace: string, orgId: string, key: string): strin
   return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
 }
 
-const MASS_TO_KG: Readonly<Record<string, number>> = {
-  KG: 1,
-  TONNES: 1000,
-};
-
-function getNormalizedUnitInfo(unit: string): {
-  family: string;
-  factorToCanonical: number;
-} {
-  const upper = unit.trim().toUpperCase();
-  if (upper in MASS_TO_KG) {
-    return { family: "MASS", factorToCanonical: MASS_TO_KG[upper]! };
-  }
-  return { family: upper, factorToCanonical: 1 };
-}
-
-function areUnitsCompatible(units: readonly string[]): boolean {
-  if (units.length <= 1) return true;
-  const firstFamily = getNormalizedUnitInfo(units[0]!).family;
-  return units.every((u) => getNormalizedUnitInfo(u).family === firstFamily);
-}
-
-function toCanonicalQuantity(value: number, unit: string): number {
-  return value * getNormalizedUnitInfo(unit).factorToCanonical;
-}
-
-function fromCanonicalQuantity(canonicalValue: number, unit: string): number {
-  const { factorToCanonical } = getNormalizedUnitInfo(unit);
-  return Number((canonicalValue / factorToCanonical).toFixed(4));
-}
-
 function parseConversionFactorsJson(
   raw: unknown,
 ): Record<string, number> | undefined {
@@ -2341,7 +2310,13 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
             { contractId: targetContractId, orgId: safeOrgId },
           );
           const existingLines = lineRows.map(mapContractLineRow);
-          if (!contractPayloadMatchesExisting(input, existingContract, existingLines)) {
+          const laneInputs = await tx.query<{ laneId: string; inputId: string | null }>(
+            "sql",
+            "SELECT laneId, inputId FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId",
+            { orgId: safeOrgId },
+          );
+          if (!contractPayloadMatchesExisting(input, existingContract, existingLines,
+            new Map(laneInputs.map((lane) => [lane.laneId, lane.inputId])))) {
             throw new WorkspaceConflictError(
               "Idempotency key was already used for a different contract payload",
             );
@@ -2670,15 +2645,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           "sql",
           `UPDATE SUPPLIES_LANE SET
             allocationSplitPct = :allocationSplitPct,
-            volumeSharePct = :volumeSharePct,
-            annualVolume = :annualVolume,
-            annualSpendEur = :annualSpendEur
+            volumeSharePct = :volumeSharePct
            WHERE laneId = :laneId AND ownerOrgId = :orgId`,
           {
             allocationSplitPct: lane.allocationSplitPct ?? null,
             volumeSharePct: lane.volumeSharePct,
-            annualVolume: lane.annualVolume,
-            annualSpendEur: lane.annualSpendEur,
             laneId: lane.laneId,
             orgId: safeOrgId,
           },
@@ -2696,6 +2667,7 @@ function contractPayloadMatchesExisting(
   input: CreateContractWithLinesAtomicInput,
   existingContract: Contract,
   existingLines: readonly ContractLine[],
+  laneInputs: ReadonlyMap<string, string | null>,
 ): boolean {
   const defaultExpiry =
     input.contract.contractType === "SPOT_PO" ? "AUTO_ARCHIVE" : "HOLDOVER";
@@ -2736,6 +2708,7 @@ function contractPayloadMatchesExisting(
   }) =>
     JSON.stringify([
       l.laneId ?? "",
+      l.inputId ?? null,
       l.cadence ?? "",
       l.committedVolume ?? null,
       l.unit ?? "",
@@ -2747,7 +2720,10 @@ function contractPayloadMatchesExisting(
     ]);
 
   const existingSorted = existingLines.map(normalizeLine).sort();
-  const incomingSorted = input.lines.map(normalizeLine).sort();
+  const incomingSorted = input.lines.map((line) => normalizeLine({
+    ...line,
+    inputId: line.inputId ?? laneInputs.get(line.laneId) ?? null,
+  })).sort();
   for (let i = 0; i < existingSorted.length; i += 1) {
     if (existingSorted[i] !== incomingSorted[i]) {
       return false;
@@ -2836,42 +2812,13 @@ function computeAtomicSplitMutations(
     updates.map((u) => [u.laneId, u.allocationSplitPct]),
   );
 
-  // Normalize compatible legacy volumes (e.g., TONNES + KG -> KG) before redistributing
-  const lanesWithVolume = targetLanes.filter(
-    (l) => l.annualVolume !== null && l.annualVolume > 0,
-  );
-  const canScaleLegacyVolume =
-    lanesWithVolume.length > 0 &&
-    areUnitsCompatible(targetLanes.map((l) => l.volumeUnit));
-  const totalCanonicalLegacyVol = canScaleLegacyVolume
-    ? lanesWithVolume.reduce(
-        (sum, l) => sum + toCanonicalQuantity(l.annualVolume!, l.volumeUnit),
-        0,
-      )
-    : 0;
-
-  const totalLegacySpend = targetLanes.reduce(
-    (sum, l) => sum + (l.annualSpendEur ?? 0),
-    0,
-  );
-
+  // Preserve source quantities; allocation is applied once by the engine.
   const updatedLanes = targetLanes.map((lane) => {
     const pct = pctByLaneId.get(lane.laneId)!;
-    const nextVolume =
-      canScaleLegacyVolume && totalCanonicalLegacyVol > 0
-        ? fromCanonicalQuantity((totalCanonicalLegacyVol * pct) / 100, lane.volumeUnit)
-        : lane.annualVolume;
-    const nextSpend =
-      totalLegacySpend > 0
-        ? Number(((totalLegacySpend * pct) / 100).toFixed(2))
-        : lane.annualSpendEur;
-
     return SupplyLaneSchema.parse({
       ...lane,
       allocationSplitPct: pct,
       volumeSharePct: pct,
-      annualVolume: nextVolume,
-      annualSpendEur: nextSpend,
     });
   });
 
@@ -3937,7 +3884,10 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
               l.ownerOrgId === safeOrgId && l.contractId === targetContractId,
           )
           .map((l) => ({ ...l }));
-        if (!contractPayloadMatchesExisting(input, existing, existingLines)) {
+        const laneInputs = new Map(Array.from(this.lanes.values())
+          .filter((lane) => lane.ownerOrgId === safeOrgId)
+          .map((lane) => [lane.laneId, lane.inputId] as const));
+        if (!contractPayloadMatchesExisting(input, existing, existingLines, laneInputs)) {
           throw new WorkspaceConflictError(
             "Idempotency key was already used for a different contract payload",
           );

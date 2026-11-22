@@ -84,7 +84,7 @@ function attachDownstreamLaneCommercials<
     inputs,
     contracts,
     contractLines,
-    options,
+    { ...options, facilities },
   );
   return {
     ...financialRisk,
@@ -300,7 +300,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
-      { asOfDate: isoDate, viewMode },
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
     );
 
     const financialRisk = attachDownstreamLaneCommercials(
@@ -375,7 +375,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
-      { asOfDate: isoDate, viewMode },
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
     );
     const incotermsByLaneId = buildLaneIncotermsMap(
       network.contracts,
@@ -433,7 +433,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
-      { asOfDate: isoDate, viewMode },
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
     );
 
     const financialRisk = attachDownstreamLaneCommercials(
@@ -635,7 +635,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       network.inputs,
       network.contracts ?? [],
       network.contractLines ?? [],
-      { asOfDate: isoDate, viewMode },
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
     );
     const baselineScale =
       viewMode === "RUN_RATE"
@@ -846,7 +846,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       network.inputs,
       network.contracts ?? [],
       simulatedContractLines,
-      { asOfDate: isoDate, viewMode },
+      { asOfDate: isoDate, viewMode, facilities: network.facilities },
     );
 
     const simulatedFinancialRisk = computeFinancialRiskSummary({

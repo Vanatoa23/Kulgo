@@ -5,8 +5,9 @@ import type {
   SupplyLane,
 } from "@kulgo/shared";
 import { Archive, CalendarPlus, FileText, Plus } from "lucide-react";
-import { useEffect, useState } from "react";
+import { useRef, useState } from "react";
 import {
+  ApiError,
   createContract,
   updateContract,
 } from "../lib/api.js";
@@ -62,37 +63,9 @@ export function LaneContractsDrawerSection({
     new Date().toISOString().slice(0, 10),
   );
   const [endDate, setEndDate] = useState(() => addOneYearIso(null));
-  const [draftIdempotencyKey, setDraftIdempotencyKey] = useState(() =>
-    typeof crypto !== "undefined" && "randomUUID" in crypto
-      ? crypto.randomUUID()
-      : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-  );
-
-  const rotateIdempotencyKey = () => {
-    setDraftIdempotencyKey(
-      typeof crypto !== "undefined" && "randomUUID" in crypto
-        ? crypto.randomUUID()
-        : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
-    );
-  };
-
-  // Rotate the idempotency key whenever the user edits any draft field so an edited
-  // resubmission never reuses an already-committed key, while an unchanged retry does.
-  useEffect(() => {
-    rotateIdempotencyKey();
-  }, [
-    lane.laneId,
-    title,
-    contractType,
-    pricingModel,
-    expiryBehavior,
-    cadence,
-    startDate,
-    endDate,
-    noticePeriodDays,
-    volume,
-    spend,
-  ]);
+  const pendingRequest = useRef<Parameters<typeof createContract>[0] | null>(null);
+  const inFlight = useRef(false);
+  const [awaitingConfirmation, setAwaitingConfirmation] = useState(false);
 
   const laneLines = contractLines.filter((l) => l.laneId === lane.laneId);
   const contractById = new Map(contracts.map((c) => [c.contractId, c]));
@@ -107,6 +80,7 @@ export function LaneContractsDrawerSection({
 
   const handleCreateContract = async (e: React.FormEvent) => {
     e.preventDefault();
+    if (inFlight.current) return;
     setError(null);
 
     const trimmedStart = startDate.trim();
@@ -142,6 +116,7 @@ export function LaneContractsDrawerSection({
         ? Math.max(0, Math.round(Number(noticePeriodDays) || 0))
         : 0;
 
+    inFlight.current = true;
     setSaving(true);
     try {
       const shouldPreserveLegacyBase =
@@ -159,7 +134,8 @@ export function LaneContractsDrawerSection({
 
       // Single atomic/idempotent server request so partial failures or lost-response
       // retries can never create orphaned or duplicate contracts (#47).
-      await createContract({
+      // Keep the exact submitted snapshot until a response confirms its outcome.
+      pendingRequest.current ??= {
         supplierFacilityId: lane.fromFacilityId,
         title: title.trim() || defaultTitle,
         contractType,
@@ -170,7 +146,9 @@ export function LaneContractsDrawerSection({
         endDate: trimmedEnd ? trimmedEnd : null,
         noticePeriodDays: parsedNotice,
         nonRenewalNoticeGiven: false,
-        idempotencyKey: draftIdempotencyKey,
+        idempotencyKey: typeof crypto !== "undefined" && "randomUUID" in crypto
+          ? crypto.randomUUID()
+          : `${Date.now()}-${Math.random().toString(36).slice(2)}`,
         ...(shouldPreserveLegacyBase
           ? { preserveLegacyBaseForLaneId: lane.laneId }
           : {}),
@@ -185,15 +163,23 @@ export function LaneContractsDrawerSection({
             currency: "EUR",
           },
         ],
-      });
+      };
+      await createContract(pendingRequest.current);
+      pendingRequest.current = null;
+      setAwaitingConfirmation(false);
 
-      // Reset draft fields & rotate idempotency key ONLY after confirmed server success (#47)
+      // Clear the draft only after confirmed server success.
       setVolume("");
       setSpend("");
       setAdding(false);
-      rotateIdempotencyKey();
       await onChanged();
     } catch (err) {
+      // A definitive rejection permits corrections. Network/5xx failures may
+      // have committed, so retry the original snapshot before permitting edits.
+      if (err instanceof ApiError && err.status < 500 && err.status !== 409) {
+        pendingRequest.current = null;
+      }
+      setAwaitingConfirmation(pendingRequest.current !== null);
       setError(err instanceof Error ? err.message : "Failed to save contract");
       // Reconcile contracts state with server so retries never act on stale client state (#47)
       try {
@@ -202,6 +188,7 @@ export function LaneContractsDrawerSection({
         // Keep the original save error visible
       }
     } finally {
+      inFlight.current = false;
       setSaving(false);
     }
   };
@@ -310,7 +297,7 @@ export function LaneContractsDrawerSection({
       )}
 
       {error && (
-        <div className="text-[10px] text-red-300 bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
+        <div role="alert" className="text-[10px] text-red-300 bg-red-500/10 border border-red-500/30 rounded px-2 py-1">
           {error}
         </div>
       )}
@@ -377,7 +364,13 @@ export function LaneContractsDrawerSection({
           onSubmit={(e) => void handleCreateContract(e)}
           className="rounded-md border border-sky-500/35 bg-slate-900/90 p-2.5 space-y-2 text-xs"
         >
-          <div className="grid grid-cols-2 gap-2">
+          {awaitingConfirmation && (
+            <p role="status" className="text-amber-200">
+              The previous save is unconfirmed. Retry that save to check its outcome before editing.
+            </p>
+          )}
+          <fieldset disabled={saving || awaitingConfirmation} className="grid grid-cols-2 gap-2">
+            <legend className="sr-only">Contract details</legend>
             <input
               type="text"
               aria-label="Contract title"
@@ -493,7 +486,7 @@ export function LaneContractsDrawerSection({
               onChange={(e) => setEndDate(e.target.value)}
               className="rounded border border-slate-700 bg-slate-950 px-2 py-1 text-xs text-white"
             />
-          </div>
+          </fieldset>
           <div className="flex justify-end gap-1.5">
             <button
               type="button"
@@ -507,7 +500,7 @@ export function LaneContractsDrawerSection({
               disabled={saving}
               className="rounded bg-sky-500 hover:bg-sky-400 px-2.5 py-1 text-[11px] font-semibold text-white cursor-pointer"
             >
-              {saving ? "Saving..." : "Save Contract"}
+              {saving ? "Saving..." : awaitingConfirmation ? "Retry Previous Save" : "Save Contract"}
             </button>
           </div>
         </form>

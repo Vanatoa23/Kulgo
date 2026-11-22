@@ -1,3 +1,4 @@
+import { commercialRegressionCases } from "./helpers/commercial-regressions.js";
 import { estimateLaneCo2eTonnes, haversineDistanceKm } from "@kulgo/engine";
 import { WorkspaceNetworkResponseSchema } from "@kulgo/shared";
 import { describe, expect, it, vi } from "vitest";
@@ -725,7 +726,7 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     ).toHaveLength(1);
   });
 
-  it("applies allocation splits atomically with unit normalization (1 TONNE + 1000 KG -> 1.2 TONNES + 800 KG) and updates contract lines", async () => {
+  it("saves allocation percentages atomically while preserving legacy source quantities", async () => {
     const app = createTestApp();
     const { cookie } = await registerAndGetCookie(
       app,
@@ -814,7 +815,7 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     });
     expect(badSplit.status).toBe(400);
 
-    // 60/40 split on 1 TONNE + 1000 KG (= 2000 KG) -> 1.2 TONNES + 800 KG
+    // Save the split without rewriting the underlying quantities or units.
     const okSplit = await app.request("/api/v1/workspace/lanes/allocation-splits", {
       method: "PATCH",
       headers: { "Content-Type": "application/json", Cookie: cookie },
@@ -837,11 +838,11 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     const updatedTonnes = splitBody.lanes.find((l) => l.laneId === laneTonnes.laneId)!;
     const updatedKg = splitBody.lanes.find((l) => l.laneId === laneKg.laneId)!;
     expect(updatedTonnes.allocationSplitPct).toBe(60);
-    expect(updatedTonnes.annualVolume).toBeCloseTo(1.2, 4);
-    expect(updatedTonnes.annualSpendEur).toBe(6000);
+    expect(updatedTonnes.annualVolume).toBe(1);
+    expect(updatedTonnes.annualSpendEur).toBe(5000);
     expect(updatedKg.allocationSplitPct).toBe(40);
-    expect(updatedKg.annualVolume).toBeCloseTo(800, 4);
-    expect(updatedKg.annualSpendEur).toBe(4000);
+    expect(updatedKg.annualVolume).toBe(1000);
+    expect(updatedKg.annualSpendEur).toBe(5000);
   });
 
   it("preserves relationshipRole, direction, and allocationSplitPct across CSV export/import round-trips", async () => {
@@ -1395,3 +1396,5 @@ describe("Workspace CRUD API & Demo Seeder (/api/v1/workspace)", () => {
     expect(staleSplit.status).toBe(400);
   });
 });
+
+commercialRegressionCases(() => new InMemoryWorkspaceRepository());

@@ -506,6 +506,7 @@ export function computeFinancialRiskSummary(
           contractLines,
           {
             asOfDate: input.asOfDate,
+            facilities: input.facilities,
             viewMode: input.viewMode ?? "PERIOD_WINDOW",
             windowStart: input.windowStart,
             windowEndExclusive: input.windowEndExclusive,

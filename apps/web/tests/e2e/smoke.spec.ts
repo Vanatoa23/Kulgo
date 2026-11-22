@@ -314,16 +314,31 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
     await volInput.fill("25");
     await spendInput.fill("85000");
 
-    // Fail the first POST /contracts with 500 to simulate partial/transient server error
+    // Definitive validation errors permit edits; uncertain outcomes retain the exact
+    // request, including after a real commit whose response never reaches the browser.
+    const contractRequests: Array<Record<string, unknown>> = [];
     let contractPostFailures = 0;
     await page.route("**/api/v1/workspace/contracts", async (route) => {
-      if (route.request().method() === "POST" && contractPostFailures === 0) {
-        contractPostFailures += 1;
+      if (route.request().method() !== "POST") {
+        await route.continue();
+        return;
+      }
+      contractRequests.push(route.request().postDataJSON());
+      const attempt = contractPostFailures++;
+      if (attempt < 2) {
         await route.fulfill({
-          status: 500,
+          status: attempt === 0 ? 400 : 500,
           contentType: "application/json",
-          body: JSON.stringify({ error: "Simulated transient contract failure" }),
+          body: JSON.stringify({ error: attempt === 0
+            ? "Simulated contract validation error"
+            : "Simulated transient contract failure" }),
         });
+        return;
+      }
+      if (attempt === 2) {
+        const response = await route.fetch();
+        expect(response.status()).toBe(201);
+        await route.abort("failed");
         return;
       }
       await route.continue();
@@ -332,15 +347,27 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
     await startInput.fill("2026-07-01");
     await inspector.getByRole("button", { name: "Save Contract" }).click();
 
-    // Draft MUST be preserved after failure
+    await expect(inspector.getByText("Simulated contract validation error")).toBeVisible();
+    await expect(volInput).toBeEnabled();
+    await volInput.fill("30");
+    await inspector.getByRole("button", { name: "Save Contract" }).click();
+
+    // Draft MUST be preserved after an uncertain failure.
     await expect(
       inspector.getByText("Simulated transient contract failure"),
     ).toBeVisible();
-    await expect(volInput).toHaveValue("25");
+    await expect(volInput).toHaveValue("30");
     await expect(spendInput).toHaveValue("85000");
 
-    // Retry succeeds -> exactly ONE Base Agreement and ONE Spot Top-Up
-    await inspector.getByRole("button", { name: "Save Contract" }).click();
+    await expect(volInput).toBeDisabled();
+    await expect(inspector.getByLabel("Contract title")).toBeDisabled();
+    await inspector.getByRole("button", { name: "Retry Previous Save" }).click();
+    // The server committed this retry, but the response was dropped. Refreshing
+    // the list alone must not permit editing/resubmitting under a fresh key.
+    await expect(inspector.getByRole("button", { name: "Retry Previous Save" })).toBeEnabled();
+    await expect(volInput).toBeDisabled();
+    await expect(inspector.getByLabel("Contract title")).toBeDisabled();
+    await inspector.getByRole("button", { name: "Retry Previous Save" }).click();
     await expect(
       inspector.getByText("Base Agreement", { exact: true }),
     ).toHaveCount(1, {
@@ -349,6 +376,10 @@ test.describe("Kulgo Browser E2E Suite — 4-Page UX Shell (#28) & Reliability (
     await expect(
       inspector.getByText("Spot Top-Up", { exact: true }),
     ).toHaveCount(1);
+    expect(contractRequests).toHaveLength(4);
+    expect(contractRequests[1]).toEqual(contractRequests[2]);
+    expect(contractRequests[2]).toEqual(contractRequests[3]);
+    expect(contractRequests[0]!.idempotencyKey).not.toBe(contractRequests[1]!.idempotencyKey);
     await page.unroute("**/api/v1/workspace/contracts");
   });
 });
