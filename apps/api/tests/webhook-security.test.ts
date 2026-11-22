@@ -322,6 +322,51 @@ describe("PATCH /api/v1/alerts/preferences SSRF validation", () => {
     });
     expect(clearRes.status).toBe(200);
   });
+
+  it("enforces a DNS resolution deadline during PATCH /api/v1/alerts/preferences and rejects hanging lookups", async () => {
+    const neverResolvingDns: WebhookDnsLookup = () => new Promise(() => {});
+
+    // Direct call without an external signal still enforces timeoutMs
+    await expect(
+      validateWebhookDestination("https://slow-dns.example/kulgo", {
+        dnsLookup: neverResolvingDns,
+        timeoutMs: 30,
+      }),
+    ).rejects.toThrow("Webhook DNS resolution timed out");
+
+    const app = createTestApp(
+      {},
+      {
+        webhookDnsLookup: neverResolvingDns,
+        webhookValidationTimeoutMs: 40,
+      },
+    );
+    const cookie = await registerOwnerAndGetCookie(
+      app,
+      "owner-slow-dns@webhook-ssrf.eu",
+    );
+
+    const startedAt = Date.now();
+    const res = await app.request("/api/v1/alerts/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ webhookUrl: "https://slow-dns.example/kulgo" }),
+    });
+    const elapsedMs = Date.now() - startedAt;
+
+    expect(res.status).toBe(400);
+    expect(elapsedMs).toBeLessThan(1_000);
+    const body = (await res.json()) as { error: string };
+    expect(body.error).toContain("timed out");
+
+    // Ensure the timed-out webhook URL was not persisted
+    const getRes = await app.request("/api/v1/alerts/preferences", {
+      headers: { Cookie: cookie },
+    });
+    expect(getRes.status).toBe(200);
+    const pref = (await getRes.json()) as { webhookUrl: string | null };
+    expect(pref.webhookUrl).toBeNull();
+  });
 });
 
 describe("dispatchInstantRedAlerts webhook SSRF, redirect, DNS-change & timeout protection", () => {

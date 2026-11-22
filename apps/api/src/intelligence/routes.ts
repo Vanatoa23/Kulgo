@@ -13,6 +13,7 @@ import type { AuthRepository } from "../auth/repository.js";
 import type { AlertRepository } from "./alert-repository.js";
 import type { IntelligenceRunner } from "./runner.js";
 import {
+  DEFAULT_WEBHOOK_TIMEOUT_MS,
   MAX_WEBHOOK_URL_LENGTH,
   validateWebhookDestination,
   type WebhookDnsLookup,
@@ -86,6 +87,7 @@ export interface AlertRoutesDependencies {
   alertRepo: AlertRepository;
   intelligenceRunner: IntelligenceRunner;
   webhookDnsLookup?: WebhookDnsLookup;
+  webhookValidationTimeoutMs?: number;
 }
 
 export function createAlertRoutes({
@@ -93,6 +95,7 @@ export function createAlertRoutes({
   alertRepo,
   intelligenceRunner,
   webhookDnsLookup,
+  webhookValidationTimeoutMs = DEFAULT_WEBHOOK_TIMEOUT_MS,
 }: AlertRoutesDependencies): Hono<{ Variables: AuthVariables }> {
   const routes = new Hono<{ Variables: AuthVariables }>();
   const requireAuth = createRequireAuth(authRepo);
@@ -186,9 +189,14 @@ export function createAlertRoutes({
     }
 
     if (parsed.data.webhookUrl) {
+      const controller = new AbortController();
+      const timer = setTimeout(() => {
+        controller.abort();
+      }, webhookValidationTimeoutMs);
       try {
         await validateWebhookDestination(parsed.data.webhookUrl, {
           dnsLookup: webhookDnsLookup,
+          signal: controller.signal,
         });
       } catch (err) {
         return c.json(
@@ -200,6 +208,8 @@ export function createAlertRoutes({
           },
           400,
         );
+      } finally {
+        clearTimeout(timer);
       }
     }
 

@@ -231,6 +231,7 @@ export async function validateWebhookDestination(
   options: {
     dnsLookup?: WebhookDnsLookup;
     signal?: AbortSignal;
+    timeoutMs?: number;
   } = {},
 ): Promise<ValidatedWebhookTarget> {
   const trimmed = rawUrl.trim();
@@ -310,14 +311,35 @@ export async function validateWebhookDestination(
   }
 
   const dnsLookup = options.dnsLookup ?? defaultWebhookDnsLookup;
+  let localController: AbortController | null = null;
+  let timer: ReturnType<typeof setTimeout> | null = null;
+  let lookupSignal = options.signal;
+
+  if (!lookupSignal || options.timeoutMs !== undefined) {
+    const deadlineMs = options.timeoutMs ?? DEFAULT_WEBHOOK_TIMEOUT_MS;
+    localController = new AbortController();
+    timer = setTimeout(() => {
+      localController?.abort(
+        new WebhookSecurityError("Webhook DNS resolution timed out"),
+      );
+    }, deadlineMs);
+    lookupSignal = lookupSignal
+      ? AbortSignal.any([lookupSignal, localController.signal])
+      : localController.signal;
+  }
+
   let resolved: readonly ResolvedIpAddress[];
   try {
-    resolved = await raceWithSignal(dnsLookup(normalizedHost), options.signal);
+    resolved = await raceWithSignal(dnsLookup(normalizedHost), lookupSignal);
   } catch (err) {
     if (err instanceof WebhookSecurityError) {
       throw err;
     }
     throw new WebhookSecurityError("Webhook hostname could not be resolved");
+  } finally {
+    if (timer !== null) {
+      clearTimeout(timer);
+    }
   }
 
   if (resolved.length === 0) {

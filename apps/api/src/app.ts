@@ -71,6 +71,7 @@ export interface AppDependencies {
   alertRepo?: AlertRepository;
   intelligenceRunner?: IntelligenceRunner;
   webhookDnsLookup?: WebhookDnsLookup;
+  webhookValidationTimeoutMs?: number;
   onRequestLog?: (entry: RequestLogEntry) => void;
 }
 
@@ -101,6 +102,7 @@ export function createApp({
   }),
   alertRepo = new ArcadeDbAlertRepository(db),
   webhookDnsLookup,
+  webhookValidationTimeoutMs,
   intelligenceRunner = new IntelligenceRunner({
     authRepo,
     workspaceRepo,
@@ -242,6 +244,7 @@ export function createApp({
       alertRepo,
       intelligenceRunner,
       webhookDnsLookup,
+      webhookValidationTimeoutMs,
     }),
   );
 
@@ -258,6 +261,7 @@ export function createApp({
 export interface CreateTestAppOptions {
   onRequestLog?: (entry: RequestLogEntry) => void;
   webhookDnsLookup?: WebhookDnsLookup;
+  webhookValidationTimeoutMs?: number;
   fetchFn?: typeof fetch;
 }
 
@@ -342,6 +346,7 @@ export function createTestApp(
     alertRepo,
     intelligenceRunner,
     webhookDnsLookup,
+    webhookValidationTimeoutMs: options.webhookValidationTimeoutMs,
     onRequestLog: options.onRequestLog,
   });
 }
