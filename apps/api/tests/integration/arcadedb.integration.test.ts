@@ -1,3 +1,5 @@
+import { createInvitationFixture, invitationConcurrencyCases } from "../invitation-concurrency-cases.js";
+import { ArcadeDbInvitationRepository } from "../../src/invites/repository.js";
 import { randomUUID } from "node:crypto";
 import { verifyConcurrentOwnerRemoval } from "../helpers/member-removal.js";
 import { memberRemovalCases } from "../helpers/member-removal-cases.js";
@@ -16,7 +18,7 @@ import {
 import { beforeAll, describe, expect, it } from "vitest";
 import { createApp } from "../../src/app.js";
 import { loadConfig } from "../../src/config.js";
-import { HttpArcadeDbClient } from "../../src/db/client.js";
+import { HttpArcadeDbClient, type ArcadeDbClient, type QueryLanguage } from "../../src/db/client.js";
 import { bootstrapSchema } from "../../src/db/schema.js";
 import { ArcadeDbWorkspaceRepository } from "../../src/workspace/repository.js";
 
@@ -91,6 +93,88 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
       user: config.ARCADEDB_USER, password: config.ARCADEDB_PASSWORD,
     });
     await verifyConcurrentOwnerRemoval(app, createApp({ config, db: otherDb }));
+  });
+
+  // Separate repository instances ensure this exercises database concurrency,
+  // rather than accidentally passing because of a per-instance JavaScript lock.
+  invitationConcurrencyCases((race = false) => {
+    let pendingReads = 0;
+    let release!: () => void;
+    const bothReadPending = new Promise<void>(resolve => { release = resolve; });
+    const raceDb: ArcadeDbClient = {
+      healthCheck: () => db.healthCheck(), ensureDatabase: () => db.ensureDatabase(),
+      query: (language, statement, params) => db.query(language, statement, params),
+      command: (language, statement, params) => db.command(language, statement, params),
+      transaction: work => db.transaction(scoped => work({ ...scoped,
+        query: async <T = Record<string, unknown>>(language: QueryLanguage, statement: string, params?: Record<string, unknown>) => {
+          const result = await scoped.query<T>(language, statement, params);
+          // Force both transactions to observe PENDING before either writes.
+          // Retries pass straight through after the first pair has arrived.
+          if (race && statement.includes("FROM Invitation") && pendingReads < 2) {
+            if (++pendingReads === 2) release();
+            await bothReadPending;
+          }
+          return result;
+        },
+      })),
+    };
+    const auth = new ArcadeDbAuthRepository(db);
+    const workspace = new ArcadeDbWorkspaceRepository(db);
+    const deps = { authRepo: auth, workspaceRepo: workspace };
+    return { auth, workspace,
+      invites: new ArcadeDbInvitationRepository(raceDb, deps),
+      competingInvites: new ArcadeDbInvitationRepository(raceDb, deps) };
+  });
+
+  it("rolls back invitation, edge, and facility refinement when a later directory update fails", async () => {
+    const auth = new ArcadeDbAuthRepository(db);
+    const workspace = new ArcadeDbWorkspaceRepository(db);
+    const deps = { authRepo: auth, workspaceRepo: workspace };
+    const invites = new ArcadeDbInvitationRepository(db, deps);
+    const f = await createInvitationFixture({ auth, workspace, invites });
+    const invite = await f.create();
+    const failingDb: ArcadeDbClient = {
+      healthCheck: () => db.healthCheck(), ensureDatabase: () => db.ensureDatabase(),
+      query: (language, statement, params) => db.query(language, statement, params),
+      command: (language, statement, params) => db.command(language, statement, params),
+      transaction: work => db.transaction(scoped => work({ ...scoped,
+        command: async (language, statement, params) => {
+          if (statement.startsWith("UPDATE Organization SET")) throw new Error("injected directory failure");
+          return scoped.command(language, statement, params);
+        },
+      })),
+    };
+    const failingInvites = new ArcadeDbInvitationRepository(failingDb, deps);
+    await expect(failingInvites.acceptInvite(invite.inviteToken, f.supplier1, {
+      openToNewBuyers: true,
+      refinedSite: { kind: "FACTORY", lat: 60, lng: 25, countryCode: "FI" },
+    })).rejects.toThrow("injected directory failure");
+    expect((await invites.listInvitesByOrg(f.buyer))[0]!.status).toBe("PENDING");
+    expect(await invites.listVerifiedPartnerLinksForOrg(f.buyer)).toHaveLength(0);
+    const facility = await workspace.getFacilityById(f.buyer, f.facility.facilityId);
+    expect(facility!.isPartnerVerified).toBe(false);
+    expect(facility!.lat).toBe(59);
+    expect((await auth.findOrganizationById(f.supplier1))!.openToNewBuyers).toBe(false);
+    // Failed transactions must not leave a reservation or unique-index entry.
+    await invites.acceptInvite(invite.inviteToken, f.supplier1, {});
+    expect(await invites.listVerifiedPartnerLinksForOrg(f.buyer)).toHaveLength(1);
+  });
+
+  it("enforces one partner edge per buyer facility even for a direct database write", async () => {
+    const auth = new ArcadeDbAuthRepository(db);
+    const workspace = new ArcadeDbWorkspaceRepository(db);
+    const invites = new ArcadeDbInvitationRepository(db, { authRepo: auth, workspaceRepo: workspace });
+    const f = await createInvitationFixture({ auth, workspace, invites });
+    const invite = await f.create();
+    await invites.acceptInvite(invite.inviteToken, f.supplier1, {});
+    await expect(db.command("sql", `CREATE EDGE VERIFIED_PARTNER_LINK
+      FROM (SELECT FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :buyer)
+      TO (SELECT FROM Organization WHERE orgId = :supplier)
+      SET inviteId = :inviteId, linkedAt = :linkedAt`, {
+      facilityId: f.facility.facilityId, buyer: f.buyer, supplier: f.supplier2,
+      inviteId: randomUUID(), linkedAt: new Date().toISOString(),
+    })).rejects.toThrow(/DuplicatedKeyException|duplicat/i);
+    expect(await invites.listVerifiedPartnerLinksForOrg(f.buyer)).toHaveLength(1);
   });
 
   it("verifies live /api/v1/health, auth register/login/session, and org ESG profile update against ArcadeDB", async () => {

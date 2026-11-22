@@ -23,5 +23,8 @@ When a Tier-1 supplier (`Org B`) accepts a Kulgo invitation from a buyer (`Org A
 3. **Contract Layer:** `AnalyticsSummarySchema` and `AnonymizedRiskAlertSchema` in `@kulgo/shared` use `.strict()`, causing Zod to throw if any unexpected Tier-2+ field is ever attached.
 4. **CI Gate:** `pnpm test:privacy` (`apps/api/tests/privacy-boundary.test.ts`) runs on every pull request and blocks merge on any privacy violation.
 
+## Invitation Transitions
+Accepting a pending, unexpired invitation consumes it and creates its verified partner link in one ArcadeDB transaction, including facility refinement, connected-lane recalculation, and any requested directory update. A unique index on the link's outgoing buyer-facility endpoint enforces one partner per placeholder across all invitations. Accept and revoke compete for the same pending invitation: only one transition commits; the loser receives HTTP 409 after revalidation. Distinct invitations to an already-linked facility also receive HTTP 409 and remain pending. The in-memory repository serializes invitation transitions to preserve these concurrency rules in tests and local development.
+
 ## Opt-In Alternative Supplier Directory
 Suppliers joining Kulgo may explicitly opt in (`openToNewBuyers = true`) to appear in Kulgo's alternative-supplier directory. Directory profiles expose only self-declared public capability info (name, country, capabilities, ESG badges) and **never** reveal existing buyers or private supply links.

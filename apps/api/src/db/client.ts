@@ -14,6 +14,8 @@ export interface ArcadeDbHealth {
 }
 
 export interface ArcadeDbClient {
+  /** The callback must contain only database work: it can be retried on conflicts. */
+  transaction?<T>(work: (db: ArcadeDbClient) => Promise<T>): Promise<T>;
   healthCheck(): Promise<ArcadeDbHealth>;
   ensureDatabase(): Promise<void>;
   query<T = Record<string, unknown>>(
@@ -29,6 +31,18 @@ export interface ArcadeDbClient {
 }
 
 const DEFAULT_QUERY_TIMEOUT_MS = 10_000;
+
+class ArcadeDbRequestError extends Error {
+  constructor(readonly status: number, readonly detail: string) {
+    super(`ArcadeDB request error (${status}): ${detail}`);
+  }
+
+  get isConflict(): boolean {
+    // Retry only explicit database concurrency failures, never a transport error
+    // or a timeout whose commit outcome could be unknown.
+    return /(?:ConcurrentModificationException|NeedRetryException|DuplicatedKeyException)/.test(this.detail);
+  }
+}
 
 /**
  * Hardened ArcadeDB HTTP/JSON client.
@@ -123,11 +137,52 @@ export class HttpArcadeDbClient implements ArcadeDbClient {
     return this.execute<T>("command", language, statement, params);
   }
 
+  async transaction<T>(work: (db: ArcadeDbClient) => Promise<T>): Promise<T> {
+    for (let attempt = 0; ; attempt++) {
+      const begin = await this.sessionRequest("begin");
+      const sessionId = begin.headers.get("arcadedb-session-id");
+      if (!sessionId) throw new Error("ArcadeDB did not return a transaction session");
+      const scoped: ArcadeDbClient = {
+        healthCheck: () => this.healthCheck(),
+        ensureDatabase: async () => { throw new Error("Schema changes are not allowed in a transaction"); },
+        query: (language, statement, params = {}) => this.execute("query", language, statement, params, sessionId),
+        command: (language, statement, params = {}) => this.execute("command", language, statement, params, sessionId),
+      };
+      try {
+        const result = await work(scoped);
+        await this.sessionRequest("commit", sessionId);
+        return result;
+      } catch (error) {
+        // A failed command/commit may already have closed the session. Rollback
+        // is idempotent; preserve the original failure if cleanup also fails.
+        await this.sessionRequest("rollback", sessionId).catch(() => undefined);
+        if (!(error instanceof ArcadeDbRequestError) || !error.isConflict || attempt >= 4) throw error;
+        await new Promise(resolve => setTimeout(resolve, 10 * (attempt + 1) + Math.random() * 20));
+      }
+    }
+  }
+
+  private async sessionRequest(action: "begin" | "commit" | "rollback", sessionId?: string): Promise<Response> {
+    const response = await fetch(`${this.baseUrl}/api/v1/${action}/${encodeURIComponent(this.database)}`, {
+      method: "POST",
+      headers: {
+        Authorization: this.authHeader,
+        "Content-Type": "application/json",
+        ...(sessionId ? { "arcadedb-session-id": sessionId } : {}),
+      },
+      ...(action === "begin" ? { body: JSON.stringify({ isolationLevel: "REPEATABLE_READ" }) } : {}),
+      signal: AbortSignal.timeout(this.queryTimeoutMs),
+    });
+    if (!response.ok) throw new ArcadeDbRequestError(response.status, await response.text());
+    return response;
+  }
+
   private async execute<T>(
     endpoint: "query" | "command",
     language: QueryLanguage,
     statement: string,
     params: Record<string, unknown>,
+    sessionId?: string,
   ): Promise<T[]> {
     const res = await fetch(
       `${this.baseUrl}/api/v1/${endpoint}/${encodeURIComponent(this.database)}`,
@@ -136,6 +191,7 @@ export class HttpArcadeDbClient implements ArcadeDbClient {
         headers: {
           Authorization: this.authHeader,
           "Content-Type": "application/json",
+          ...(sessionId ? { "arcadedb-session-id": sessionId } : {}),
         },
         body: JSON.stringify({
           language,
@@ -147,7 +203,7 @@ export class HttpArcadeDbClient implements ArcadeDbClient {
     );
     if (!res.ok) {
       const text = await res.text();
-      throw new Error(`ArcadeDB ${endpoint} error (${res.status}): ${text}`);
+      throw new ArcadeDbRequestError(res.status, text);
     }
     const json = (await res.json()) as { result?: T[] };
     return json.result ?? [];
