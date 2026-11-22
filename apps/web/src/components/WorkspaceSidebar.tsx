@@ -51,6 +51,7 @@ import type {
   Contract,
   ContractLine,
   FinancialViewMode,
+  Organization,
 } from "@kulgo/shared";
 import {
   formatEur,
@@ -73,6 +74,7 @@ export interface WorkspaceSidebarProps {
   activeTab: SidebarTab;
   onChangeTab: (tab: SidebarTab) => void;
   userRole?: UserRole;
+  organization?: Organization;
   products: readonly Product[];
   inputs: readonly SupplyInput[];
   facilities: readonly Facility[];
@@ -139,6 +141,7 @@ export function WorkspaceSidebar({
   activeTab,
   onChangeTab,
   userRole = "OWNER",
+  organization,
   products,
   inputs,
   facilities,
@@ -606,6 +609,7 @@ export function WorkspaceSidebar({
             analytics={analytics}
             loading={loadingAnalytics}
             facilities={facilities}
+            organization={organization}
             financialViewMode={financialViewMode}
             onChangeFinancialViewMode={onChangeFinancialViewMode}
             onQuickFillInputs={() => onChangeTab("lane")}

@@ -1,6 +1,7 @@
 import {
   AnalyticsSummarySchema,
   AnonymizedRiskAlertSchema,
+  EsgLedgerResponseSchema,
   ExecutiveReportSchema,
   SimulateAnalyticsResponseSchema,
   WorkspaceExportJsonSchema,
@@ -523,7 +524,14 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     ).toBe(false);
     const baselineUpstreamScope3 = beforeSummary.esg.upstreamScope3Tco2e;
 
-    // 2. Org B maps its own private upstream network with hidden Tier-2 supplier Org C (in sanctioned RU)
+    // 2. Org B sets private revenue and maps its own private upstream network with hidden Tier-2 supplier Org C (in sanctioned RU)
+    const bOrgPatchRes = await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({ annualRevenueEur: 812345 }),
+    });
+    expect(bOrgPatchRes.status).toBe(200);
+
     const bOwnRes = await app.request("/api/v1/workspace/facilities", {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
@@ -747,6 +755,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       "Raw Nickel Ore",
       "Tampere Processing Plant",
       bOwn.facilityId,
+      "812345",
     ];
 
     for (const secret of forbiddenSecrets) {
@@ -1322,6 +1331,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         materialCategory: "Modules",
         transportMode: "SEA",
         volumeSharePct: 100,
+        economicAttributionRatio: 0.5,
       }),
     });
 
@@ -1373,6 +1383,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         materialCategory: "Clean Subcomponents",
         transportMode: "SEA",
         volumeSharePct: 100,
+        economicAttributionRatio: 1,
         riskStatus: "GREEN",
       }),
     });
@@ -1499,7 +1510,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     // Evaluate Org A's analytics:
     // 1. Cycle A -> B -> C -> A terminates cleanly without infinite recursion or double-counting Org A's 100 tCO2e.
     // 2. Because Org B bound fulfilledByFacilityId = bOwnNorthId, Plant South's sanctioned RU lane is NOT part of Plant North's subgraph,
-    //    and Org A's upstream Scope 3 equals Plant North (80) + Org C (50) = 130 tCO2e.
+    //    and Org A's 50% proportional share of Plant North (80) + Org C (50) = 65 tCO2e.
     const summaryARes = await app.request("/api/v1/analytics/summary", {
       headers: { Cookie: orgA.cookie },
     });
@@ -1508,7 +1519,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(
       summaryA.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
     ).toBe(false);
-    expect(summaryA.esg.upstreamScope3Tco2e).toBe(130);
+    expect(summaryA.esg.upstreamScope3Tco2e).toBe(65);
   });
 });
 
@@ -1766,5 +1777,404 @@ describe("Privacy Boundary Contract (Sub-Project 2 Financial Risk & Contracts)",
     expect(summaryText).not.toContain("eventGroupId");
   });
 });
+
+describe("Privacy Boundary Contract (Sub-Project 3 ESG Ledger & Partner Economic Intensity)", () => {
+  it("computes server-side ECONOMIC_INTENSITY attribution for a verified partner without ever leaking partner annualRevenueEur across summary, report, JSON/CSV ledger, or directory", async () => {
+    const app = createTestApp();
+
+    // Unauthenticated access to /api/v1/analytics/esg-ledger is rejected
+    expect((await app.request("/api/v1/analytics/esg-ledger")).status).toBe(401);
+
+    const orgA = await registerOrg(app, "buyer-sp3@tallinn.ee", "Tallinn Buyer SP3");
+    const orgB = await registerOrg(app, "partner-sp3@shenzhen.cn", "Shenzhen Partner SP3");
+
+    // Org B sets Scope 1+2 (10,000 tCO2e) and PRIVATE annualRevenueEur (20,000,000 EUR -> intensity = 0.0005 tCO2e/EUR)
+    // and opts into the directory
+    const orgBProfileRes = await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        scope1Tco2e: 4000,
+        scope2Tco2e: 6000,
+        annualRevenueEur: 20_000_000,
+        openToNewBuyers: true,
+        capabilities: ["PCB Assembly"],
+      }),
+    });
+    expect(orgBProfileRes.status).toBe(200);
+
+    // Org A sets targetMarkets and creates own facility + Tier-1 supplier + spend-based lane (€1,000,000 -> 5% of Org B -> 500 tCO2e)
+    await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        scope1Tco2e: 100,
+        scope2Tco2e: 150,
+        scope2MarketTco2e: 180,
+        annualRevenueEur: 5_000_000,
+        targetMarkets: ["EU", "UK"],
+      }),
+    });
+
+    const ownRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Tallinn HQ Plant",
+        kind: "FACTORY",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: ownFac } = (await ownRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const supRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Shenzhen PCB Tier-1",
+        kind: "FACTORY",
+        countryCode: "CN",
+        lat: 22.5431,
+        lng: 114.0579,
+        isOwnFacility: false,
+        sector: "Electronics",
+      }),
+    });
+    const { facility: supFac } = (await supRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        fromFacilityId: supFac.facilityId,
+        toFacilityId: ownFac.facilityId,
+        materialCategory: "Driver PCBs",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+        annualVolume: 50_000,
+        volumeUnit: "UNITS",
+        annualSpendEur: 1_000_000,
+      }),
+    });
+
+    // Link Org A's Tier-1 facility to Org B via verified partner invite
+    const invRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        targetFacilityId: supFac.facilityId,
+        inviteeEmail: "partner-sp3@shenzhen.cn",
+      }),
+    });
+    const { inviteToken } = (await invRes.json()) as { inviteToken: string };
+    const accRes = await app.request(`/api/v1/invites/${inviteToken}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({}),
+    });
+    expect(accRes.status).toBe(200);
+
+    // 1. Check /api/v1/analytics/summary
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summaryText = await summaryRes.text();
+    const summary = AnalyticsSummarySchema.parse(JSON.parse(summaryText));
+    // €1,000,000 * (10,000 / 20,000,000 = 0.0005 tCO2e/EUR) = 500 tCO2e (NOT 10,000 tCO2e!)
+    expect(summary.esg.upstreamScope3Tco2e).toBe(500);
+    expect(summary.esg.weightedPcafScore).toBe(2);
+    expect(summary.esg.activeCompliancePacks).toEqual(
+      expect.arrayContaining(["GLOBAL_GHG_ISSB", "EU", "UK"]),
+    );
+    expect(summaryText).not.toContain("20000000");
+    expect(summaryText).not.toContain("20,000,000");
+
+    // 2. Check /api/v1/analytics/esg-ledger?format=json
+    const ledgerJsonRes = await app.request("/api/v1/analytics/esg-ledger?format=json", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(ledgerJsonRes.status).toBe(200);
+    const ledgerText = await ledgerJsonRes.text();
+    const ledger = EsgLedgerResponseSchema.parse(JSON.parse(ledgerText));
+    const cat1Entry = ledger.entries.find((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(cat1Entry?.attributionMethod).toBe("ECONOMIC_INTENSITY");
+    expect(cat1Entry?.pcafScore).toBe(2);
+    expect(cat1Entry?.tco2e).toBe(500);
+    expect(ledgerText).not.toContain("20000000");
+
+    // 3. Check /api/v1/analytics/esg-ledger?format=csv
+    const ledgerCsvRes = await app.request("/api/v1/analytics/esg-ledger?format=csv", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(ledgerCsvRes.status).toBe(200);
+    expect(ledgerCsvRes.headers.get("content-type")).toContain("text/csv");
+    const csvText = await ledgerCsvRes.text();
+    expect(csvText).toContain("ECONOMIC_INTENSITY");
+    expect(csvText).not.toContain("20000000");
+
+    // 4. Check /api/v1/directory/alternatives never leaks Org B's annualRevenueEur
+    const dirRes = await app.request("/api/v1/directory/alternatives", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(dirRes.status).toBe(200);
+    const dirText = await dirRes.text();
+    expect(dirText).not.toContain("20000000");
+    expect(dirText).not.toContain("annualRevenueEur");
+
+    // 5. Check /api/v1/analytics/report includes complianceChecklist & PCAF
+    const reportRes = await app.request("/api/v1/analytics/report", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(reportRes.status).toBe(200);
+    const reportText = await reportRes.text();
+    const report = ExecutiveReportSchema.parse(JSON.parse(reportText));
+    expect(report.csrdDisclosures.weightedPcafScore).toBe(2);
+    expect(report.complianceChecklist?.length).toBeGreaterThan(0);
+    expect(reportText).not.toContain("20000000");
+
+    // 6. Check ESG_LEDGER_EXPORTED audit event was recorded
+    const auditRes = await app.request("/api/v1/auth/audit-log", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(auditRes.status).toBe(200);
+    const auditBody = (await auditRes.json()) as {
+      events: Array<{ action: string }>;
+    };
+    expect(auditBody.events.some((e) => e.action === "ESG_LEDGER_EXPORTED")).toBe(
+      true,
+    );
+  });
+
+  it("resolves org-wide verified upstream summaries when facility-scoped partner link falls back to org revenue", async () => {
+    const app = createTestApp();
+
+    const orgA = await registerOrg(app, "buyer-fallback@alpha.de", "Buyer Alpha GmbH");
+    const orgB = await registerOrg(app, "tier1-fallback@multiplant.fi", "Tier1 Multi-Plant Oy");
+    const orgC = await registerOrg(app, "tier2-fallback@smelter.se", "Tier2 Verified Smelter AB");
+
+    // Org C (Tier-2): 4,000 tCO2e / €4,000,000 = 0.001 tCO2e/EUR
+    expect(
+      (
+        await app.request("/api/v1/auth/organization", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Cookie: orgC.cookie },
+          body: JSON.stringify({
+            scope1Tco2e: 4_000,
+            scope2Tco2e: 0,
+            annualRevenueEur: 4_000_000,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+
+    // Org B (Tier-1): 1,000 tCO2e Scope 1 + €10,000,000 org revenue (no facility-level revenue)
+    expect(
+      (
+        await app.request("/api/v1/auth/organization", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+          body: JSON.stringify({
+            scope1Tco2e: 1_000,
+            scope2Tco2e: 0,
+            annualRevenueEur: 10_000_000,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+
+    // Org B has two own facilities: bFac1 (fulfills Org A, no upstream) and bFac2 (fed by verified Org C)
+    const bFac1Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Helsinki Assembly Plant",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 60.1699,
+        lng: 24.9384,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: bFac1 } = (await bFac1Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const bFac2Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Turku Foundry Plant",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 60.4518,
+        lng: 22.2666,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: bFac2 } = (await bFac2Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    // Co-located Tier-2 supplier node so transport distance = 0 km (0 transport tCO2e)
+    const bTier2Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Upstream Smelter Node",
+        kind: "FACTORY",
+        countryCode: "SE",
+        lat: 60.4518,
+        lng: 22.2666,
+        isOwnFacility: false,
+      }),
+    });
+    const { facility: bTier2 } = (await bTier2Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    // Org B spends €2,000,000 with Org C -> 2,000,000 * 0.001 = 2,000 tCO2e verified upstream
+    expect(
+      (
+        await app.request("/api/v1/workspace/lanes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+          body: JSON.stringify({
+            fromFacilityId: bTier2.facilityId,
+            toFacilityId: bFac2.facilityId,
+            materialCategory: "Refined Alloys",
+            transportMode: "ROAD",
+            volumeSharePct: 100,
+            annualVolume: 1,
+            volumeUnit: "UNITS",
+            annualSpendEur: 2_000_000,
+          }),
+        })
+      ).status,
+    ).toBe(201);
+
+    // Link Org B's bTier2 to Org C
+    const invBCRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        targetFacilityId: bTier2.facilityId,
+        inviteeEmail: "tier2-fallback@smelter.se",
+      }),
+    });
+    const { inviteToken: tokenBC } = (await invBCRes.json()) as {
+      inviteToken: string;
+    };
+    expect(
+      (
+        await app.request(`/api/v1/invites/${tokenBC}/accept`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgC.cookie },
+          body: JSON.stringify({}),
+        })
+      ).status,
+    ).toBe(200);
+
+    // Org A creates its own facility + Tier-1 node co-located (0 transport) and spends €5,000,000
+    const aOwnRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Munich Plant",
+        kind: "FACTORY",
+        countryCode: "DE",
+        lat: 48.1351,
+        lng: 11.582,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: aOwn } = (await aOwnRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const aTier1Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Multi-Plant Supplier",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 48.1351,
+        lng: 11.582,
+        isOwnFacility: false,
+      }),
+    });
+    const { facility: aTier1 } = (await aTier1Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    expect(
+      (
+        await app.request("/api/v1/workspace/lanes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+          body: JSON.stringify({
+            fromFacilityId: aTier1.facilityId,
+            toFacilityId: aOwn.facilityId,
+            materialCategory: "Precision Components",
+            transportMode: "ROAD",
+            volumeSharePct: 100,
+            annualVolume: 1,
+            volumeUnit: "UNITS",
+            annualSpendEur: 5_000_000,
+          }),
+        })
+      ).status,
+    ).toBe(201);
+
+    // Org B accepts Org A's invite scoped specifically to bFac1 (which has no facility revenue and no upstream!)
+    const invABRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        targetFacilityId: aTier1.facilityId,
+        inviteeEmail: "tier1-fallback@multiplant.fi",
+      }),
+    });
+    const { inviteToken: tokenAB } = (await invABRes.json()) as {
+      inviteToken: string;
+    };
+    expect(
+      (
+        await app.request(`/api/v1/invites/${tokenAB}/accept`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+          body: JSON.stringify({
+            fulfilledByFacilityId: bFac1.facilityId,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+
+    // Org-wide fallback must resolve Org C's verified 2,000 tCO2e on bFac2:
+    // Org B org-wide total = 1,000 (Scope 1) + 2,000 (verified Org C) = 3,000 tCO2e
+    // Org B intensity = 3,000 / 10,000,000 = 0.0003 tCO2e/EUR
+    // Org A attribution = €5,000,000 * 0.0003 = 1,500 tCO2e
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summaryText = await summaryRes.text();
+    const summary = AnalyticsSummarySchema.parse(JSON.parse(summaryText));
+    expect(summary.esg.upstreamScope3Tco2e).toBe(1500);
+    expect(summaryText).not.toContain("Turku Foundry Plant");
+    expect(summaryText).not.toContain("Tier2 Verified Smelter");
+    expect(summaryText).not.toContain("10000000");
+    expect(summaryText).not.toContain("4000000");
+  });
+});
+
 
 

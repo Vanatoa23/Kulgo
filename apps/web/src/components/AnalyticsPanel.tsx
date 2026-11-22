@@ -2,6 +2,7 @@ import type {
   AnalyticsSummary,
   Facility,
   FinancialViewMode,
+  Organization,
 } from "@kulgo/shared";
 import {
   AlertOctagon,
@@ -10,16 +11,24 @@ import {
   Building2,
   CheckCircle2,
   Coins,
+  Download,
+  FileText,
+  Globe2,
   Leaf,
   Loader2,
   ShieldAlert,
+  ShieldCheck,
   SlidersHorizontal,
 } from "lucide-react";
+import { useState } from "react";
+import { exportEsgLedgerCsv } from "../lib/api.js";
+import { downloadEsgExecutiveSummaryPdf } from "../lib/esgPdfExport.js";
 
 export interface AnalyticsPanelProps {
   analytics: AnalyticsSummary | null;
   loading: boolean;
   facilities: readonly Facility[];
+  organization?: Organization;
   financialViewMode?: FinancialViewMode;
   onChangeFinancialViewMode?: (mode: FinancialViewMode) => void;
   onQuickFillInputs?: () => void;
@@ -54,6 +63,7 @@ export function AnalyticsPanel({
   analytics,
   loading,
   facilities,
+  organization,
   financialViewMode = "PERIOD_WINDOW",
   onChangeFinancialViewMode,
   onQuickFillInputs,
@@ -61,6 +71,37 @@ export function AnalyticsPanel({
   onOpenSimulator,
   onOpenDirectory,
 }: AnalyticsPanelProps) {
+  const [exportingCsv, setExportingCsv] = useState(false);
+  const [exportError, setExportError] = useState<string | null>(null);
+
+  const handleExportCsvLedger = async () => {
+    setExportingCsv(true);
+    setExportError(null);
+    try {
+      const csv = await exportEsgLedgerCsv();
+      const blob = new Blob([csv], { type: "text/csv;charset=utf-8" });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      a.href = url;
+      a.download = `kulgo-esg-ledger-${analytics?.esg.factorMatrixVersion ?? "2026.1"}.csv`;
+      document.body.appendChild(a);
+      a.click();
+      document.body.removeChild(a);
+      URL.revokeObjectURL(url);
+    } catch (err) {
+      setExportError(
+        err instanceof Error ? err.message : "Failed to export ESG CSV ledger.",
+      );
+    } finally {
+      setExportingCsv(false);
+    }
+  };
+
+  const handleDownloadPdf = () => {
+    if (!analytics || !organization) return;
+    downloadEsgExecutiveSummaryPdf(organization, analytics);
+  };
+
   if (loading && !analytics) {
     return (
       <div className="flex flex-col items-center justify-center py-12 text-xs text-slate-400 gap-2">
@@ -534,17 +575,61 @@ export function AnalyticsPanel({
         )}
       </section>
 
-      {/* Scope 1 / 2 / 3 ESG Emissions Breakdown */}
-      <section className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5 space-y-3">
-        <div className="flex items-center justify-between">
+      {/* Scope 1 / 2 / 3 ESG Emissions Breakdown & PCAF Data Quality */}
+      <section
+        data-testid="esg-compliance-panel"
+        className="rounded-xl border border-slate-800 bg-slate-900/60 p-3.5 space-y-3"
+      >
+        <div className="flex items-center justify-between gap-2">
           <h3 className="text-xs font-semibold uppercase tracking-wider text-slate-400 flex items-center gap-1.5">
             <Leaf className="h-3.5 w-3.5 text-emerald-400" />
-            Scope 1 / 2 / 3 CO2e
+            ESG &amp; Compliance
           </h3>
-          <span className="text-xs font-semibold font-mono text-white">
-            {formatTco2e(analytics.esg.totalTco2e)}
-          </span>
+          <div className="flex items-center gap-1.5">
+            {analytics.esg.factorMatrixVersion && (
+              <span className="rounded bg-slate-800 px-1.5 py-0.5 text-[10px] font-mono text-slate-400">
+                v{analytics.esg.factorMatrixVersion}
+              </span>
+            )}
+            <span className="text-xs font-semibold font-mono text-white">
+              {formatTco2e(analytics.esg.totalTco2e)}
+            </span>
+          </div>
         </div>
+
+        {/* Export actions: Auditor CSV Ledger + Board/Bank-Ready PDF */}
+        <div className="flex flex-wrap items-center gap-2">
+          <button
+            type="button"
+            disabled={exportingCsv}
+            onClick={() => void handleExportCsvLedger()}
+            data-testid="export-esg-csv-btn"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-emerald-500/40 bg-emerald-500/10 px-2.5 py-1 text-[11px] font-medium text-emerald-200 hover:bg-emerald-500/20 disabled:opacity-60 cursor-pointer"
+          >
+            {exportingCsv ? (
+              <Loader2 className="h-3 w-3 animate-spin" />
+            ) : (
+              <Download className="h-3 w-3" />
+            )}
+            CSV Ledger
+          </button>
+          <button
+            type="button"
+            disabled={!organization}
+            onClick={handleDownloadPdf}
+            data-testid="export-esg-pdf-btn"
+            className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-500/10 px-2.5 py-1 text-[11px] font-medium text-sky-200 hover:bg-sky-500/20 disabled:opacity-50 cursor-pointer"
+          >
+            <FileText className="h-3 w-3" />
+            PDF Executive Summary
+          </button>
+        </div>
+
+        {exportError && (
+          <div className="rounded-lg border border-red-500/40 bg-red-500/10 px-2.5 py-1.5 text-[11px] text-red-200">
+            {exportError}
+          </div>
+        )}
 
         {/* Stacked proportional bar */}
         <div className="h-2.5 w-full rounded-full bg-slate-800 overflow-hidden flex">
@@ -556,17 +641,17 @@ export function AnalyticsPanel({
           <div
             className="bg-teal-400"
             style={{ width: `${scope2Pct}%` }}
-            title={`Scope 2: ${analytics.esg.scope2Tco2e} tCO2e`}
+            title={`Scope 2 (Location): ${analytics.esg.scope2Tco2e} tCO2e`}
           />
           <div
             className="bg-indigo-400"
             style={{ width: `${upstreamPct}%` }}
-            title={`Upstream Scope 3: ${analytics.esg.upstreamScope3Tco2e} tCO2e`}
+            title={`Scope 3 Cat 1: ${analytics.esg.upstreamScope3Tco2e} tCO2e`}
           />
           <div
             className="bg-amber-400"
             style={{ width: `${transportPct}%` }}
-            title={`Transport Scope 3: ${analytics.esg.transportScope3Tco2e} tCO2e`}
+            title={`Scope 3 Cat 4 Freight: ${analytics.esg.transportScope3Tco2e} tCO2e`}
           />
         </div>
 
@@ -583,16 +668,22 @@ export function AnalyticsPanel({
           <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-2">
             <div className="flex items-center gap-1.5 text-slate-400">
               <span className="h-2 w-2 rounded-full bg-teal-400" />
-              Scope 2 (Energy)
+              Scope 2 (Loc / Mkt)
             </div>
             <div className="font-mono font-semibold text-white mt-0.5">
-              {formatTco2e(analytics.esg.scope2Tco2e)}
+              {formatTco2e(analytics.esg.scope2LocationTco2e ?? analytics.esg.scope2Tco2e)}
+              {analytics.esg.scope2MarketTco2e !== null &&
+              analytics.esg.scope2MarketTco2e !== undefined ? (
+                <span className="text-[10px] text-teal-300 ml-1">
+                  / {formatTco2e(analytics.esg.scope2MarketTco2e)}
+                </span>
+              ) : null}
             </div>
           </div>
           <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-2">
             <div className="flex items-center gap-1.5 text-slate-400">
               <span className="h-2 w-2 rounded-full bg-indigo-400" />
-              Scope 3 Upstream
+              Scope 3 Cat 1
             </div>
             <div className="font-mono font-semibold text-white mt-0.5">
               {formatTco2e(analytics.esg.upstreamScope3Tco2e)}
@@ -601,13 +692,188 @@ export function AnalyticsPanel({
           <div className="rounded-lg border border-slate-800 bg-slate-950/70 p-2">
             <div className="flex items-center gap-1.5 text-slate-400">
               <span className="h-2 w-2 rounded-full bg-amber-400" />
-              Scope 3 Transport
+              Scope 3 Cat 4 Freight
             </div>
             <div className="font-mono font-semibold text-white mt-0.5">
               {formatTco2e(analytics.esg.transportScope3Tco2e)}
             </div>
           </div>
         </div>
+
+        {/* PCAF 1-5 Data Quality Meter & Carbon Intensity */}
+        <div className="rounded-lg border border-slate-800 bg-slate-950/80 p-2.5 space-y-2">
+          <div className="flex items-center justify-between text-[11px]">
+            <span className="font-medium text-slate-300">
+              PCAF-Aligned Data Quality (1 = Best)
+            </span>
+            <span
+              data-testid="pcaf-weighted-score"
+              className="font-mono font-semibold text-emerald-300"
+            >
+              {analytics.esg.weightedPcafScore !== null &&
+              analytics.esg.weightedPcafScore !== undefined
+                ? `${analytics.esg.weightedPcafScore.toFixed(2)} / 5.0`
+                : "N/A"}
+            </span>
+          </div>
+
+          <div className="grid grid-cols-5 gap-1">
+            {(analytics.esg.pcafBreakdown ?? []).map((bucket) => (
+              <div
+                key={bucket.score}
+                title={`${bucket.label}: ${bucket.tco2e} tCO2e (${bucket.sharePct}%)`}
+                className={`rounded border px-1.5 py-1 text-center text-[10px] ${
+                  bucket.sharePct > 0
+                    ? bucket.score <= 2
+                      ? "border-emerald-500/40 bg-emerald-500/15 text-emerald-200"
+                      : bucket.score === 3
+                        ? "border-sky-500/40 bg-sky-500/15 text-sky-200"
+                        : "border-amber-500/40 bg-amber-500/15 text-amber-200"
+                    : "border-slate-800 bg-slate-900/50 text-slate-500"
+                }`}
+              >
+                <div className="font-bold">P{bucket.score}</div>
+                <div className="font-mono">{Math.round(bucket.sharePct)}%</div>
+              </div>
+            ))}
+          </div>
+
+          <div className="flex flex-wrap items-center justify-between gap-2 text-[10px] text-slate-400">
+            <span>
+              Primary Data Share:{" "}
+              <strong className="text-slate-200">
+                {analytics.esg.primaryDataSharePct ?? 0}%
+              </strong>
+            </span>
+            {analytics.esg.carbonIntensityPerEurMillion !== null &&
+              analytics.esg.carbonIntensityPerEurMillion !== undefined && (
+                <span>
+                  Intensity:{" "}
+                  <strong className="text-slate-200">
+                    {analytics.esg.carbonIntensityPerEurMillion} tCO2e/€M
+                  </strong>
+                </span>
+              )}
+          </div>
+        </div>
+
+        {/* EU CBAM Embedded Emissions Alert */}
+        {analytics.esg.cbamSummary && analytics.esg.cbamSummary.flaggedLanesCount > 0 && (
+          <div className="rounded-lg border border-amber-500/30 bg-amber-500/10 p-2.5 text-[11px] space-y-1">
+            <div className="flex items-center justify-between font-medium text-amber-200">
+              <span>EU CBAM Screening</span>
+              <span className="font-mono text-[10px]">
+                {analytics.esg.cbamSummary.cumulativeMassTonnes} t /{" "}
+                {analytics.esg.cbamSummary.deMinimisThresholdTonnes} t threshold
+              </span>
+            </div>
+            <p className="text-[10px] text-amber-100/80">
+              {analytics.esg.cbamSummary.euCbamApplicable
+                ? `${analytics.esg.cbamSummary.flaggedLanesCount} non-EU CBAM lane(s) (${analytics.esg.cbamSummary.defaultFactorLanesCount} using default factors). Collect verified supplier actuals.`
+                : `Below 50 t/yr cumulative EU CBAM de minimis threshold (${analytics.esg.cbamSummary.flaggedLanesCount} lane(s) monitored).`}
+            </p>
+          </div>
+        )}
+
+        {/* Top-5 Scope 3 Emission Hotspots */}
+        {(analytics.esg.hotspots ?? []).length > 0 && (
+          <div className="space-y-1.5">
+            <div className="text-[11px] font-semibold text-slate-300">
+              Top Scope 3 Hotspots
+            </div>
+            <div className="space-y-1">
+              {(analytics.esg.hotspots ?? []).map((h) => (
+                <div
+                  key={h.entityId}
+                  className="flex items-center justify-between gap-2 rounded-lg border border-slate-800 bg-slate-950/60 px-2.5 py-1.5 text-[11px]"
+                >
+                  <div className="min-w-0">
+                    <div className="truncate font-medium text-slate-200">
+                      {h.entityName} ({h.countryCode})
+                    </div>
+                    <div className="flex flex-wrap items-center gap-1 text-[10px] text-slate-400">
+                      <span className="truncate">{h.materialCategory}</span>
+                      <span>·</span>
+                      <span className="rounded bg-slate-800 px-1 py-0.2 font-mono text-[9px] text-slate-300">
+                        {h.attributionMethod}
+                      </span>
+                      <span className="rounded bg-slate-800 px-1 py-0.2 font-mono text-[9px] text-emerald-300">
+                        P{h.pcafScore}
+                      </span>
+                      {h.cbamCategory && (
+                        <span className="rounded bg-amber-500/20 px-1 py-0.2 font-mono text-[9px] text-amber-300">
+                          CBAM
+                        </span>
+                      )}
+                    </div>
+                  </div>
+                  <div className="text-right shrink-0">
+                    <div className="font-mono font-semibold text-white">
+                      {formatTco2e(h.tco2e)}
+                    </div>
+                    <div className="text-[10px] text-slate-400">
+                      {h.shareOfScope3Pct}%
+                    </div>
+                  </div>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
+
+        {/* Multi-Region Compliance Readiness Checklist */}
+        {(analytics.esg.complianceChecklist ?? []).length > 0 && (
+          <div className="space-y-2 pt-1">
+            <div className="flex items-center justify-between gap-2">
+              <span className="text-[11px] font-semibold text-slate-300 flex items-center gap-1.5">
+                <ShieldCheck className="h-3.5 w-3.5 text-sky-400" />
+                Regional Compliance Readiness
+              </span>
+              <div className="flex flex-wrap gap-1" data-testid="active-compliance-packs">
+                {(analytics.esg.activeCompliancePacks ?? []).map((pack) => (
+                  <span
+                    key={pack}
+                    className="inline-flex items-center gap-0.5 rounded bg-sky-500/15 border border-sky-500/30 px-1.5 py-0.5 text-[9px] font-semibold text-sky-200"
+                  >
+                    <Globe2 className="h-2.5 w-2.5" />
+                    {pack}
+                  </span>
+                ))}
+              </div>
+            </div>
+
+            <div className="space-y-1.5">
+              {(analytics.esg.complianceChecklist ?? []).map((item) => (
+                <div
+                  key={item.ruleId}
+                  className="rounded-lg border border-slate-800 bg-slate-950/60 p-2 text-[11px] space-y-0.5"
+                >
+                  <div className="flex items-center justify-between gap-2">
+                    <span className="font-medium text-slate-200 truncate">
+                      {item.title}
+                    </span>
+                    <span
+                      className={`shrink-0 rounded px-1.5 py-0.5 text-[9px] font-bold uppercase ${
+                        item.status === "PASSED"
+                          ? "bg-emerald-500/20 text-emerald-300"
+                          : item.status === "ACTION_NEEDED"
+                            ? "bg-amber-500/20 text-amber-300"
+                            : "bg-slate-800 text-slate-400"
+                      }`}
+                    >
+                      {item.status.replace("_", " ")}
+                    </span>
+                  </div>
+                  <div className="text-[10px] text-slate-400">
+                    {item.framework}
+                    {item.legalStatus !== "IN_FORCE" ? ` · ${item.legalStatus}` : ""}
+                  </div>
+                  <p className="text-[10px] text-slate-300/90">{item.summary}</p>
+                </div>
+              ))}
+            </div>
+          </div>
+        )}
       </section>
     </div>
   );

@@ -9,7 +9,9 @@ import {
   ContractSchema,
   CreateInviteResponseSchema,
   DirectoryAlternativesResponseSchema,
+  EsgLedgerResponseSchema,
   ExecutiveReportSchema,
+  type EsgLedgerResponse,
   FacilitySchema,
   HealthResponseSchema,
   ListAuditEventsResponseSchema,
@@ -661,6 +663,37 @@ export async function getExecutiveReport(
   return apiRequest(path, { method: "GET" }, (res) =>
     parseWithSchema(ExecutiveReportSchema, res),
   );
+}
+
+export async function getEsgLedgerJson(
+  filters?: NetworkQueryFilters,
+): Promise<EsgLedgerResponse> {
+  const params = new URLSearchParams({ format: "json" });
+  if (filters?.productId) params.set("productId", filters.productId);
+  if (filters?.inputId) params.set("inputId", filters.inputId);
+  return apiRequest(`/api/v1/analytics/esg-ledger?${params.toString()}`, { method: "GET" }, (res) =>
+    parseWithSchema(EsgLedgerResponseSchema, res),
+  );
+}
+
+export async function exportEsgLedgerCsv(
+  filters?: NetworkQueryFilters,
+): Promise<string> {
+  const params = new URLSearchParams({ format: "csv" });
+  if (filters?.productId) params.set("productId", filters.productId);
+  if (filters?.inputId) params.set("inputId", filters.inputId);
+  const response = await fetch(`/api/v1/analytics/esg-ledger?${params.toString()}`, {
+    method: "GET",
+    credentials: "include",
+  });
+  const text = await response.text();
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      text || `ESG ledger export failed with status ${response.status}`,
+    );
+  }
+  return text;
 }
 
 // --- Org Team Members & RBAC (M5) ---

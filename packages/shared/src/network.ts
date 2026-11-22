@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { MaterialArchetypeSchema } from "./esg.js";
 
 export const FacilityKindSchema = z.enum([
   "HQ",
@@ -150,6 +151,12 @@ export const SupplyInputSchema = z
       .optional(),
     totalAnnualDemand: z.number().finite().nonnegative().nullable().optional(),
     materialCriticality: z.number().finite().min(0).max(1).nullable().optional(),
+    // Sub-Project 3 ESG taxonomy & PCF fields
+    cnCode: z.string().trim().max(16).nullable().optional(),
+    materialArchetype: MaterialArchetypeSchema.nullable().optional(),
+    unitMassKg: z.number().finite().positive().nullable().optional(),
+    productEmissionFactorTco2ePerUnit: z.number().finite().nonnegative().nullable().optional(),
+    pcfVerified: z.boolean().optional(),
   })
   .strict();
 export type SupplyInput = z.infer<typeof SupplyInputSchema>;
@@ -171,6 +178,11 @@ export const FacilitySchema = z
     esgBadges: z.array(z.string()).default([]),
     estimatedScope12Tco2e: z.number().nonnegative().nullable().default(null),
     defaultCarryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
+    // Sub-Project 3 ESG electricity & revenue scoping fields
+    annualElectricityMwh: z.number().finite().nonnegative().nullable().optional(),
+    renewableElectricityPct: z.number().finite().min(0).max(100).nullable().optional(),
+    renewableInstrumentsVerified: z.boolean().optional(),
+    annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
   })
   .strict();
 export type Facility = z.infer<typeof FacilitySchema>;
@@ -202,6 +214,10 @@ export const SupplyLaneSchema = z
     ordinaryFreightCostPerUnitEur: z.number().finite().nonnegative().nullable().optional(),
     customAnnualDisruptionProb: z.number().finite().min(0).max(1).nullable().optional(),
     customTtrDays: z.number().finite().nonnegative().nullable().optional(),
+    // Sub-Project 3 lane-level PCF & allocation overrides
+    productEmissionFactorTco2ePerUnit: z.number().finite().nonnegative().nullable().optional(),
+    pcfVerified: z.boolean().optional(),
+    economicAttributionRatio: z.number().finite().min(0).max(1).nullable().optional(),
   })
   .strict();
 export type SupplyLane = z.infer<typeof SupplyLaneSchema>;
@@ -356,6 +372,11 @@ export const CreateSupplyInputInputSchema = z.object({
     .optional(),
   totalAnnualDemand: z.number().finite().nonnegative().nullable().optional(),
   materialCriticality: z.number().finite().min(0).max(1).nullable().optional(),
+  cnCode: z.string().trim().max(16).nullable().optional(),
+  materialArchetype: MaterialArchetypeSchema.nullable().optional(),
+  unitMassKg: z.number().finite().positive().nullable().optional(),
+  productEmissionFactorTco2ePerUnit: z.number().finite().nonnegative().nullable().optional(),
+  pcfVerified: z.boolean().optional(),
 });
 export type CreateSupplyInputInput = z.infer<
   typeof CreateSupplyInputInputSchema
@@ -373,6 +394,11 @@ export const UpdateSupplyInputInputSchema = z.object({
     .optional(),
   totalAnnualDemand: z.number().finite().nonnegative().nullable().optional(),
   materialCriticality: z.number().finite().min(0).max(1).nullable().optional(),
+  cnCode: z.string().trim().max(16).nullable().optional(),
+  materialArchetype: MaterialArchetypeSchema.nullable().optional(),
+  unitMassKg: z.number().finite().positive().nullable().optional(),
+  productEmissionFactorTco2ePerUnit: z.number().finite().nonnegative().nullable().optional(),
+  pcfVerified: z.boolean().optional(),
 });
 export type UpdateSupplyInputInput = z.infer<
   typeof UpdateSupplyInputInputSchema
@@ -391,6 +417,10 @@ export const CreateFacilityInputSchema = z.object({
   esgBadges: z.array(z.string().trim().min(1).max(64)).optional(),
   estimatedScope12Tco2e: z.number().finite().nonnegative().nullable().optional(),
   defaultCarryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
+  annualElectricityMwh: z.number().finite().nonnegative().nullable().optional(),
+  renewableElectricityPct: z.number().finite().min(0).max(100).nullable().optional(),
+  renewableInstrumentsVerified: z.boolean().optional(),
+  annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
 });
 export type CreateFacilityInput = z.infer<typeof CreateFacilityInputSchema>;
 
@@ -407,6 +437,10 @@ export const UpdateFacilityInputSchema = z.object({
   esgBadges: z.array(z.string().trim().min(1).max(64)).optional(),
   estimatedScope12Tco2e: z.number().finite().nonnegative().nullable().optional(),
   defaultCarryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
+  annualElectricityMwh: z.number().finite().nonnegative().nullable().optional(),
+  renewableElectricityPct: z.number().finite().min(0).max(100).nullable().optional(),
+  renewableInstrumentsVerified: z.boolean().optional(),
+  annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
 });
 export type UpdateFacilityInput = z.infer<typeof UpdateFacilityInputSchema>;
 
@@ -434,6 +468,9 @@ export const CreateSupplyLaneInputSchema = z.object({
   ordinaryFreightCostPerUnitEur: z.number().finite().nonnegative().nullable().optional(),
   customAnnualDisruptionProb: z.number().finite().min(0).max(1).nullable().optional(),
   customTtrDays: z.number().finite().nonnegative().nullable().optional(),
+  productEmissionFactorTco2ePerUnit: z.number().finite().nonnegative().nullable().optional(),
+  pcfVerified: z.boolean().optional(),
+  economicAttributionRatio: z.number().finite().min(0).max(1).nullable().optional(),
 });
 export type CreateSupplyLaneInput = z.infer<typeof CreateSupplyLaneInputSchema>;
 
@@ -461,6 +498,9 @@ export const UpdateSupplyLaneInputSchema = z.object({
   ordinaryFreightCostPerUnitEur: z.number().finite().nonnegative().nullable().optional(),
   customAnnualDisruptionProb: z.number().finite().min(0).max(1).nullable().optional(),
   customTtrDays: z.number().finite().nonnegative().nullable().optional(),
+  productEmissionFactorTco2ePerUnit: z.number().finite().nonnegative().nullable().optional(),
+  pcfVerified: z.boolean().optional(),
+  economicAttributionRatio: z.number().finite().min(0).max(1).nullable().optional(),
 });
 export type UpdateSupplyLaneInput = z.infer<typeof UpdateSupplyLaneInputSchema>;
 

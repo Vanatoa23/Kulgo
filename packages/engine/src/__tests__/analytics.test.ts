@@ -236,7 +236,10 @@ describe("evaluateNetworkAnalytics & simulateNetworkAnalytics", () => {
     // Own Scope 1+2 derived from Tallinn HQ (300 -> 120 + 180)
     expect(summary.esg.scope1Tco2e).toBe(120);
     expect(summary.esg.scope2Tco2e).toBe(180);
-    expect(summary.esg.upstreamScope3Tco2e).toBe(600 + 250 + 400);
+    // Physical-first Category 1: 100t Polymers (2.42) + 60t FI Semiconductors (16.40) + 40t DE Semiconductors (19.80) = 2018 tCO2e
+    expect(summary.esg.upstreamScope3Tco2e).toBe(2018);
+    expect(summary.esg.weightedPcafScore).toBeGreaterThanOrEqual(2.5);
+    expect(summary.esg.weightedPcafScore).toBeLessThanOrEqual(3);
     expect(summary.esg.transportScope3Tco2e).toBeGreaterThan(0);
     expect(summary.esg.verifiedCoveragePct).toBe(33);
     expect(summary.riskSignals).toHaveLength(1);

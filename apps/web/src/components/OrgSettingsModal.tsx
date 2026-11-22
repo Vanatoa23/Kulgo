@@ -1,8 +1,10 @@
 import type {
   AuditAction,
   AuditEvent,
+  CompliancePackId,
   Organization,
   OrgMember,
+  TargetMarket,
   UpdateOrganizationProfileInput,
   User,
   UserRole,
@@ -10,6 +12,7 @@ import type {
 import {
   Bell,
   CheckCircle2,
+  Globe2,
   Leaf,
   Loader2,
   Lock,
@@ -42,6 +45,23 @@ export interface OrgSettingsModalProps {
   onUpdated: (organization: Organization) => void;
 }
 
+const TARGET_MARKET_OPTIONS: ReadonlyArray<{ id: TargetMarket; label: string }> = [
+  { id: "EU", label: "EU / EEA (CSRD, VSME, CBAM, EUDR)" },
+  { id: "UK", label: "UK (UK SRS, SECR, UK CBAM)" },
+  { id: "US", label: "US (CA SB 253, UFLPA)" },
+  { id: "APAC", label: "APAC (AU AASB S2, SGX, SSBJ)" },
+  { id: "AFRICA", label: "Africa (ISSB, CBAM Export)" },
+];
+
+const COMPLIANCE_PACK_OPTIONS: ReadonlyArray<{ id: CompliancePackId; label: string }> = [
+  { id: "GLOBAL_GHG_ISSB", label: "Global GHG + ISSB" },
+  { id: "EU", label: "EU Pack" },
+  { id: "UK", label: "UK Pack" },
+  { id: "US", label: "US Pack" },
+  { id: "APAC", label: "APAC Pack" },
+  { id: "AFRICA", label: "Africa Pack" },
+];
+
 const PRESET_ESG_BADGES = [
   "ISO 14001",
   "EcoVadis Gold",
@@ -63,6 +83,8 @@ const AUDIT_ACTION_BADGE_STYLES: Record<AuditAction, string> = {
   INVITE_REVOKED: "bg-amber-500/15 border-amber-500/40 text-amber-300",
   CSRD_REPORT_EXPORTED:
     "bg-violet-500/15 border-violet-500/40 text-violet-300",
+  ESG_LEDGER_EXPORTED:
+    "bg-emerald-500/15 border-emerald-500/40 text-emerald-300",
 };
 
 function formatAuditTimestamp(iso: string): string {
@@ -95,6 +117,10 @@ export function OrgSettingsModal({
 
   const [scope1Text, setScope1Text] = useState("");
   const [scope2Text, setScope2Text] = useState("");
+  const [scope2MarketText, setScope2MarketText] = useState("");
+  const [annualRevenueText, setAnnualRevenueText] = useState("");
+  const [targetMarkets, setTargetMarkets] = useState<TargetMarket[]>([]);
+  const [enabledCompliancePacks, setEnabledCompliancePacks] = useState<CompliancePackId[]>([]);
   const [esgBadges, setEsgBadges] = useState<string[]>([]);
   const [customBadge, setCustomBadge] = useState("");
   const [openToNewBuyers, setOpenToNewBuyers] = useState(false);
@@ -187,6 +213,20 @@ export function OrgSettingsModal({
     setScope2Text(
       organization.scope2Tco2e !== null ? String(organization.scope2Tco2e) : "",
     );
+    setScope2MarketText(
+      organization.scope2MarketTco2e !== null &&
+        organization.scope2MarketTco2e !== undefined
+        ? String(organization.scope2MarketTco2e)
+        : "",
+    );
+    setAnnualRevenueText(
+      organization.annualRevenueEur !== null &&
+        organization.annualRevenueEur !== undefined
+        ? String(organization.annualRevenueEur)
+        : "",
+    );
+    setTargetMarkets(organization.targetMarkets ?? []);
+    setEnabledCompliancePacks(organization.enabledCompliancePacks ?? []);
     setEsgBadges(organization.esgBadges);
     setCustomBadge("");
     setOpenToNewBuyers(organization.openToNewBuyers);
@@ -297,6 +337,18 @@ export function OrgSettingsModal({
     setCustomBadge("");
   };
 
+  const toggleTargetMarket = (market: TargetMarket) => {
+    setTargetMarkets((prev) =>
+      prev.includes(market) ? prev.filter((m) => m !== market) : [...prev, market],
+    );
+  };
+
+  const toggleCompliancePack = (pack: CompliancePackId) => {
+    setEnabledCompliancePacks((prev) =>
+      prev.includes(pack) ? prev.filter((p) => p !== pack) : [...prev, pack],
+    );
+  };
+
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (!isOwner) return;
@@ -307,6 +359,10 @@ export function OrgSettingsModal({
       scope1Text.trim() === "" ? null : Number(scope1Text.trim());
     const parsedScope2 =
       scope2Text.trim() === "" ? null : Number(scope2Text.trim());
+    const parsedScope2Market =
+      scope2MarketText.trim() === "" ? null : Number(scope2MarketText.trim());
+    const parsedAnnualRevenue =
+      annualRevenueText.trim() === "" ? null : Number(annualRevenueText.trim());
 
     if (
       parsedScope1 !== null &&
@@ -322,10 +378,28 @@ export function OrgSettingsModal({
       setError("Scope 2 emissions must be a non-negative number.");
       return;
     }
+    if (
+      parsedScope2Market !== null &&
+      (!Number.isFinite(parsedScope2Market) || parsedScope2Market < 0)
+    ) {
+      setError("Scope 2 market-based emissions must be a non-negative number.");
+      return;
+    }
+    if (
+      parsedAnnualRevenue !== null &&
+      (!Number.isFinite(parsedAnnualRevenue) || parsedAnnualRevenue < 0)
+    ) {
+      setError("Annual revenue (EUR) must be a non-negative number.");
+      return;
+    }
 
     const payload: UpdateOrganizationProfileInput = {
       scope1Tco2e: parsedScope1,
       scope2Tco2e: parsedScope2,
+      scope2MarketTco2e: parsedScope2Market,
+      annualRevenueEur: parsedAnnualRevenue,
+      targetMarkets,
+      enabledCompliancePacks,
       esgBadges,
       openToNewBuyers,
       capabilities: parseCommaList(capabilitiesText),
@@ -511,7 +585,7 @@ export function OrgSettingsModal({
 
                 <label className="block space-y-1">
                   <span className="text-[11px] font-medium text-slate-400">
-                    Scope 2 Emissions (tCO2e / yr)
+                    Scope 2 Emissions (Location-Based, tCO2e / yr)
                   </span>
                   <input
                     type="number"
@@ -524,6 +598,107 @@ export function OrgSettingsModal({
                     className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
                   />
                 </label>
+
+                <label className="block space-y-1">
+                  <span className="text-[11px] font-medium text-slate-400">
+                    Scope 2 Market-Based (tCO2e / yr, optional)
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    disabled={!isOwner}
+                    value={scope2MarketText}
+                    onChange={(e) => setScope2MarketText(e.target.value)}
+                    placeholder="e.g. 140 (with GOs/RECs)"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+                  />
+                </label>
+
+                <label className="block space-y-1">
+                  <span className="text-[11px] font-medium text-slate-400">
+                    Annual Revenue (EUR — Private, Never Shared)
+                  </span>
+                  <input
+                    type="number"
+                    min="0"
+                    step="any"
+                    disabled={!isOwner}
+                    value={annualRevenueText}
+                    onChange={(e) => setAnnualRevenueText(e.target.value)}
+                    placeholder="e.g. 8000000 (for tCO2e/€M & partner intensity)"
+                    className="w-full rounded-lg border border-slate-800 bg-slate-900 px-3 py-2 text-xs text-slate-100 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none disabled:opacity-60"
+                  />
+                </label>
+              </div>
+            </section>
+
+            {/* Target Sales / Export Markets & Multi-Region Compliance Packs */}
+            <section className="space-y-3 rounded-xl border border-slate-800 bg-slate-900/50 p-3.5">
+              <div className="flex items-center gap-1.5 text-xs font-semibold text-slate-200">
+                <Globe2 className="h-3.5 w-3.5 text-sky-400" />
+                <span>Target Sales / Export Markets &amp; Compliance Packs</span>
+              </div>
+              <p className="text-[11px] text-slate-400">
+                Active compliance packs auto-detect from your HQ country (
+                <span className="font-mono text-slate-200">{organization.countryCode}</span>
+                ) and selected export markets. Global GHG Protocol + ISSB (IFRS S1/S2) is always active.
+              </p>
+
+              <div className="space-y-1.5">
+                <span className="block text-[11px] font-medium text-slate-400">
+                  Target Sales / Export Markets
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {TARGET_MARKET_OPTIONS.map((market) => {
+                    const active = targetMarkets.includes(market.id);
+                    return (
+                      <button
+                        key={market.id}
+                        type="button"
+                        disabled={!isOwner}
+                        onClick={() => toggleTargetMarket(market.id)}
+                        data-testid={`target-market-${market.id}`}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
+                          active
+                            ? "bg-sky-500/20 border-sky-500/50 text-sky-200"
+                            : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        {active ? "✓ " : "+ "}
+                        {market.label}
+                      </button>
+                    );
+                  })}
+                </div>
+              </div>
+
+              <div className="space-y-1.5 pt-1">
+                <span className="block text-[11px] font-medium text-slate-400">
+                  Manual Compliance Pack Overrides (leave empty for auto-detect)
+                </span>
+                <div className="flex flex-wrap gap-1.5">
+                  {COMPLIANCE_PACK_OPTIONS.map((pack) => {
+                    const active = enabledCompliancePacks.includes(pack.id);
+                    return (
+                      <button
+                        key={pack.id}
+                        type="button"
+                        disabled={!isOwner}
+                        onClick={() => toggleCompliancePack(pack.id)}
+                        data-testid={`compliance-pack-${pack.id}`}
+                        className={`px-2.5 py-1 rounded-full text-[11px] font-medium border transition-colors cursor-pointer disabled:opacity-60 disabled:cursor-not-allowed ${
+                          active
+                            ? "bg-violet-500/20 border-violet-500/50 text-violet-200"
+                            : "bg-slate-900 border-slate-800 text-slate-400 hover:text-slate-200"
+                        }`}
+                      >
+                        {active ? "✓ " : "+ "}
+                        {pack.label}
+                      </button>
+                    );
+                  })}
+                </div>
               </div>
             </section>
 

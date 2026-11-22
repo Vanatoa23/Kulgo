@@ -1,8 +1,12 @@
 import {
+  computeFinancialRiskSummary,
   evaluateNetworkAnalytics,
   type HiddenPartnerAggregate,
 } from "@kulgo/engine";
 import type {
+  Contract,
+  ContractLine,
+  DerivedLaneCommercialSummary,
   Facility,
   RiskSignal,
   WorkspaceNetworkResponse,
@@ -16,6 +20,62 @@ const MAX_TRAVERSAL_DEPTH = 4;
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
+}
+
+function round6(value: number): number {
+  return Math.round(value * 1_000_000) / 1_000_000;
+}
+
+function toIsoDateUtc(date: Date): string {
+  return date.toISOString().slice(0, 10);
+}
+
+function buildPartnerLaneIncotermsMap(
+  contracts?: readonly Contract[],
+  contractLines?: readonly ContractLine[],
+): Map<string, string | null> {
+  const incotermsByLaneId = new Map<string, string | null>();
+  if (!contracts || !contractLines) return incotermsByLaneId;
+  const contractsById = new Map(contracts.map((c) => [c.contractId, c]));
+  for (const line of contractLines) {
+    const contract = contractsById.get(line.contractId);
+    if (contract && !contract.isManuallyArchived && contract.incoterms) {
+      if (!incotermsByLaneId.has(line.laneId)) {
+        incotermsByLaneId.set(line.laneId, contract.incoterms);
+      }
+    }
+  }
+  return incotermsByLaneId;
+}
+
+function derivePartnerCommercials(
+  network: WorkspaceNetworkResponse,
+  riskSignals: readonly RiskSignal[],
+  asOfDate: Date,
+): {
+  laneCommercialsByLaneId: Map<string, DerivedLaneCommercialSummary>;
+  incotermsByLaneId: Map<string, string | null>;
+} {
+  const financialRisk = computeFinancialRiskSummary({
+    products: network.products,
+    inputs: network.inputs,
+    facilities: network.facilities,
+    lanes: network.lanes,
+    contracts: network.contracts,
+    contractLines: network.contractLines,
+    riskSignals,
+    asOfDate: toIsoDateUtc(asOfDate),
+    viewMode: "PERIOD_WINDOW",
+  });
+  return {
+    laneCommercialsByLaneId: new Map<string, DerivedLaneCommercialSummary>(
+      financialRisk.laneCommercials.map((lc) => [lc.laneId, lc]),
+    ),
+    incotermsByLaneId: buildPartnerLaneIncotermsMap(
+      network.contracts,
+      network.contractLines,
+    ),
+  };
 }
 
 export interface PartnerHiddenSummaryResolverDeps {
@@ -33,7 +93,10 @@ export interface PartnerSummaryResolutionContext {
 interface InternalPartnerEval {
   targetFacilityId: string;
   partnerOrgId: string;
+  partnerInventoryKey: string;
   hiddenUpstreamScope3Tco2e: number;
+  supplierEmissionIntensityTco2ePerEur: number | null;
+  partnerTotalEmissionsCapTco2e: number | null;
   hasSanctionedUpstream: boolean;
   regionCode: string | null;
   hasChokepointAlert: boolean;
@@ -191,20 +254,36 @@ export function createPartnerHiddenSummaryResolver(
         partnerNetwork,
       );
 
+      const asOfDate = new Date();
+      const partnerCommercials = derivePartnerCommercials(
+        partnerNetwork,
+        riskSignals,
+        asOfDate,
+      );
+
       const partnerSummary = evaluateNetworkAnalytics({
         organization: {
+          orgId: isFacilityScoped ? undefined : partnerOrg?.orgId,
+          name: isFacilityScoped ? undefined : partnerOrg?.name,
+          countryCode: isFacilityScoped ? undefined : partnerOrg?.countryCode,
           scope1Tco2e: isFacilityScoped
             ? null
             : (partnerOrg?.scope1Tco2e ?? null),
           scope2Tco2e: isFacilityScoped
             ? null
             : (partnerOrg?.scope2Tco2e ?? null),
+          scope2MarketTco2e: isFacilityScoped
+            ? null
+            : (partnerOrg?.scope2MarketTco2e ?? null),
         },
         inputs: partnerNetwork.inputs,
         facilities: partnerNetwork.facilities,
         lanes: partnerNetwork.lanes,
         riskSignals,
         partnerHiddenSummaries: deeperHiddenSummaries,
+        laneCommercialsByLaneId: partnerCommercials.laneCommercialsByLaneId,
+        incotermsByLaneId: partnerCommercials.incotermsByLaneId,
+        asOfDate,
       });
 
       const sanctionAlert = partnerSummary.alerts.find(
@@ -246,14 +325,113 @@ export function createPartnerHiddenSummaryResolver(
         ? 0
         : partnerSummary.esg.scope1Tco2e + partnerSummary.esg.scope2Tco2e;
 
+      const hiddenUpstreamScope3Tco2e = round2(
+        partnerPrimaryScope12 +
+          partnerSummary.esg.upstreamScope3Tco2e +
+          partnerSummary.esg.transportScope3Tco2e,
+      );
+
+      // Privacy-safe server-side Economic Attribution Intensity (tCO2e / EUR):
+      // Strict denominator scoping: never divide a single reconciled facility's
+      // emissions by whole-organization revenue!
+      const partnerOrgProductRev = rawPartnerNetwork.products.reduce(
+        (sum, prod) =>
+          sum +
+          (typeof prod.annualRevenueEur === "number" &&
+          Number.isFinite(prod.annualRevenueEur) &&
+          prod.annualRevenueEur > 0
+            ? prod.annualRevenueEur
+            : 0),
+        0,
+      );
+      const partnerOrgRevenueEur =
+        typeof partnerOrg?.annualRevenueEur === "number" &&
+        Number.isFinite(partnerOrg.annualRevenueEur) &&
+        partnerOrg.annualRevenueEur > 0
+          ? partnerOrg.annualRevenueEur
+          : partnerOrgProductRev > 0
+            ? partnerOrgProductRev
+            : null;
+
+      let supplierEmissionIntensityTco2ePerEur: number | null = null;
+      let partnerTotalEmissionsCapTco2e: number | null = null;
+      let partnerInventoryKey = `partner:${link.partnerOrgId}:org`;
+
+      if (isFacilityScoped) {
+        const fulfillingFac = partnerNetwork.facilities.find(
+          (f) => f.facilityId === link.fulfilledByFacilityId && f.isOwnFacility,
+        );
+        const facRev =
+          typeof fulfillingFac?.annualRevenueEur === "number" &&
+          Number.isFinite(fulfillingFac.annualRevenueEur) &&
+          fulfillingFac.annualRevenueEur > 0
+            ? fulfillingFac.annualRevenueEur
+            : null;
+        if (facRev !== null && partnerSummary.esg.totalTco2e > 0) {
+          supplierEmissionIntensityTco2ePerEur = round6(
+            partnerSummary.esg.totalTco2e / facRev,
+          );
+          partnerTotalEmissionsCapTco2e = round2(partnerSummary.esg.totalTco2e);
+          partnerInventoryKey = `partner:${link.partnerOrgId}:fac:${link.fulfilledByFacilityId}`;
+        } else if (partnerOrgRevenueEur !== null) {
+          // Fall back consistently to org-wide emissions / org-wide revenue across the complete partner network
+          const orgWideDeeperHiddenSummaries = await resolveForOrg(
+            link.partnerOrgId,
+            riskSignals,
+            nextVisited,
+            depth + 1,
+            rawPartnerNetwork,
+          );
+          const orgWideCommercials = derivePartnerCommercials(
+            rawPartnerNetwork,
+            riskSignals,
+            asOfDate,
+          );
+          const orgWideSummary = evaluateNetworkAnalytics({
+            organization: {
+              orgId: partnerOrg?.orgId,
+              name: partnerOrg?.name,
+              countryCode: partnerOrg?.countryCode,
+              scope1Tco2e: partnerOrg?.scope1Tco2e ?? null,
+              scope2Tco2e: partnerOrg?.scope2Tco2e ?? null,
+              scope2MarketTco2e: partnerOrg?.scope2MarketTco2e ?? null,
+              annualRevenueEur: partnerOrgRevenueEur,
+            },
+            inputs: rawPartnerNetwork.inputs,
+            facilities: rawPartnerNetwork.facilities,
+            lanes: rawPartnerNetwork.lanes,
+            riskSignals,
+            partnerHiddenSummaries: orgWideDeeperHiddenSummaries,
+            laneCommercialsByLaneId: orgWideCommercials.laneCommercialsByLaneId,
+            incotermsByLaneId: orgWideCommercials.incotermsByLaneId,
+            asOfDate,
+          });
+          if (orgWideSummary.esg.totalTco2e > 0) {
+            supplierEmissionIntensityTco2ePerEur = round6(
+              orgWideSummary.esg.totalTco2e / partnerOrgRevenueEur,
+            );
+            partnerTotalEmissionsCapTco2e = round2(
+              orgWideSummary.esg.totalTco2e,
+            );
+          }
+        }
+      } else if (
+        partnerOrgRevenueEur !== null &&
+        partnerSummary.esg.totalTco2e > 0
+      ) {
+        supplierEmissionIntensityTco2ePerEur = round6(
+          partnerSummary.esg.totalTco2e / partnerOrgRevenueEur,
+        );
+        partnerTotalEmissionsCapTco2e = round2(partnerSummary.esg.totalTco2e);
+      }
+
       evaluations.push({
         targetFacilityId: link.targetFacilityId,
         partnerOrgId: link.partnerOrgId,
-        hiddenUpstreamScope3Tco2e: round2(
-          partnerPrimaryScope12 +
-            partnerSummary.esg.upstreamScope3Tco2e +
-            partnerSummary.esg.transportScope3Tco2e,
-        ),
+        partnerInventoryKey,
+        hiddenUpstreamScope3Tco2e,
+        supplierEmissionIntensityTco2ePerEur,
+        partnerTotalEmissionsCapTco2e,
         hasSanctionedUpstream: Boolean(sanctionAlert),
         regionCode: sanctionAlert?.affectedRegionCode ?? null,
         hasChokepointAlert: Boolean(deeperSharedChokepointAlert),
@@ -295,6 +473,10 @@ export function createPartnerHiddenSummaryResolver(
 
       result.set(ev.targetFacilityId, {
         hiddenUpstreamScope3Tco2e: ev.hiddenUpstreamScope3Tco2e,
+        supplierEmissionIntensityTco2ePerEur:
+          ev.supplierEmissionIntensityTco2ePerEur,
+        partnerTotalEmissionsCapTco2e: ev.partnerTotalEmissionsCapTco2e,
+        partnerInventoryKey: ev.partnerInventoryKey,
         hasSanctionedUpstream: ev.hasSanctionedUpstream,
         regionCode: ev.regionCode,
         hasSharedChokepoint,
