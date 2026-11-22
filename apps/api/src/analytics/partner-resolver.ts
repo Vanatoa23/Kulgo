@@ -126,6 +126,128 @@ function getActiveTier1FacilityIds(
   return activeTier1ById;
 }
 
+function getNormalizedOutgoingWeight(
+  lanes: readonly WorkspaceNetworkResponse["lanes"][number][],
+): number[] {
+  const allHavePositiveVolume = lanes.every(
+    (l) =>
+      typeof l.annualVolume === "number" &&
+      Number.isFinite(l.annualVolume) &&
+      l.annualVolume > 0,
+  );
+  if (allHavePositiveVolume) {
+    const allMass = lanes.every(
+      (l) => l.volumeUnit === "TONNES" || l.volumeUnit === "KG",
+    );
+    if (allMass) {
+      return lanes.map((l) =>
+        l.volumeUnit === "KG" ? l.annualVolume! / 1000 : l.annualVolume!,
+      );
+    }
+    const firstUnit = lanes[0]?.volumeUnit;
+    if (firstUnit && lanes.every((l) => l.volumeUnit === firstUnit)) {
+      return lanes.map((l) => l.annualVolume!);
+    }
+  }
+
+  const allHavePositiveSpend = lanes.every(
+    (l) =>
+      typeof l.annualSpendEur === "number" &&
+      Number.isFinite(l.annualSpendEur) &&
+      l.annualSpendEur > 0,
+  );
+  if (allHavePositiveSpend) {
+    return lanes.map((l) => l.annualSpendEur!);
+  }
+
+  return lanes.map((l) => l.volumeSharePct);
+}
+
+/**
+ * Computes the fraction in [0, 1] of each upstream own facility's throughput
+ * that flows into `fulfillingFacilityId` across the partner's active network.
+ *
+ * Uses fixed-point iteration over outgoing active lane weights (preferring
+ * compatible `annualVolume`, then `annualSpendEur`, then `volumeSharePct`) so
+ * shared transit hubs feeding multiple plants allocate their Scope 1 & 2
+ * inventory proportionally without over-counting across reconciled plants,
+ * while handling diamonds and internal cycles cleanly.
+ */
+function computeUpstreamOwnFacilityShares(
+  activeLanes: readonly WorkspaceNetworkResponse["lanes"][number][],
+  feedingFacilityIds: ReadonlySet<string>,
+  fulfillingFacilityId: string,
+): Map<string, number> {
+  const outgoingByFromId = new Map<
+    string,
+    Array<{ toFacilityId: string; fraction: number }>
+  >();
+
+  const rawOutgoingByFromId = new Map<
+    string,
+    WorkspaceNetworkResponse["lanes"]
+  >();
+  for (const lane of activeLanes) {
+    if (!feedingFacilityIds.has(lane.fromFacilityId)) {
+      continue;
+    }
+    const existing = rawOutgoingByFromId.get(lane.fromFacilityId);
+    if (existing) {
+      existing.push(lane);
+    } else {
+      rawOutgoingByFromId.set(lane.fromFacilityId, [lane]);
+    }
+  }
+
+  for (const [fromId, outgoing] of rawOutgoingByFromId) {
+    const weights = getNormalizedOutgoingWeight(outgoing);
+    const totalWeight = weights.reduce((sum, w) => sum + w, 0);
+    if (totalWeight <= 0) {
+      continue;
+    }
+    outgoingByFromId.set(
+      fromId,
+      outgoing.map((lane, idx) => ({
+        toFacilityId: lane.toFacilityId,
+        fraction: weights[idx]! / totalWeight,
+      })),
+    );
+  }
+
+  const shareByFacilityId = new Map<string, number>([
+    [fulfillingFacilityId, 1],
+  ]);
+  const nonRootFeedingIds = Array.from(feedingFacilityIds).filter(
+    (id) => id !== fulfillingFacilityId,
+  );
+
+  for (let iter = 0; iter < 64; iter += 1) {
+    let maxDelta = 0;
+    for (const facilityId of nonRootFeedingIds) {
+      const outgoing = outgoingByFromId.get(facilityId);
+      if (!outgoing || outgoing.length === 0) {
+        continue;
+      }
+      let nextShare = 0;
+      for (const edge of outgoing) {
+        nextShare += edge.fraction * (shareByFacilityId.get(edge.toFacilityId) ?? 0);
+      }
+      const clamped = Math.min(1, Math.max(0, nextShare));
+      const prev = shareByFacilityId.get(facilityId) ?? 0;
+      const delta = Math.abs(clamped - prev);
+      if (delta > maxDelta) {
+        maxDelta = delta;
+      }
+      shareByFacilityId.set(facilityId, clamped);
+    }
+    if (maxDelta < 1e-9) {
+      break;
+    }
+  }
+
+  return shareByFacilityId;
+}
+
 /**
  * Scopes a verified partner's network to the full upstream subgraph feeding
  * `fulfilledByFacilityId` when two-sided facility reconciliation has been bound
@@ -135,7 +257,10 @@ function getActiveTier1FacilityIds(
  * fulfilling own facility so multi-hop internal topologies (e.g.
  * supplier -> own transit facility -> fulfilling plant), branches, diamonds,
  * and cycles are resolved without infinite recursion or duplicate entries while
- * excluding unrelated branches.
+ * excluding unrelated branches. Shared upstream own transit facilities have
+ * their Scope 1 & 2 inventory allocated proportionally across the plants they
+ * serve so a hub feeding multiple reconciled plants is not counted at 100%
+ * against each plant.
  *
  * When `fulfilledByFacilityId` is omitted or does not match an own facility in
  * `partnerNetwork`, falls back conservatively to the partner's full active upstream
@@ -157,14 +282,14 @@ export function scopePartnerNetworkForReconciliation(
     return partnerNetwork;
   }
 
+  const activeLanes = partnerNetwork.lanes.filter(
+    (lane) => lane.volumeSharePct > 0,
+  );
   const inboundByToFacilityId = new Map<
     string,
     WorkspaceNetworkResponse["lanes"]
   >();
-  for (const lane of partnerNetwork.lanes) {
-    if (lane.volumeSharePct <= 0) {
-      continue;
-    }
+  for (const lane of activeLanes) {
     const existing = inboundByToFacilityId.get(lane.toFacilityId);
     if (existing) {
       existing.push(lane);
@@ -195,12 +320,47 @@ export function scopePartnerNetworkForReconciliation(
     }
   }
 
+  const ownFacilityShareById = computeUpstreamOwnFacilityShares(
+    activeLanes,
+    feedingFacilityIds,
+    fulfillingOwnFacility.facilityId,
+  );
+
   const scopedLanes = partnerNetwork.lanes.filter((lane) =>
     scopedLaneIds.has(lane.laneId),
   );
-  const scopedFacilities = partnerNetwork.facilities.filter((f) =>
-    feedingFacilityIds.has(f.facilityId),
-  );
+  const scopedFacilities = partnerNetwork.facilities
+    .filter((f) => feedingFacilityIds.has(f.facilityId))
+    .map((facility) => {
+      if (
+        !facility.isOwnFacility ||
+        facility.facilityId === fulfillingOwnFacility.facilityId
+      ) {
+        return facility;
+      }
+      const rawShare = ownFacilityShareById.get(facility.facilityId) ?? 1;
+      const share = Math.abs(1 - rawShare) < 1e-6 ? 1 : rawShare;
+      if (share >= 1) {
+        return facility;
+      }
+      const scaledEstimatedScope12 =
+        typeof facility.estimatedScope12Tco2e === "number" &&
+        Number.isFinite(facility.estimatedScope12Tco2e) &&
+        facility.estimatedScope12Tco2e > 0
+          ? round6(facility.estimatedScope12Tco2e * share)
+          : facility.estimatedScope12Tco2e;
+      const scaledAnnualElectricityMwh =
+        typeof facility.annualElectricityMwh === "number" &&
+        Number.isFinite(facility.annualElectricityMwh) &&
+        facility.annualElectricityMwh > 0
+          ? round6(facility.annualElectricityMwh * share)
+          : facility.annualElectricityMwh;
+      return {
+        ...facility,
+        estimatedScope12Tco2e: scaledEstimatedScope12,
+        annualElectricityMwh: scaledAnnualElectricityMwh,
+      };
+    });
 
   return {
     ...partnerNetwork,

@@ -9,6 +9,7 @@ import {
 } from "@kulgo/shared";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "../src/app.js";
+import { parseCsvRecords } from "../src/workspace/import-export.js";
 
 /**
  * Mandatory Privacy Boundary Test Suite.
@@ -511,7 +512,8 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       lane: { laneId: string };
     };
 
-    // Baseline Org A summary before partner verification (no hidden upstream Scope 3 or sanction alert)
+    // Baseline before verification: Baltic corridor signals may match directly,
+    // but no hidden partner warning is available yet.
     const beforeSummaryRes = await app.request("/api/v1/analytics/summary", {
       headers: { Cookie: orgA.cookie },
     });
@@ -520,9 +522,8 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       await beforeSummaryRes.json(),
     );
     expect(
-      beforeSummary.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
+      beforeSummary.alerts.some((a) => a.alertId.startsWith("partner-upstream-")),
     ).toBe(false);
-    const baselineUpstreamScope3 = beforeSummary.esg.upstreamScope3Tco2e;
 
     // 2. Org B sets private revenue and maps its own private upstream network with hidden Tier-2 supplier Org C (in sanctioned RU)
     const bOrgPatchRes = await app.request("/api/v1/auth/organization", {
@@ -716,7 +717,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
 
     // Org A receives anonymized hidden-upstream secondary-sanction alert referencing ONLY aTier1
     const hiddenSanctionAlert = afterSummary.alerts.find(
-      (a) => a.category === "SECONDARY_SANCTION",
+      (a) => a.alertId === `partner-upstream-${aTier1.facilityId}`,
     );
     expect(hiddenSanctionAlert).toBeDefined();
     expect(hiddenSanctionAlert?.confidence).toBe("NETWORK_VERIFIED");
@@ -724,9 +725,16 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       aTier1.facilityId,
     ]);
 
-    // Org A's Scope 3 upstream rolled up Org B's hidden Tier-2 emissions
-    expect(afterSummary.esg.upstreamScope3Tco2e).toBeGreaterThan(
-      baselineUpstreamScope3,
+    // Verification replaces a physical proxy with proportional partner intensity;
+    // the corrected partner total can be lower than the original proxy.
+    const partnerSummaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgB.cookie },
+    });
+    expect(partnerSummaryRes.status).toBe(200);
+    const partnerSummary = AnalyticsSummarySchema.parse(await partnerSummaryRes.json());
+    const intensity = Math.round(partnerSummary.esg.totalTco2e / 812345 * 1_000_000) / 1_000_000;
+    expect(afterSummary.esg.upstreamScope3Tco2e).toBe(
+      Math.round(Math.min(partnerSummary.esg.totalTco2e, 750000 * intensity) * 100) / 100,
     );
     expect(afterSummary.verifiedCoveragePct).toBe(100);
     expect(afterSummary.confidence).toBe("NETWORK_VERIFIED");
@@ -1779,6 +1787,108 @@ describe("Privacy Boundary Contract (Sub-Project 2 Financial Risk & Contracts)",
 });
 
 describe("Privacy Boundary Contract (Sub-Project 3 ESG Ledger & Partner Economic Intensity)", () => {
+  it.each([
+    { revenue: null, spend: null, reconciled: false },
+    { revenue: null, spend: 5000, reconciled: false },
+    { revenue: 12345678, spend: null, reconciled: false },
+    { revenue: null, spend: null, reconciled: true },
+    { revenue: 12345678, spend: null, reconciled: true },
+  ])("keeps summary, report and ledgers proportional with missing inputs: %j (#37)", async ({ revenue, spend, reconciled }) => {
+    const app = createTestApp();
+    const buyer = await registerOrg(app, "buyer-missing@example.ee", "Buyer Missing Inputs");
+    const partner = await registerOrg(app, "partner-missing@example.ee", "Private Partner");
+    type FacilityResponse = { facility: { facilityId: string } };
+    async function post<T = unknown>(cookie: string, path: string, body: object, status = 201): Promise<T> {
+      const res = await app.request(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(status);
+      return res.json() as Promise<T>;
+    }
+    async function patch(cookie: string, path: string, body: object) {
+      const res = await app.request(path, {
+        method: "PATCH",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(body),
+      });
+      expect(res.status).toBe(200);
+    }
+    const location = { kind: "FACTORY", countryCode: "EE", lat: 59.437, lng: 24.7536 };
+    const { facility: own } = await post<FacilityResponse>(buyer.cookie, "/api/v1/workspace/facilities", {
+      ...location, name: "Buyer Plant", isOwnFacility: true,
+    });
+    const { facility: supplier } = await post<FacilityResponse>(buyer.cookie, "/api/v1/workspace/facilities", {
+      ...location, name: "Buyer Supplier Node", sector: "Metals", isOwnFacility: false,
+    });
+    const { facility: fulfilling } = await post<FacilityResponse>(partner.cookie, "/api/v1/workspace/facilities", {
+      ...location, name: "Private Fulfilling Plant", isOwnFacility: true,
+      estimatedScope12Tco2e: 5432,
+    });
+    // Two unvolumed lanes share a facility; Level-0 must emit one baseline only.
+    for (const materialCategory of ["Component A", "Component B"]) {
+      await post(buyer.cookie, "/api/v1/workspace/lanes", {
+        fromFacilityId: supplier.facilityId, toFacilityId: own.facilityId,
+        materialCategory, transportMode: "ROAD", volumeSharePct: 50,
+        annualSpendEur: spend,
+      });
+    }
+    const headers = { Cookie: buyer.cookie };
+    const before = AnalyticsSummarySchema.parse(await (await app.request("/api/v1/analytics/summary", { headers })).json());
+    await patch(buyer.cookie, `/api/v1/workspace/facilities/${supplier.facilityId}`, {
+      estimatedScope12Tco2e: 1000,
+    });
+    await patch(partner.cookie, "/api/v1/auth/organization", {
+      scope1Tco2e: 8765, scope2Tco2e: 0, annualRevenueEur: revenue,
+    });
+    const { inviteToken } = await post<{ inviteToken: string }>(buyer.cookie, "/api/v1/invites", {
+      targetFacilityId: supplier.facilityId, inviteeEmail: "partner-missing@example.ee",
+    });
+    await post(partner.cookie, `/api/v1/invites/${inviteToken}/accept`, {
+      ...(reconciled ? { fulfilledByFacilityId: fulfilling.facilityId } : {}),
+    }, 200);
+
+    const paths = ["/api/v1/analytics/summary", "/api/v1/analytics/report",
+      "/api/v1/analytics/esg-ledger?format=json", "/api/v1/analytics/esg-ledger?format=csv"];
+    const texts: string[] = [];
+    for (const path of paths) {
+      const res = await app.request(path, { headers });
+      expect(res.status).toBe(200);
+      texts.push(await res.text());
+    }
+    const summary = AnalyticsSummarySchema.parse(JSON.parse(texts[0]!));
+    const report = ExecutiveReportSchema.parse(JSON.parse(texts[1]!));
+    const ledger = EsgLedgerResponseSchema.parse(JSON.parse(texts[2]!));
+    const entries = ledger.entries.filter((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(summary.esg.upstreamScope3Tco2e).toBe(before.esg.upstreamScope3Tco2e);
+    expect(report.analytics.esg).toEqual(summary.esg);
+    expect(entries.reduce((sum, e) => sum + e.tco2e, 0)).toBeCloseTo(summary.esg.upstreamScope3Tco2e, 2);
+    expect(ledger.totalTco2e).toBe(summary.esg.totalTco2e);
+    expect(report.csrdDisclosures.totalReportedTco2e).toBe(ledger.totalTco2e);
+    const method = spend === null ? "SECTOR_BASELINE" : "SPEND_EEIO";
+    expect(entries).toHaveLength(spend === null ? 1 : 2);
+    for (const entry of entries) {
+      expect(entry.attributionMethod).toBe(method);
+      expect(entry.pcafScore).toBeGreaterThanOrEqual(4);
+    }
+    expect(texts[3]).toContain(method);
+    const [csvHeaders, ...csvRows] = parseCsvRecords(texts[3]!);
+    const csvScopeIndex = csvHeaders!.indexOf("scope");
+    const csvTco2eIndex = csvHeaders!.indexOf("tco2e");
+    const csvCat1 = csvRows.filter((row) => row[csvScopeIndex] === "SCOPE_3_CAT_1");
+    expect(csvCat1).toHaveLength(entries.length);
+    expect(csvCat1.reduce((sum, row) => sum + Number(row[csvTco2eIndex]), 0))
+      .toBeCloseTo(summary.esg.upstreamScope3Tco2e, 2);
+    for (const text of texts) {
+      // Match numeric totals separately so random UUID fragments cannot cause false failures.
+      expect(text).not.toMatch(/(?<![\da-f-])(?:8765|5432|12345678)(?![\da-f-])/i);
+      for (const secret of [partner.orgId, fulfilling.facilityId, "Private Fulfilling Plant", "partnerInventoryKey"]) {
+        expect(text).not.toContain(secret);
+      }
+    }
+  });
+
   it("computes server-side ECONOMIC_INTENSITY attribution for a verified partner without ever leaking partner annualRevenueEur across summary, report, JSON/CSV ledger, or directory", async () => {
     const app = createTestApp();
 
@@ -2213,6 +2323,9 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
       materialCategory: string;
       transportMode?: "ROAD" | "RAIL" | "SEA" | "AIR" | "MULTIMODAL";
       volumeSharePct?: number;
+      annualVolume?: number | null;
+      volumeUnit?: "TONNES" | "KG" | "UNITS" | "LITERS" | "EUR_VALUE";
+      annualSpendEur?: number | null;
       economicAttributionRatio?: number | null;
       estimatedLaneCo2e?: number | null;
       riskStatus?: "GREEN" | "YELLOW" | "RED";
@@ -2369,6 +2482,7 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
       toFacilityId: bTransitId,
       materialCategory: "Sanctioned Alloy",
       transportMode: "RAIL",
+      economicAttributionRatio: 1,
       estimatedLaneCo2e: 10,
       riskStatus: "RED",
       riskReason: "Secondary sanctions exposure on upstream feedstock",
@@ -2378,6 +2492,7 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
       toFacilityId: bTransitId,
       materialCategory: "Rare Earth Magnets",
       transportMode: "SEA",
+      economicAttributionRatio: 1,
       estimatedLaneCo2e: 5,
     });
     await createLane(app, orgB.cookie, {
@@ -2398,6 +2513,7 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
       fromFacilityId: bUnrelatedSupId,
       toFacilityId: bUnrelatedTransitId,
       materialCategory: "Unrelated Feedstock",
+      economicAttributionRatio: 1,
       estimatedLaneCo2e: 50,
     });
     await createLane(app, orgB.cookie, {
@@ -2428,6 +2544,7 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
       fromFacilityId: dSupplierKrId,
       toFacilityId: dPlantId,
       materialCategory: "Optical Chips",
+      economicAttributionRatio: 1,
       estimatedLaneCo2e: 0,
     });
 
@@ -2474,10 +2591,11 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
     );
 
     // Emissions:
-    // Org B scoped subgraph = 80 (plant) + 40 (transit) + 120 (supplierRu) + 80 (supplierKr) + 10 + 5 + 10 (freight) = 345 -> 50% = 172.5
+    // bTransit feeds both bPlant and bUnrelatedPlant equally (50% each), so bTransit allocates 40 * 0.5 = 20 to bPlant.
+    // Org B scoped subgraph = 80 (plant) + 20 (allocated transit) + 120 (supplierRu) + 80 (supplierKr) + 10 + 5 + 10 (freight) = 325 -> 50% = 162.5
     // Org D scoped subgraph = 60 (plant) + 40 (supplierKr) = 100 -> 50% = 50
-    // Total attributed upstream Scope 3 = 222.5 (excludes unrelated branch & does not double-count transit)
-    expect(summary.esg.upstreamScope3Tco2e).toBe(222.5);
+    // Total attributed upstream Scope 3 = 212.5 (excludes unrelated branch & does not double-count transit)
+    expect(summary.esg.upstreamScope3Tco2e).toBe(212.5);
 
     // Privacy: zero Tier-2+ names or IDs leak
     for (const secret of [
@@ -2560,12 +2678,14 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
       toFacilityId: bTransitAId,
       materialCategory: "Alloy Bar",
       volumeSharePct: 50,
+      economicAttributionRatio: 0.5,
     });
     await createLane(app, orgB.cookie, {
       fromFacilityId: bSupId,
       toFacilityId: bTransitBId,
       materialCategory: "Alloy Bar",
       volumeSharePct: 50,
+      economicAttributionRatio: 0.5,
     });
     await createLane(app, orgB.cookie, {
       fromFacilityId: bTransitAId,
@@ -2583,6 +2703,7 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
       fromFacilityId: bUnrelatedRuId,
       toFacilityId: bUnrelatedPlantId,
       materialCategory: "Sanctioned Ore",
+      economicAttributionRatio: 1,
       riskStatus: "RED",
       riskReason: "Sanctions exposure on unrelated plant",
     });
@@ -2720,6 +2841,7 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
       fromFacilityId: bSupId,
       toFacilityId: bTransitAId,
       materialCategory: "Cyclic Feedstock",
+      economicAttributionRatio: 1,
       riskStatus: "RED",
       riskReason: "Sanctions exposure on cyclic feedstock",
     });
@@ -2787,6 +2909,124 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
           a.affectedTier1FacilityIds.includes(aTier1Id),
       ),
     ).toBe(true);
+  });
+
+  it("allocates a shared own transit hub across two reconciled plants so intensity and caps do not double-count hub Scope 1+2", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, "hub-buyer@reconcile.ee", "Org A Shared Hub Buyer");
+    const orgB = await registerOrg(app, "hub-partner@reconcile.fi", "Org B Shared Hub Partner");
+
+    // Org B: one shared own transit hub (100 tCO2e) feeding two own plants (50 tCO2e & €1M revenue each)
+    // in a 60/40 physical volume split (600t -> Plant 1, 400t -> Plant 2).
+    const bHubId = await createFacility(app, orgB.cookie, {
+      name: "Org B Shared Central Hub",
+      kind: "WAREHOUSE",
+      countryCode: "FI",
+      lat: 60.4518,
+      lng: 22.2666,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 100,
+    });
+    const bPlant1Id = await createFacility(app, orgB.cookie, {
+      name: "Org B Plant North",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 50,
+      annualRevenueEur: 1_000_000,
+    });
+    const bPlant2Id = await createFacility(app, orgB.cookie, {
+      name: "Org B Plant South",
+      countryCode: "FI",
+      lat: 61.4978,
+      lng: 23.761,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 50,
+      annualRevenueEur: 1_000_000,
+    });
+
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bHubId,
+      toFacilityId: bPlant1Id,
+      materialCategory: "Internal Transfer North",
+      annualVolume: 600,
+      volumeUnit: "UNITS",
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bHubId,
+      toFacilityId: bPlant2Id,
+      materialCategory: "Internal Transfer South",
+      annualVolume: 400,
+      volumeUnit: "UNITS",
+    });
+
+    // Org A buys 100% of Plant 1's revenue (€1M) AND 100% of Plant 2's revenue (€1M)
+    const aOwnId = await createFacility(app, orgA.cookie, {
+      name: "Org A Assembly",
+      countryCode: "EE",
+      lat: 59.437,
+      lng: 24.7536,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 20,
+    });
+    const aTier1Plant1Id = await createFacility(app, orgA.cookie, {
+      name: "Org B North Placeholder",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    const aTier1Plant2Id = await createFacility(app, orgA.cookie, {
+      name: "Org B South Placeholder",
+      countryCode: "FI",
+      lat: 61.4978,
+      lng: 23.761,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+
+    await createLane(app, orgA.cookie, {
+      fromFacilityId: aTier1Plant1Id,
+      toFacilityId: aOwnId,
+      materialCategory: "North Drives",
+      annualSpendEur: 1_000_000,
+    });
+    await createLane(app, orgA.cookie, {
+      fromFacilityId: aTier1Plant2Id,
+      toFacilityId: aOwnId,
+      materialCategory: "South Drives",
+      annualSpendEur: 1_000_000,
+    });
+
+    await linkVerifiedPartner(
+      app,
+      orgA.cookie,
+      aTier1Plant1Id,
+      "hub-partner@reconcile.fi",
+      orgB.cookie,
+      bPlant1Id,
+    );
+    await linkVerifiedPartner(
+      app,
+      orgA.cookie,
+      aTier1Plant2Id,
+      "hub-partner@reconcile.fi",
+      orgB.cookie,
+      bPlant2Id,
+    );
+
+    const res = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(res.status).toBe(200);
+    const summary = AnalyticsSummarySchema.parse(await res.json());
+
+    // Plant 1 gets 50 + 60% of 100 = 110 tCO2e (intensity 0.00011 tCO2e/EUR, cap 110)
+    // Plant 2 gets 50 + 40% of 100 = 90 tCO2e (intensity 0.00009 tCO2e/EUR, cap 90)
+    // Total attributed across both reconciled plants = 200 tCO2e (NOT 150 + 150 = 300 tCO2e!)
+    expect(summary.esg.upstreamScope3Tco2e).toBe(200);
   });
 });
 

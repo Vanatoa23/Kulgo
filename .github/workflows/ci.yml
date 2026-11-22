@@ -121,6 +121,8 @@ jobs:
         run: pnpm --filter @kulgo/web exec playwright install chromium --with-deps
       - name: Run Playwright E2E Suite
         run: pnpm --filter @kulgo/web test:e2e
+      - name: Verify MapLibre workers in dev and production
+        run: pnpm --filter @kulgo/web test:e2e:map
 
 
 

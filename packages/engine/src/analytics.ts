@@ -17,7 +17,7 @@ import {
   type VolumeUnit,
 } from "@kulgo/shared";
 import { evaluateEsgAndCompliance } from "./esg-compliance.js";
-import { isPointInWktPolygon } from "./geo.js";
+import { isSignalActive, matchNetworkRiskSignals } from "./chokepoints.js";
 import { computeHhi, type ShareEntry } from "./hhi.js";
 
 /**
@@ -181,7 +181,9 @@ export function evaluateNetworkAnalytics(
   }
 
   const activeLanes = input.lanes.filter((lane) => lane.volumeSharePct > 0);
-  const activeSignals = input.riskSignals.filter((signal) => signal.active);
+  const activeSignals = input.riskSignals.filter((signal) =>
+    isSignalActive(signal, asOfDate.toISOString()),
+  );
 
   // --- 1. HHI Concentration Metrics (Aligned with Partial-Coverage & Dimension Denominators) ---
   const hhiMetrics: HhiMetric[] = [];
@@ -484,19 +486,23 @@ export function evaluateNetworkAnalytics(
     .map((id) => facilitiesById.get(id))
     .filter((f): f is Facility => f !== undefined && !f.isOwnFacility);
 
-  const signalCoveredFacilityIds = new Set<string>();
+  const signalsByLane = matchNetworkRiskSignals(
+    activeLanes, input.facilities, activeSignals, asOfDate.toISOString(),
+  );
+  const supplierIdsBySignal = new Map<string, Set<string>>();
+  for (const lane of activeLanes) {
+    for (const signal of signalsByLane.get(lane.laneId) ?? []) {
+      const ids = supplierIdsBySignal.get(signal.signalId) ?? new Set<string>();
+      ids.add(lane.fromFacilityId);
+      supplierIdsBySignal.set(signal.signalId, ids);
+    }
+  }
 
   for (const signal of activeSignals) {
     const matchedFacilities = activeSupplierFacilities.filter(
-      (f) =>
-        isPointInWktPolygon(f.lat, f.lng, signal.polygonWkt) ||
-        signal.affectedCountryCodes.includes(f.countryCode),
+      (f) => supplierIdsBySignal.get(signal.signalId)?.has(f.facilityId),
     );
     if (matchedFacilities.length === 0) continue;
-
-    for (const f of matchedFacilities) {
-      signalCoveredFacilityIds.add(f.facilityId);
-    }
 
     const category: AnonymizedRiskAlert["category"] =
       signal.kind === "SANCTIONS" ? "SECONDARY_SANCTION" : "GEOPOLITICAL";
@@ -508,7 +514,7 @@ export function evaluateNetworkAnalytics(
       title: signal.title,
       summary:
         signal.description ??
-        `${matchedFacilities.length} active Tier-1 supplier(s) intersect the ${signal.title} risk zone.`,
+        `${matchedFacilities.length} active Tier-1 supplier(s) or their corridors match the ${signal.title} risk zone.`,
       affectedTier1FacilityIds: matchedFacilities.map((f) => f.facilityId),
       affectedRegionCode: signal.regionCode ?? matchedFacilities[0]?.countryCode ?? null,
       confidence: "ESTIMATED",
@@ -522,12 +528,24 @@ export function evaluateNetworkAnalytics(
   // 2d. Lane-level RED / YELLOW corridor alerts not already covered by a RiskSignal
   for (const lane of activeLanes) {
     if (lane.riskStatus === "GREEN") continue;
-    if (signalCoveredFacilityIds.has(lane.fromFacilityId)) continue;
 
     const fromFacility = facilitiesById.get(lane.fromFacilityId);
     const linkedInput = lane.inputId ? inputsById.get(lane.inputId) : undefined;
     const materialLabel = linkedInput?.name ?? lane.materialCategory;
     const isSanction = (lane.riskReason ?? "").toLowerCase().includes("sanction");
+    // Free-text lane reasons have no event ID. Only treat identical descriptions
+    // as duplicates; the broad GEOPOLITICAL category also contains climate risks.
+    const reason = lane.riskReason?.trim().toLowerCase();
+    const rank: Record<RiskStatus, number> = { GREEN: 0, YELLOW: 1, RED: 2 };
+    if (
+      reason && signalsByLane.get(lane.laneId)?.some((signal) =>
+        (signal.kind === "SANCTIONS") === isSanction &&
+        rank[signal.severity] >= rank[lane.riskStatus] &&
+        [signal.title, signal.description].some(
+          (text) => text?.trim().toLowerCase() === reason,
+        ),
+      )
+    ) continue;
 
     alerts.push({
       alertId: `lane-risk-${lane.laneId}`,

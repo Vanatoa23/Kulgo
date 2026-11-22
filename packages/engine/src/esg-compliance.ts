@@ -24,6 +24,7 @@ import {
 } from "@kulgo/shared";
 import {
   haversineDistanceKm,
+  LEVEL0_DEFAULT_BUYER_SHARE,
   SECTOR_BASELINE_SCOPE12_TCO2E,
 } from "./baselines.js";
 import {
@@ -121,7 +122,6 @@ const DELIVERED_INCOTERMS = new Set([
 
 const UFLPA_HIGH_RISK_ORIGINS = new Set(["CN"]);
 const CBAM_DE_MINIMIS_TONNES = 50;
-const LEVEL0_DEFAULT_BUYER_SHARE = 0.08;
 
 const PCAF_LABELS: Readonly<Record<PcafScore, string>> = {
   1: "Score 1 — Verified Primary Supplier Data",
@@ -887,6 +887,17 @@ export function evaluateEsgAndCompliance(
       supplyInput?.unitMassKg,
     );
 
+    const taxonomy = resolveMaterialArchetype(supplyInput, lane, supplier);
+    const cnCode = supplyInput?.cnCode ?? null;
+
+    // EUDR & UFLPA checks (independent of Scope 3 Cat 1 purchased-goods attribution)
+    if (taxonomy.eudrCommodity && supplier.locationPrecision !== "SITE_VERIFIED") {
+      eudrLanesMissingSiteVerification.push(lane.laneId);
+    }
+    if (UFLPA_HIGH_RISK_ORIGINS.has(supplier.countryCode.toUpperCase()) && !supplier.isPartnerVerified) {
+      uflpaFlaggedFacilityIds.push(supplier.facilityId);
+    }
+
     // Internal transfers between own facilities (e.g., own transit hub -> own plant)
     // are already accounted for under own Scope 1 & 2 and must not be double-counted
     // or assigned synthetic sector baselines as Scope 3 Category 1 purchased goods.
@@ -894,17 +905,6 @@ export function evaluateEsgAndCompliance(
     if (!supplier.isOwnFacility) {
       if (massTonnes !== null) {
         totalPhysicalTonnes += massTonnes;
-      }
-
-      const taxonomy = resolveMaterialArchetype(supplyInput, lane, supplier);
-      const cnCode = supplyInput?.cnCode ?? null;
-
-      // EUDR & UFLPA checks
-      if (taxonomy.eudrCommodity && supplier.locationPrecision !== "SITE_VERIFIED") {
-        eudrLanesMissingSiteVerification.push(lane.laneId);
-      }
-      if (UFLPA_HIGH_RISK_ORIGINS.has(supplier.countryCode.toUpperCase()) && !supplier.isPartnerVerified) {
-        uflpaFlaggedFacilityIds.push(supplier.facilityId);
       }
 
       // Resolve Category 1 attribution method (6-Step Waterfall)
@@ -1112,7 +1112,7 @@ export function evaluateEsgAndCompliance(
       // ratio, physical volume, or spend basis, NEVER attribute or expose its raw private footprint.
       else {
         method = "SECTOR_BASELINE";
-        if (supplier.isPartnerVerified && hidden) {
+        if ((supplier.isPartnerVerified && hidden) || finitePositive(supplier.estimatedScope12Tco2e)) {
           unscaledReportedWarningCount += 1;
         }
         if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
@@ -1122,21 +1122,9 @@ export function evaluateEsgAndCompliance(
           if (supplier.isPartnerVerified && !hidden && !finitePositive(supplier.estimatedScope12Tco2e)) {
             // Cycle-broken verified partner with no activity data: emit 0 to prevent circular double-counting
             skipLedgerEmission = true;
-          } else if (finitePositive(supplier.estimatedScope12Tco2e)) {
-            unscaledReportedWarningCount += 1;
-            cat1Tco2e = round2(supplier.estimatedScope12Tco2e);
-            pcafScore = 5;
-            factorId = `supplier_reported_unscaled_${supplier.facilityId.slice(0, 8)}`;
-            factorValue = cat1Tco2e;
-            factorUnit = "tCO2e (unscaled supplier estimate)";
-            sourceCitation =
-              "User-entered supplier facility Scope 1+2 estimate (add spend, volume, or allocation share for proportional attribution)";
-            licenseId = "ORG-REPORTED";
-            provenanceStatus = "ORG_REPORTED";
-            activityValue = cat1Tco2e;
-            activityUnit = "tCO2e";
-            formulaTrace = `Unscaled supplier estimate = ${cat1Tco2e} tCO2e (add spend/volume/ratio)`;
           } else {
+            // A reported inventory is not a buyer allocation. Without a usable basis,
+            // retain the public scaled proxy rather than substituting that inventory.
             const sectorKey = supplier.sector ?? "Manufacturing";
             const facilityBaseline =
               SECTOR_BASELINE_SCOPE12_TCO2E[sectorKey] ??
@@ -1531,7 +1519,7 @@ function evaluateComplianceChecklist(ctx: ChecklistEvalContext): ComplianceCheck
     summary:
       ctx.unscaledReportedWarningCount === 0
         ? "All active lanes use proportional PCF, server-side partner intensity, physical, spend, or scaled proxy attribution."
-        : `${ctx.unscaledReportedWarningCount} unverified supplier(s) have facility Scope 1+2 entered without spend, volume, or allocation share.`,
+        : `${ctx.unscaledReportedWarningCount} lane(s) lack usable inputs to allocate supplier emissions; a scaled sector proxy is used instead.`,
     remediationPrompt:
       ctx.unscaledReportedWarningCount === 0
         ? null

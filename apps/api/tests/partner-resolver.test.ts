@@ -201,4 +201,41 @@ describe("scopePartnerNetworkForReconciliation", () => {
     expect(scopePartnerNetworkForReconciliation(network, "fac-missing")).toBe(network);
     expect(scopePartnerNetworkForReconciliation(network, supplier.facilityId)).toBe(network);
   });
+
+  it("allocates a shared own transit hub's Scope 1+2 inventory proportionally across the plants it serves", () => {
+    const hub: Facility = {
+      ...makeFacility("fac-hub", "Shared Transit Hub", true, "FI"),
+      estimatedScope12Tco2e: 100,
+      annualElectricityMwh: 500,
+    };
+    const plant1 = makeFacility("fac-plant-1", "Plant 1", true, "FI");
+    const plant2 = makeFacility("fac-plant-2", "Plant 2", true, "FI");
+
+    // Volume-weighted 60/40 split across Plant 1 and Plant 2
+    const laneToP1: SupplyLane = {
+      ...makeLane("lane-hub-p1", hub.facilityId, plant1.facilityId, 100),
+      annualVolume: 600,
+      volumeUnit: "TONNES",
+    };
+    const laneToP2: SupplyLane = {
+      ...makeLane("lane-hub-p2", hub.facilityId, plant2.facilityId, 100),
+      annualVolume: 400,
+      volumeUnit: "TONNES",
+    };
+
+    const network = makeNetwork([hub, plant1, plant2], [laneToP1, laneToP2]);
+    const scoped1 = scopePartnerNetworkForReconciliation(network, plant1.facilityId);
+    const scoped2 = scopePartnerNetworkForReconciliation(network, plant2.facilityId);
+
+    const hubForP1 = scoped1.facilities.find((f) => f.facilityId === hub.facilityId)!;
+    const hubForP2 = scoped2.facilities.find((f) => f.facilityId === hub.facilityId)!;
+
+    expect(hubForP1.estimatedScope12Tco2e).toBe(60);
+    expect(hubForP2.estimatedScope12Tco2e).toBe(40);
+    expect(hubForP1.annualElectricityMwh).toBe(300);
+    expect(hubForP2.annualElectricityMwh).toBe(200);
+    expect(
+      (hubForP1.estimatedScope12Tco2e ?? 0) + (hubForP2.estimatedScope12Tco2e ?? 0),
+    ).toBe(100);
+  });
 });
