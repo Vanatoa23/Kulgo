@@ -80,6 +80,8 @@ docker compose --env-file .env -f infra/docker-compose.yml exec api \
 
 This creates all vertex types (`Organization`, `User`, `Session`, `Product`, `SupplyInput`, `Facility`, `Invitation`, `RiskSignal`, `AuditEvent`), edge types (`SUPPLIES_LANE`, `VERIFIED_PARTNER_LINK`), unique/lookup indexes, and WKT `GEOSPATIAL` indexes idempotently.
 
+The invitation atomicity update adds a unique index on `VERIFIED_PARTNER_LINK.@out`, covering existing edges without a backfill. Run bootstrap before serving the updated API. If older concurrent accepts created multiple links from one buyer facility, index creation fails; reconcile those links and their accepted invitations with the buyer before rerunning bootstrap. The migration deliberately does not choose a supplier or delete relationship data automatically.
+
 ---
 
 ## 4. Health Checks & Observability

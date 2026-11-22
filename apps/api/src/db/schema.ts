@@ -272,6 +272,9 @@ export const KULGO_SCHEMA_STATEMENTS: readonly string[] = [
   "CREATE PROPERTY VERIFIED_PARTNER_LINK.linkedAt IF NOT EXISTS STRING",
   "CREATE PROPERTY VERIFIED_PARTNER_LINK.fulfilledByFacilityId IF NOT EXISTS STRING",
   "CREATE INDEX IF NOT EXISTS ON VERIFIED_PARTNER_LINK (inviteId) UNIQUE",
+  // The buyer's placeholder vertex can bind to only one partner organization.
+  // Indexing the endpoint also covers existing edges without a backfill.
+  "CREATE INDEX IF NOT EXISTS ON VERIFIED_PARTNER_LINK (`@out`) UNIQUE",
 ] as const;
 
 export async function bootstrapSchema(client: ArcadeDbClient): Promise<void> {

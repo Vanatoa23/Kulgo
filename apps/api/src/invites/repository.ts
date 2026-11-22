@@ -9,10 +9,11 @@ import {
   type CreateInviteResponse,
   type Invitation,
 } from "@kulgo/shared";
-import { normalizeEmail, type AuthRepository } from "../auth/repository.js";
+import { ArcadeDbAuthRepository, normalizeEmail, type AuthRepository } from "../auth/repository.js";
 import type { ArcadeDbClient } from "../db/client.js";
 import {
   assertOrgId,
+  ArcadeDbWorkspaceRepository,
   type WorkspaceRepository,
 } from "../workspace/repository.js";
 
@@ -144,6 +145,14 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
     this.workspaceRepo = deps.workspaceRepo;
   }
 
+  private inTransaction<T>(work: (repo: ArcadeDbInvitationRepository) => Promise<T>): Promise<T> {
+    if (!this.db.transaction) throw new Error("Invitation transitions require database transactions");
+    return this.db.transaction(db => work(new ArcadeDbInvitationRepository(db, {
+      authRepo: new ArcadeDbAuthRepository(db),
+      workspaceRepo: new ArcadeDbWorkspaceRepository(db),
+    })));
+  }
+
   async createInvite(
     fromOrgId: string,
     input: CreateInviteInput,
@@ -245,6 +254,14 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
     acceptingOrgId: string,
     input: AcceptInviteInput,
   ): Promise<AcceptInviteResponse> {
+    return this.inTransaction(repo => repo.acceptInTransaction(rawToken, acceptingOrgId, input));
+  }
+
+  private async acceptInTransaction(
+    rawToken: string,
+    acceptingOrgId: string,
+    input: AcceptInviteInput,
+  ): Promise<AcceptInviteResponse> {
     const safeAcceptingOrgId = assertOrgId(acceptingOrgId);
     const trimmedToken = rawToken.trim();
     if (trimmedToken.length === 0) {
@@ -272,11 +289,6 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
       );
     }
     if (existing.status === "EXPIRED") {
-      await this.db.command(
-        "sql",
-        "UPDATE Invitation SET status = 'EXPIRED' WHERE inviteId = :inviteId",
-        { inviteId: existing.inviteId },
-      );
       throw new InviteStateError("This invitation has expired");
     }
     if (existing.status !== "PENDING") {
@@ -290,11 +302,6 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
       existing.targetFacilityId,
     );
     if (!targetFacility) {
-      await this.db.command(
-        "sql",
-        "UPDATE Invitation SET status = 'REVOKED' WHERE inviteId = :inviteId",
-        { inviteId: existing.inviteId },
-      );
       throw new InviteNotFoundError(
         "Target facility no longer exists in the inviting organization's workspace",
       );
@@ -342,11 +349,13 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
 
     const linkedAt = new Date().toISOString();
 
-    await this.db.command(
+    const consumed = await this.db.command(
       "sql",
-      "UPDATE Invitation SET status = 'ACCEPTED' WHERE inviteId = :inviteId",
-      { inviteId: existing.inviteId },
+      `UPDATE Invitation SET status = 'ACCEPTED' RETURN AFTER
+       WHERE inviteId = :inviteId AND status = 'PENDING' AND expiresAt > :now`,
+      { inviteId: existing.inviteId, now: linkedAt },
     );
+    if (consumed.length !== 1) throw new InviteStateError("Invitation is no longer pending or has expired");
 
     await this.db.command(
       "sql",
@@ -364,12 +373,13 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
       },
     );
 
-    await this.workspaceRepo.markFacilityPartnerVerified(
+    const verifiedFacility = await this.workspaceRepo.markFacilityPartnerVerified(
       existing.fromOrgId,
       existing.targetFacilityId,
       safeAcceptingOrgId,
       input.refinedSite,
     );
+    if (!verifiedFacility) throw new InviteNotFoundError("Target facility no longer exists");
 
     const updatedOrg =
       input.openToNewBuyers !== undefined || input.capabilities !== undefined
@@ -406,6 +416,10 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
   }
 
   async revokeInvite(fromOrgId: string, inviteId: string): Promise<Invitation> {
+    return this.inTransaction(repo => repo.revokeInTransaction(fromOrgId, inviteId));
+  }
+
+  private async revokeInTransaction(fromOrgId: string, inviteId: string): Promise<Invitation> {
     const safeOrgId = assertOrgId(fromOrgId);
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
@@ -427,11 +441,13 @@ export class ArcadeDbInvitationRepository implements InvitationRepository {
       );
     }
 
-    await this.db.command(
+    const revoked = await this.db.command(
       "sql",
-      "UPDATE Invitation SET status = 'REVOKED' WHERE inviteId = :inviteId AND fromOrgId = :fromOrgId",
-      { inviteId, fromOrgId: safeOrgId },
+      `UPDATE Invitation SET status = 'REVOKED' RETURN AFTER
+       WHERE inviteId = :inviteId AND fromOrgId = :fromOrgId AND status = 'PENDING' AND expiresAt > :now`,
+      { inviteId, fromOrgId: safeOrgId, now: new Date().toISOString() },
     );
+    if (revoked.length !== 1) throw new InviteStateError("Invitation is no longer pending or has expired");
 
     return InvitationSchema.parse({
       ...existing,
@@ -506,6 +522,17 @@ export class InMemoryInvitationRepository implements InvitationRepository {
   private readonly invitesById = new Map<string, StoredInMemoryInvitation>();
   private readonly inviteIdByTokenHash = new Map<string, string>();
   private readonly partnerLinks: VerifiedPartnerLinkRecord[] = [];
+  private transitionTail: Promise<void> = Promise.resolve();
+
+  // The memory store has one owner. Serialize transitions across awaits, just
+  // as the persistent store uses a transaction rather than a process-local lock.
+  private async transition<T>(work: () => Promise<T>): Promise<T> {
+    const previous = this.transitionTail;
+    let release!: () => void;
+    this.transitionTail = new Promise<void>(resolve => { release = resolve; });
+    await previous;
+    try { return await work(); } finally { release(); }
+  }
 
   constructor(deps: InvitationRepositoryDeps) {
     this.authRepo = deps.authRepo;
@@ -593,6 +620,14 @@ export class InMemoryInvitationRepository implements InvitationRepository {
     acceptingOrgId: string,
     input: AcceptInviteInput,
   ): Promise<AcceptInviteResponse> {
+    return this.transition(() => this.acceptTransition(rawToken, acceptingOrgId, input));
+  }
+
+  private async acceptTransition(
+    rawToken: string,
+    acceptingOrgId: string,
+    input: AcceptInviteInput,
+  ): Promise<AcceptInviteResponse> {
     const safeAcceptingOrgId = assertOrgId(acceptingOrgId);
     const trimmedToken = rawToken.trim();
     if (trimmedToken.length === 0) {
@@ -672,6 +707,33 @@ export class InMemoryInvitationRepository implements InvitationRepository {
       }
     }
 
+    const updatedOrg =
+      input.openToNewBuyers !== undefined || input.capabilities !== undefined
+        ? await this.authRepo.updateOrganizationDirectoryProfile(
+            safeAcceptingOrgId,
+            {
+              openToNewBuyers:
+                input.openToNewBuyers ?? currentOrg.openToNewBuyers,
+              capabilities: input.capabilities ?? currentOrg.capabilities,
+            },
+          )
+        : currentOrg;
+    if (!updatedOrg) {
+      throw new InviteValidationError("Accepting organization not found");
+    }
+
+    if (resolveEffectiveStatus(stored.invitation).status !== "PENDING") {
+      throw new InviteStateError("Invitation is no longer pending or has expired");
+    }
+    const verifiedFacility = await this.workspaceRepo.markFacilityPartnerVerified(
+      existing.fromOrgId,
+      existing.targetFacilityId,
+      safeAcceptingOrgId,
+      input.refinedSite,
+    );
+
+    if (!verifiedFacility) throw new InviteNotFoundError("Target facility no longer exists");
+
     const linkedAt = new Date().toISOString();
     const acceptedInvitation = InvitationSchema.parse({
       ...existing,
@@ -688,28 +750,6 @@ export class InMemoryInvitationRepository implements InvitationRepository {
       fulfilledByFacilityId: input.fulfilledByFacilityId ?? null,
     });
 
-    await this.workspaceRepo.markFacilityPartnerVerified(
-      acceptedInvitation.fromOrgId,
-      acceptedInvitation.targetFacilityId,
-      safeAcceptingOrgId,
-      input.refinedSite,
-    );
-
-    const updatedOrg =
-      input.openToNewBuyers !== undefined || input.capabilities !== undefined
-        ? await this.authRepo.updateOrganizationDirectoryProfile(
-            safeAcceptingOrgId,
-            {
-              openToNewBuyers:
-                input.openToNewBuyers ?? currentOrg.openToNewBuyers,
-              capabilities: input.capabilities ?? currentOrg.capabilities,
-            },
-          )
-        : currentOrg;
-    if (!updatedOrg) {
-      throw new InviteValidationError("Accepting organization not found");
-    }
-
     return AcceptInviteResponseSchema.parse({
       invitation: { ...acceptedInvitation },
       verifiedPartnerLink: {
@@ -725,6 +765,10 @@ export class InMemoryInvitationRepository implements InvitationRepository {
   }
 
   async revokeInvite(fromOrgId: string, inviteId: string): Promise<Invitation> {
+    return this.transition(() => this.revokeTransition(fromOrgId, inviteId));
+  }
+
+  private async revokeTransition(fromOrgId: string, inviteId: string): Promise<Invitation> {
     const safeOrgId = assertOrgId(fromOrgId);
     const stored = this.invitesById.get(inviteId);
     if (!stored || stored.invitation.fromOrgId !== safeOrgId) {
@@ -750,6 +794,10 @@ export class InMemoryInvitationRepository implements InvitationRepository {
     fromOrgId: string,
     facilityId: string,
   ): Promise<void> {
+    return this.transition(() => this.cleanupTransition(fromOrgId, facilityId));
+  }
+
+  private async cleanupTransition(fromOrgId: string, facilityId: string): Promise<void> {
     const safeOrgId = assertOrgId(fromOrgId);
     for (const stored of this.invitesById.values()) {
       if (
