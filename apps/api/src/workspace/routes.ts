@@ -180,7 +180,10 @@ export function createWorkspaceRoutes({
         raw,
       }));
 
-      if (facilities.length === 0 && lanes.length === 0) {
+      const products = (parsedBody.data.products ?? []).map((raw, idx) => ({ rowNumber: idx + 1, raw }));
+      const inputs = (parsedBody.data.inputs ?? []).map((raw, idx) => ({ rowNumber: idx + 1, raw }));
+
+      if (facilities.length === 0 && lanes.length === 0 && products.length === 0 && inputs.length === 0 && !parsedBody.data.exportVersion) {
         return c.json(
           {
             error:
@@ -193,6 +196,8 @@ export function createWorkspaceRoutes({
       const summary = await executeBulkImport(workspaceRepo, orgId, {
         facilities,
         lanes,
+        products,
+        inputs,
       });
       await recordBulkImportAudit("json", summary);
       return c.json(summary, 200);

@@ -44,3 +44,9 @@ pnpm --filter @kulgo/web test:e2e:map # Verify worker loading & GeoJSON renderin
 * [Deployment & Operations Guide](docs/DEPLOYMENT.md)
 * [Architecture Decisions](docs/DECISIONS.md)
 * [Phase 2 Specifications](docs/specs/)
+
+## Network import and export
+
+JSON network exports are the portable format for products, inputs, facilities, lanes, and their associations. Import creates organization-scoped entities with new identifiers; existing facilities may be matched by name, kind, and country. Contracts and verified partner links are not included in the network export.
+
+CSV is a facilities-and-lanes format for spreadsheet editing; it does not include products, inputs, or lane-to-input associations. Use JSON when those associations need to be restored. Import is row-based and can partially succeed, so check the returned errors.

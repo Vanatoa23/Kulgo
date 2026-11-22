@@ -583,6 +583,7 @@ export type UpdateContractLineInput = z.infer<
 
 export const BulkImportFacilityRowSchema = CreateFacilityInputSchema.extend({
   refKey: z.string().trim().min(1).max(100).optional(),
+  facilityId: z.string().uuid().optional(),
 });
 export type BulkImportFacilityRow = z.infer<typeof BulkImportFacilityRowSchema>;
 
@@ -608,10 +609,20 @@ export const BulkImportLaneRowSchema = z.object({
   safetyStockDays: z.number().finite().nonnegative().nullable().optional(),
   defectRatePct: z.number().finite().min(0).max(95).nullable().optional(),
   carryingCostPct: z.number().finite().min(0).max(100).nullable().optional(),
+  unitLandedCostEur: z.number().finite().nonnegative().nullable().optional(),
+  ordinaryFreightCostPerUnitEur: z.number().finite().nonnegative().nullable().optional(),
+  customAnnualDisruptionProb: z.number().finite().min(0).max(1).nullable().optional(),
+  customTtrDays: z.number().finite().nonnegative().nullable().optional(),
+  productEmissionFactorTco2ePerUnit: z.number().finite().nonnegative().nullable().optional(),
+  pcfVerified: z.boolean().optional(),
+  economicAttributionRatio: z.number().finite().min(0).max(1).nullable().optional(),
 });
 export type BulkImportLaneRow = z.infer<typeof BulkImportLaneRowSchema>;
 
 export const BulkImportJsonRequestSchema = z.object({
+  products: z.array(z.unknown()).max(500).optional(),
+  inputs: z.array(z.unknown()).max(1000).optional(),
+  exportVersion: z.literal("1.0").optional(),
   facilities: z.array(z.unknown()).max(500).optional(),
   lanes: z.array(z.unknown()).max(1000).optional(),
   csv: z.string().min(1).max(2_000_000).optional(),
@@ -621,7 +632,7 @@ export type BulkImportJsonRequest = z.infer<typeof BulkImportJsonRequestSchema>;
 export const BulkImportErrorSchema = z
   .object({
     row: z.number().int().nonnegative(),
-    entity: z.enum(["FACILITY", "LANE", "ROW"]),
+    entity: z.enum(["PRODUCT", "INPUT", "FACILITY", "LANE", "ROW"]),
     field: z.string().optional(),
     message: z.string().min(1),
   })

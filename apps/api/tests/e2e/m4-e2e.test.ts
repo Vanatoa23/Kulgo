@@ -242,6 +242,72 @@ describe("Milestone 4 E2E — Org ESG Settings, Bulk CSV/JSON Import/Export & CS
     expect(orgBNet.lanes).toHaveLength(1);
   });
 
+  it("restores JSON network references and imported lane financial fields", async () => {
+    const app = createTestApp();
+    const source = await registerOrg(app, { email: "restore-source@example.com", organizationName: "Restore source" });
+    const target = await registerOrg(app, { email: "restore-target@example.com", organizationName: "Restore target" });
+    await app.request("/api/v1/workspace/seed-demo", { method: "POST", headers: { Cookie: source.cookie } });
+    const exported = WorkspaceExportJsonSchema.parse(await (await app.request("/api/v1/workspace/export?format=json", { headers: { Cookie: source.cookie } })).json());
+    const imported = await app.request("/api/v1/workspace/import", { method: "POST", headers: { "Content-Type": "application/json", Cookie: target.cookie }, body: JSON.stringify(exported) });
+    expect(imported.status).toBe(200);
+    const summary = BulkImportSummarySchema.parse(await imported.json());
+    expect(summary.errors).toEqual([]);
+    const restored = WorkspaceNetworkResponseSchema.parse(await (await app.request("/api/v1/workspace/network", { headers: { Cookie: target.cookie } })).json());
+    expect(restored.products).toHaveLength(exported.products.length);
+    expect(restored.inputs).toHaveLength(exported.inputs.length);
+    expect(restored.lanes).toHaveLength(exported.lanes.length);
+    for (const lane of restored.lanes) {
+      expect(restored.facilities.some(f => f.facilityId === lane.fromFacilityId && f.ownerOrgId === target.orgId)).toBe(true);
+      expect(restored.facilities.some(f => f.facilityId === lane.toFacilityId && f.ownerOrgId === target.orgId)).toBe(true);
+      if (lane.inputId) expect(restored.inputs.some(i => i.inputId === lane.inputId && i.ownerOrgId === target.orgId)).toBe(true);
+    }
+    for (const input of restored.inputs) {
+      if (input.productId) expect(restored.products.some(p => p.productId === input.productId && p.ownerOrgId === target.orgId)).toBe(true);
+    }
+    expect(restored.inputs.filter(i => i.productId).length).toBe(exported.inputs.filter(i => i.productId).length);
+    expect(restored.lanes.filter(l => l.inputId).length).toBe(exported.lanes.filter(l => l.inputId).length);
+  });
+
+  it("persists accepted JSON and CSV financial lane fields", async () => {
+    const app = createTestApp();
+    const org = await registerOrg(app, { email: "financial-import@example.com", organizationName: "Financial import" });
+    const facilities = [{ refKey: "a", name: "A", countryCode: "EE", lat: 1, lng: 1 }, { refKey: "b", name: "B", countryCode: "EE", lat: 2, lng: 2 }];
+    const lane = { fromFacilityRef: "a", toFacilityRef: "b", materialCategory: "Steel", safetyStockDays: 99, defectRatePct: 12, carryingCostPct: 45, unitLandedCostEur: 4, ordinaryFreightCostPerUnitEur: 2, customAnnualDisruptionProb: 0.2, customTtrDays: 6, productEmissionFactorTco2ePerUnit: 0.5, economicAttributionRatio: 0.4, pcfVerified: true };
+    const res = await app.request("/api/v1/workspace/import", { method: "POST", headers: { "Content-Type": "application/json", Cookie: org.cookie }, body: JSON.stringify({ facilities, lanes: [lane] }) });
+    expect(BulkImportSummarySchema.parse(await res.json()).errors).toEqual([]);
+    const network = WorkspaceNetworkResponseSchema.parse(await (await app.request("/api/v1/workspace/network", { headers: { Cookie: org.cookie } })).json());
+    expect(network.lanes[0]).toMatchObject({ safetyStockDays: 99, defectRatePct: 12, carryingCostPct: 45, unitLandedCostEur: 4, ordinaryFreightCostPerUnitEur: 2, customAnnualDisruptionProb: 0.2, customTtrDays: 6, productEmissionFactorTco2ePerUnit: 0.5, economicAttributionRatio: 0.4, pcfVerified: true });
+    const csv = await (await app.request("/api/v1/workspace/export?format=csv", { headers: { Cookie: org.cookie } })).text();
+    const target = await registerOrg(app, { email: "financial-target@example.com", organizationName: "Financial target" });
+    const csvRes = await app.request("/api/v1/workspace/import", { method: "POST", headers: { "Content-Type": "text/csv", Cookie: target.cookie }, body: csv });
+    expect(BulkImportSummarySchema.parse(await csvRes.json()).errors).toEqual([]);
+    const restored = WorkspaceNetworkResponseSchema.parse(await (await app.request("/api/v1/workspace/network", { headers: { Cookie: target.cookie } })).json());
+    expect(restored.lanes[0]).toMatchObject({ safetyStockDays: 99, defectRatePct: 12, carryingCostPct: 45, unitLandedCostEur: 4, ordinaryFreightCostPerUnitEur: 2, customAnnualDisruptionProb: 0.2, customTtrDays: 6, productEmissionFactorTco2ePerUnit: 0.5, economicAttributionRatio: 0.4, pcfVerified: true });
+  });
+
+  it("restores empty exports and distinct facilities sharing a name and type", async () => {
+    const app = createTestApp();
+    const source = await registerOrg(app, { email: "duplicates-source@example.com", organizationName: "Duplicate source" });
+    const target = await registerOrg(app, { email: "duplicates-target@example.com", organizationName: "Duplicate target" });
+    const exportNetwork = async () => WorkspaceExportJsonSchema.parse(await (await app.request("/api/v1/workspace/export?format=json", { headers: { Cookie: source.cookie } })).json());
+    const importNetwork = async (data: unknown) => app.request("/api/v1/workspace/import", { method: "POST", headers: { "Content-Type": "application/json", Cookie: target.cookie }, body: JSON.stringify(data) });
+    const empty = await importNetwork(await exportNetwork());
+    expect(empty.status).toBe(200);
+    expect(BulkImportSummarySchema.parse(await empty.json()).errors).toEqual([]);
+    const create = async (lat: number) => (await (await app.request("/api/v1/workspace/facilities", { method: "POST", headers: { "Content-Type": "application/json", Cookie: source.cookie }, body: JSON.stringify({ name: "Same", kind: "FACTORY", countryCode: "EE", lat, lng: 1 }) })).json() as { facility: { facilityId: string } }).facility;
+    const first = await create(1);
+    const second = await create(2);
+    await app.request("/api/v1/workspace/lanes", { method: "POST", headers: { "Content-Type": "application/json", Cookie: source.cookie }, body: JSON.stringify({ fromFacilityId: first.facilityId, toFacilityId: second.facilityId, materialCategory: "Steel" }) });
+    const response = await importNetwork(await exportNetwork());
+    expect(BulkImportSummarySchema.parse(await response.json()).errors).toEqual([]);
+    const restored = WorkspaceNetworkResponseSchema.parse(await (await app.request("/api/v1/workspace/network", { headers: { Cookie: target.cookie } })).json());
+    expect(restored.facilities).toHaveLength(2);
+    expect(restored.facilities.find(f => f.facilityId === restored.lanes[0]?.fromFacilityId)?.lat).toBe(1);
+    expect(restored.facilities.find(f => f.facilityId === restored.lanes[0]?.toFacilityId)?.lat).toBe(2);
+    const attack = await importNetwork({ lanes: [{ fromFacilityId: first.facilityId, toFacilityId: second.facilityId, materialCategory: "Steel" }] });
+    expect(BulkImportSummarySchema.parse(await attack.json()).createdLanes).toBe(0);
+  });
+
   it("generates a strict CSRD Executive Risk & ESG Report via GET /api/v1/analytics/report", async () => {
     const app = createTestApp();
     const orgA = await registerOrg(app, {

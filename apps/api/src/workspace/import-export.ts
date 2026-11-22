@@ -1,5 +1,7 @@
 import {
   BulkImportFacilityRowSchema,
+  CreateProductInputSchema,
+  CreateSupplyInputInputSchema,
   BulkImportLaneRowSchema,
   BulkImportSummarySchema,
   WorkspaceExportJsonSchema,
@@ -257,6 +259,11 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
       const fromRef =
         record.fromfacilityref || record.fromfacility || undefined;
       const toRef = record.tofacilityref || record.tofacility || undefined;
+      const pcfVerified = parseOptionalBoolean(record.pcfverified);
+      if (pcfVerified.error) {
+        errors.push({ row: rowNumber, entity: "LANE", field: "pcfVerified", message: pcfVerified.error });
+        continue;
+      }
       lanes.push({
         rowNumber,
         raw: {
@@ -274,6 +281,16 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
           contractEndDate: record.contractenddate || null,
           contractTerms: record.contractterms || null,
           leadTimeDays: parseOptionalNumber(record.leadtimedays) ?? null,
+          safetyStockDays: parseOptionalNumber(record.safetystockdays),
+          defectRatePct: parseOptionalNumber(record.defectratepct),
+          carryingCostPct: parseOptionalNumber(record.carryingcostpct),
+          unitLandedCostEur: parseOptionalNumber(record.unitlandedcosteur),
+          ordinaryFreightCostPerUnitEur: parseOptionalNumber(record.ordinaryfreightcostperuniteur),
+          customAnnualDisruptionProb: parseOptionalNumber(record.customannualdisruptionprob),
+          customTtrDays: parseOptionalNumber(record.customttrdays),
+          productEmissionFactorTco2ePerUnit: parseOptionalNumber(record.productemissionfactortco2eperunit),
+          economicAttributionRatio: parseOptionalNumber(record.economicattributionratio),
+          pcfVerified: pcfVerified.value,
           distanceKm: parseOptionalNumber(record.distancekm) ?? null,
           estimatedLaneCo2e:
             parseOptionalNumber(record.estimatedlaneco2e) ?? null,
@@ -309,6 +326,8 @@ export async function executeBulkImport(
     facilities: Array<{ rowNumber: number; raw: unknown }>;
     lanes: Array<{ rowNumber: number; raw: unknown }>;
     initialErrors?: BulkImportError[];
+    products?: Array<{ rowNumber: number; raw: unknown }>;
+    inputs?: Array<{ rowNumber: number; raw: unknown }>;
   },
 ): Promise<BulkImportSummary> {
   const errors: BulkImportError[] = [...(payload.initialErrors ?? [])];
@@ -322,6 +341,42 @@ export async function executeBulkImport(
     throw new WorkspaceValidationError(
       `Bulk import exceeds maximum of ${MAX_IMPORT_LANES} lanes per request`,
     );
+  }
+
+  const productIds = new Map((await workspaceRepo.listProducts(orgId)).map(p => [p.productId, p.productId]));
+  const inputIds = new Map((await workspaceRepo.listInputs(orgId)).map(i => [i.inputId, i.inputId]));
+  for (const item of payload.products ?? []) {
+    const raw = item.raw as Record<string, unknown> | null;
+    const parsed = CreateProductInputSchema.safeParse(raw);
+    if (!parsed.success || !raw || typeof raw.productId !== "string") {
+      errors.push({ row: item.rowNumber, entity: "PRODUCT", message: "Invalid product or missing productId" });
+      continue;
+    }
+    try {
+      const created = await workspaceRepo.createProduct(orgId, parsed.data);
+      productIds.set(raw.productId, created.productId);
+    } catch (err) {
+      errors.push({ row: item.rowNumber, entity: "PRODUCT", message: err instanceof Error ? err.message : "Failed to create product" });
+    }
+  }
+  for (const item of payload.inputs ?? []) {
+    const raw = item.raw as Record<string, unknown> | null;
+    const parsed = CreateSupplyInputInputSchema.safeParse(raw);
+    if (!parsed.success || !raw || typeof raw.inputId !== "string") {
+      errors.push({ row: item.rowNumber, entity: "INPUT", message: "Invalid input or missing inputId" });
+      continue;
+    }
+    const productId = parsed.data.productId ? productIds.get(parsed.data.productId) : null;
+    if (parsed.data.productId && !productId) {
+      errors.push({ row: item.rowNumber, entity: "INPUT", field: "productId", message: "Referenced product was not found in this organization or import" });
+      continue;
+    }
+    try {
+      const created = await workspaceRepo.createInput(orgId, { ...parsed.data, productId });
+      inputIds.set(raw.inputId, created.inputId);
+    } catch (err) {
+      errors.push({ row: item.rowNumber, entity: "INPUT", message: err instanceof Error ? err.message : "Failed to create input" });
+    }
   }
 
   // Load org's existing facilities strictly scoped to orgId so lanes can reference
@@ -375,7 +430,7 @@ export async function executeBulkImport(
       continue;
     }
 
-    const { refKey, ...createInput } = parsed.data;
+    const { refKey, facilityId: exportedId, ...createInput } = parsed.data;
     const dedupeKey = facilityDedupeKey(createInput);
     const existingMatchId =
       (refKey ? refToFacilityId.get(refKey.trim()) : undefined) ??
@@ -383,14 +438,16 @@ export async function executeBulkImport(
 
     if (existingMatchId) {
       registerFacilityRef(existingMatchId, createInput.name, refKey);
+      if (exportedId) refToFacilityId.set(exportedId, existingMatchId);
       continue;
     }
 
     try {
       const created = await workspaceRepo.createFacility(orgId, createInput);
       createdFacilities += 1;
-      existingByDedupeKey.set(dedupeKey, created.facilityId);
+      if (!exportedId && !refKey) existingByDedupeKey.set(dedupeKey, created.facilityId);
       registerFacilityRef(created.facilityId, created.name, refKey);
+      if (exportedId) refToFacilityId.set(exportedId, created.facilityId);
     } catch (err) {
       errors.push({
         row: item.rowNumber,
@@ -473,7 +530,7 @@ export async function executeBulkImport(
       await workspaceRepo.createLane(orgId, {
         fromFacilityId,
         toFacilityId,
-        inputId: row.inputId ?? null,
+        inputId: row.inputId ? (inputIds.get(row.inputId) ?? row.inputId) : null,
         materialCategory: row.materialCategory,
         transportMode: row.transportMode,
         volumeSharePct: row.volumeSharePct,
@@ -487,6 +544,16 @@ export async function executeBulkImport(
         estimatedLaneCo2e: row.estimatedLaneCo2e ?? null,
         riskStatus: row.riskStatus,
         riskReason: row.riskReason ?? null,
+        safetyStockDays: row.safetyStockDays,
+        defectRatePct: row.defectRatePct,
+        carryingCostPct: row.carryingCostPct,
+        unitLandedCostEur: row.unitLandedCostEur,
+        ordinaryFreightCostPerUnitEur: row.ordinaryFreightCostPerUnitEur,
+        customAnnualDisruptionProb: row.customAnnualDisruptionProb,
+        customTtrDays: row.customTtrDays,
+        productEmissionFactorTco2ePerUnit: row.productEmissionFactorTco2ePerUnit,
+        economicAttributionRatio: row.economicAttributionRatio,
+        pcfVerified: row.pcfVerified,
       });
       createdLanes += 1;
     } catch (err) {
@@ -556,6 +623,16 @@ const EXPORT_CSV_HEADERS = [
   "estimatedLaneCo2e",
   "riskStatus",
   "riskReason",
+  "safetyStockDays",
+  "defectRatePct",
+  "carryingCostPct",
+  "unitLandedCostEur",
+  "ordinaryFreightCostPerUnitEur",
+  "customAnnualDisruptionProb",
+  "customTtrDays",
+  "productEmissionFactorTco2ePerUnit",
+  "economicAttributionRatio",
+  "pcfVerified",
 ] as const;
 
 /**
@@ -643,6 +720,16 @@ export function serializeNetworkToCsv(
         lane.estimatedLaneCo2e ?? "",
         lane.riskStatus,
         lane.riskReason ?? "",
+        lane.safetyStockDays ?? "",
+        lane.defectRatePct ?? "",
+        lane.carryingCostPct ?? "",
+        lane.unitLandedCostEur ?? "",
+        lane.ordinaryFreightCostPerUnitEur ?? "",
+        lane.customAnnualDisruptionProb ?? "",
+        lane.customTtrDays ?? "",
+        lane.productEmissionFactorTco2ePerUnit ?? "",
+        lane.economicAttributionRatio ?? "",
+        lane.pcfVerified ?? "",
       ]
         .map(escapeCsvCell)
         .join(","),
