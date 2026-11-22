@@ -750,18 +750,16 @@ export function evaluateEsgAndCompliance(
   );
   const verifiedSupplierCount = activeSuppliers.filter((f) => f.isPartnerVerified).length;
 
-  // Track cumulative verified-partner cap per supplier facility
+  // Track cumulative supplier cap per supplier facility (enforced across ECONOMIC_INTENSITY & ALLOCATION_RATIO)
   const remainingPartnerCapByFacility = new Map<string, number>();
   for (const fac of activeSuppliers) {
     const hidden = input.partnerHiddenSummaries?.get(fac.facilityId);
-    if (hidden) {
-      const explicitCap = finitePositive(hidden.partnerTotalEmissionsCapTco2e)
-        ? hidden.partnerTotalEmissionsCapTco2e
-        : finiteNonNegative(fac.estimatedScope12Tco2e) +
-          finiteNonNegative(hidden.hiddenUpstreamScope3Tco2e);
-      if (explicitCap > 0) {
-        remainingPartnerCapByFacility.set(fac.facilityId, explicitCap);
-      }
+    const explicitCap = finitePositive(hidden?.partnerTotalEmissionsCapTco2e)
+      ? hidden!.partnerTotalEmissionsCapTco2e!
+      : finiteNonNegative(fac.estimatedScope12Tco2e) +
+        finiteNonNegative(hidden?.hiddenUpstreamScope3Tco2e);
+    if (explicitCap > 0) {
+      remainingPartnerCapByFacility.set(fac.facilityId, explicitCap);
     }
   }
 
@@ -792,19 +790,30 @@ export function evaluateEsgAndCompliance(
     const derivedComm = input.laneCommercialsByLaneId?.get(lane.laneId);
     const incoterms = (input.incotermsByLaneId?.get(lane.laneId) ?? "").trim().toUpperCase();
 
-    const activeVolume =
-      derivedComm && finitePositive(derivedComm.activeVolume)
+    // When a contract-derived commercial summary exists (other than LEVEL_0_UNPRICED),
+    // treat its derived activeVolume/activeSpendEur as authoritative so expired/archived
+    // contracts or unit conflicts never silently revive legacy lane fields.
+    const useDerivedCommercial =
+      derivedComm !== undefined &&
+      derivedComm.laneCommercialState !== "LEVEL_0_UNPRICED";
+
+    const activeVolume = useDerivedCommercial
+      ? finitePositive(derivedComm.activeVolume)
         ? derivedComm.activeVolume
-        : finitePositive(lane.annualVolume)
-          ? lane.annualVolume
-          : null;
-    const activeUnit = derivedComm?.baseUnit ?? supplyInput?.baseUnit ?? lane.volumeUnit;
-    const activeSpendEur =
-      derivedComm && finitePositive(derivedComm.activeSpendEur)
+        : null
+      : finitePositive(lane.annualVolume)
+        ? lane.annualVolume
+        : null;
+    const activeUnit = useDerivedCommercial
+      ? derivedComm.baseUnit ?? supplyInput?.baseUnit ?? lane.volumeUnit
+      : supplyInput?.baseUnit ?? lane.volumeUnit;
+    const activeSpendEur = useDerivedCommercial
+      ? finitePositive(derivedComm.activeSpendEur)
         ? derivedComm.activeSpendEur
-        : finitePositive(lane.annualSpendEur)
-          ? lane.annualSpendEur
-          : null;
+        : null
+      : finitePositive(lane.annualSpendEur)
+        ? lane.annualSpendEur
+        : null;
 
     const massTonnes = convertToMetricTonnes(
       activeVolume,
@@ -904,7 +913,7 @@ export function evaluateEsgAndCompliance(
       // Privacy invariant: NEVER print partner revenue or partner total emissions!
       formulaTrace = `€${round2(activeSpendEur)} × ${partnerIntensity.toFixed(6)} tCO2e/EUR (verified partner intensity) = ${cat1Tco2e} tCO2e`;
     }
-    // Priority 3: ALLOCATION_RATIO (0 < ratio <= 1 — PCAF 2)
+    // Priority 3: ALLOCATION_RATIO (0 < ratio <= 1 — PCAF 2, capped by shared supplier cap, zero raw pool leakage)
     else if (
       finitePositive(explicitRatio) &&
       explicitRatio <= 1 &&
@@ -915,52 +924,31 @@ export function evaluateEsgAndCompliance(
       const rawPool =
         finiteNonNegative(supplier.estimatedScope12Tco2e) +
         finiteNonNegative(hidden?.hiddenUpstreamScope3Tco2e);
-      cat1Tco2e = round2(rawPool * explicitRatio);
+      const rawAllocated = rawPool * explicitRatio;
+      const capRemaining = remainingPartnerCapByFacility.get(supplier.facilityId);
+      const capped =
+        capRemaining !== undefined ? Math.min(capRemaining, rawAllocated) : rawAllocated;
+      if (capRemaining !== undefined) {
+        remainingPartnerCapByFacility.set(
+          supplier.facilityId,
+          Math.max(0, capRemaining - capped),
+        );
+      }
+      cat1Tco2e = round2(capped);
       pcafScore = 2;
       factorId = `supplier_allocation_${supplier.facilityId.slice(0, 8)}`;
       factorValue = round4(explicitRatio);
       factorUnit = "allocation ratio";
       sourceCitation = supplier.isPartnerVerified
-        ? "Verified Tier-1 Partner Proportional Allocation"
+        ? "Verified Tier-1 Partner Proportional Allocation (pool confidential)"
         : "Supplier-Reported Emissions × Explicit Allocation Share";
       licenseId = "PARTNER-PRIMARY";
       provenanceStatus = "PARTNER_PRIMARY";
       matchConfidence = "PRIMARY_PARTNER";
-      activityValue = round2(rawPool);
-      activityUnit = "tCO2e pool";
-      formulaTrace = `Allocated share (${round2(explicitRatio * 100)}%) of reported emissions = ${cat1Tco2e} tCO2e`;
-    }
-    // Priority 3b: Verified partner primary rollup (when partner-resolver returned hidden rollup, and no PCF/intensity/ratio yet)
-    else if (
-      supplier.isPartnerVerified &&
-      hidden &&
-      (finitePositive(supplier.estimatedScope12Tco2e) ||
-        finitePositive(hidden.hiddenUpstreamScope3Tco2e))
-    ) {
-      if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
-        skipLedgerEmission = true;
-      } else {
-        level0BaselineEmittedForFacility.add(supplier.facilityId);
-        const reconciledTotal = round2(
-          finiteNonNegative(supplier.estimatedScope12Tco2e) +
-            finiteNonNegative(hidden.hiddenUpstreamScope3Tco2e),
-        );
-        unscaledReportedWarningCount += 1;
-        method = "ALLOCATION_RATIO";
-        cat1Tco2e = reconciledTotal;
-        pcafScore = 2;
-        factorId = `verified_partner_rollup_${supplier.facilityId.slice(0, 8)}`;
-        factorValue = 1;
-        factorUnit = "reconciled partner rollup";
-        sourceCitation =
-          "Verified Kulgo Tier-1 Partner Reconciled Rollup (add partner revenue or PCF for proportional allocation)";
-        licenseId = "PARTNER-PRIMARY";
-        provenanceStatus = "PARTNER_PRIMARY";
-        matchConfidence = "PRIMARY_PARTNER";
-        activityValue = reconciledTotal;
-        activityUnit = "tCO2e";
-        formulaTrace = `Verified partner reconciled rollup = ${reconciledTotal} tCO2e`;
-      }
+      // Privacy invariant: NEVER serialize rawPool in activityValue or formulaTrace!
+      activityValue = round4(explicitRatio);
+      activityUnit = "allocation share";
+      formulaTrace = `Allocated share (${round2(explicitRatio * 100)}%) of confidential supplier emissions = ${cat1Tco2e} tCO2e`;
     }
     // Priority 4: PHYSICAL_FACTOR (Rank #1 Open Physical Core — PCAF 3)
     else if (massTonnes !== null && taxonomy.archetype !== null) {
@@ -1045,6 +1033,49 @@ export function evaluateEsgAndCompliance(
         formulaTrace = isDelivered
           ? `€${round2(activeSpendEur)} × (1 - ${round2(marginStrip * 100)}% ${incoterms} strip) × ${kgPerEur} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`
           : `€${round2(activeSpendEur)} × ${kgPerEur} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`;
+      }
+    }
+    // Topology-only verified partner fallback (ONLY when neither PCF, intensity, ratio, physical volume, nor spend is available)
+    else if (
+      supplier.isPartnerVerified &&
+      hidden &&
+      (finitePositive(supplier.estimatedScope12Tco2e) ||
+        finitePositive(hidden.hiddenUpstreamScope3Tco2e))
+    ) {
+      if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
+        skipLedgerEmission = true;
+      } else {
+        level0BaselineEmittedForFacility.add(supplier.facilityId);
+        const capRemaining = remainingPartnerCapByFacility.get(supplier.facilityId);
+        const rawReconciled =
+          finiteNonNegative(supplier.estimatedScope12Tco2e) +
+          finiteNonNegative(hidden.hiddenUpstreamScope3Tco2e);
+        const capped =
+          capRemaining !== undefined ? Math.min(capRemaining, rawReconciled) : rawReconciled;
+        if (capRemaining !== undefined) {
+          remainingPartnerCapByFacility.set(
+            supplier.facilityId,
+            Math.max(0, capRemaining - capped),
+          );
+        }
+        const reconciledTotal = round2(capped);
+        unscaledReportedWarningCount += 1;
+        method = "ALLOCATION_RATIO";
+        cat1Tco2e = reconciledTotal;
+        pcafScore = 2;
+        factorId = `verified_partner_rollup_${supplier.facilityId.slice(0, 8)}`;
+        factorValue = 1;
+        factorUnit = "reconciled partner";
+        sourceCitation =
+          "Verified Kulgo Tier-1 Partner Reconciled Attribution (add PCF, spend, or partner revenue for proportional allocation)";
+        licenseId = "PARTNER-PRIMARY";
+        provenanceStatus = "PARTNER_PRIMARY";
+        matchConfidence = "PRIMARY_PARTNER";
+        // Privacy invariant: NEVER expose raw partner total in activityValue or formulaTrace
+        activityValue = null;
+        activityUnit = "reconciled partner";
+        formulaTrace =
+          "Verified partner reconciled attribution (add PCF or partner revenue for proportional allocation)";
       }
     }
     // Priority 6: SECTOR_BASELINE (Level-0 Country × Sector proxy scaled by buyer share prior — PCAF 5)

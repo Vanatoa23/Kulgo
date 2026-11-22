@@ -456,4 +456,114 @@ describe("Sub-Project 3 ESG & Multi-Region Compliance Engine", () => {
     expect(csv).toContain("'=CMD|' /C calc'!A0");
     expect(csv).toContain("'+100 * 1.95");
   });
+
+  it("enforces cumulative 100% partner cap across multi-lane ALLOCATION_RATIO, never leaks raw partner pool, prefers proportional Physical/Spend over unscaled partner rollup, and treats lapsed derivedComm as authoritative", () => {
+    const { facilities, inputs, lanes } = makeTallinnFixture();
+
+    // 1. Two 75% allocation lanes from the same supplier (pool = 10,000 tCO2e) -> capped at 10,000 total (7,500 + 2,500), never 15,000!
+    //    AND neither activityValue nor formulaTrace nor CSV exposes "10000"
+    const allocLanes: SupplyLane[] = [
+      { ...lanes[0]!, laneId: "55555555-5555-4555-8555-555555555591", economicAttributionRatio: 0.75 },
+      { ...lanes[0]!, laneId: "55555555-5555-4555-8555-555555555592", economicAttributionRatio: 0.75 },
+    ];
+    const partnerSummaries = new Map<string, EsgPartnerAggregateInput>([
+      [
+        FAC_DE_STEEL,
+        {
+          hiddenUpstreamScope3Tco2e: 10_000,
+          partnerTotalEmissionsCapTco2e: 10_000,
+        },
+      ],
+    ]);
+
+    const cappedRes = evaluateEsgAndCompliance({
+      organization: {
+        orgId: ORG_ID,
+        name: "Cap Test",
+        countryCode: "EE",
+        scope1Tco2e: 0,
+        scope2Tco2e: 0,
+      },
+      inputs,
+      facilities,
+      lanes: allocLanes,
+      partnerHiddenSummaries: partnerSummaries,
+    });
+
+    expect(cappedRes.summary.upstreamScope3Tco2e).toBe(10_000);
+    const cat1Entries = cappedRes.ledgerEntries.filter((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(cat1Entries[0]?.tco2e).toBe(7500);
+    expect(cat1Entries[1]?.tco2e).toBe(2500);
+    expect(cat1Entries[0]?.activityValue).toBe(0.75);
+    const ledgerSerialized = JSON.stringify(cat1Entries) + formatEsgLedgerCsv(cat1Entries);
+    expect(ledgerSerialized).not.toContain("10000");
+
+    // 2. Verified partner without PCF/revenue/ratio MUST continue through proportional PHYSICAL_FACTOR (400t * 1.95 = 780), NOT 10,000!
+    const propRes = evaluateEsgAndCompliance({
+      organization: {
+        orgId: ORG_ID,
+        name: "Proportional Test",
+        countryCode: "EE",
+        scope1Tco2e: 0,
+        scope2Tco2e: 0,
+      },
+      inputs,
+      facilities,
+      lanes: [lanes[0]!],
+      partnerHiddenSummaries: partnerSummaries,
+    });
+    expect(propRes.summary.upstreamScope3Tco2e).toBe(780);
+    const propEntry = propRes.ledgerEntries.find((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(propEntry?.attributionMethod).toBe("PHYSICAL_FACTOR");
+
+    // 3. Authoritative LAPSED_UNCONTRACTED derivedComm (activeVolume: null, activeSpendEur: null) MUST NOT revive legacy lane.annualVolume/annualSpendEur
+    const lapsedComm = new Map([
+      [
+        LANE_CN_STEEL,
+        {
+          laneId: LANE_CN_STEEL,
+          viewMode: "PERIOD_WINDOW" as const,
+          asOfDate: "2026-11-22",
+          windowStart: "2026-11-22",
+          windowEndExclusive: "2027-11-22",
+          laneCommercialState: "LAPSED_UNCONTRACTED" as const,
+          activeVolume: null,
+          baseUnit: "TONNES",
+          activeSpendEur: null,
+          weightedAvgUnitPrice: null,
+          spendOnlyExcludedEur: 0,
+          cBothSpendCoveragePct: null,
+          knownMappedSharePct: null,
+          totalDemandSharePct: null,
+          weightingBasis: null,
+          nextExpirationDate: null,
+          nextNoticeDeadline: null,
+          atRiskVolumePct: 0,
+          assumedHoldoverVolume: 0,
+          hasUnitConflict: false,
+          missingFxCurrencies: [],
+          activeContractCount: 0,
+          confidenceBadge: "CONTRACTED" as const,
+        },
+      ],
+    ]);
+
+    const lapsedRes = evaluateEsgAndCompliance({
+      organization: {
+        orgId: ORG_ID,
+        name: "Lapsed Test",
+        countryCode: "EE",
+        scope1Tco2e: 0,
+        scope2Tco2e: 0,
+      },
+      inputs,
+      facilities,
+      lanes: [lanes[1]!],
+      laneCommercialsByLaneId: lapsedComm,
+    });
+    const lapsedEntry = lapsedRes.ledgerEntries.find((e) => e.scope === "SCOPE_3_CAT_1");
+    expect(lapsedEntry?.attributionMethod).toBe("SECTOR_BASELINE");
+    expect(lapsedEntry?.tco2e).not.toBe(546);
+  });
 });
+

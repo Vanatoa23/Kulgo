@@ -668,7 +668,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const safeOrgId = assertOrgId(orgId);
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      "SELECT inputId, ownerOrgId, productId, name, category, unit, baseUnit, unitFamily, unitConversionFactorsJson, totalAnnualDemand, materialCriticality FROM SupplyInput WHERE ownerOrgId = :orgId",
+      "SELECT inputId, ownerOrgId, productId, name, category, unit, baseUnit, unitFamily, unitConversionFactorsJson, totalAnnualDemand, materialCriticality, cnCode, materialArchetype, unitMassKg, productEmissionFactorTco2ePerUnit, pcfVerified FROM SupplyInput WHERE ownerOrgId = :orgId",
       { orgId: safeOrgId },
     );
     return rows.map(mapSupplyInputRow);
@@ -681,7 +681,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
     const safeOrgId = assertOrgId(orgId);
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      "SELECT inputId, ownerOrgId, productId, name, category, unit, baseUnit, unitFamily, unitConversionFactorsJson, totalAnnualDemand, materialCriticality FROM SupplyInput WHERE inputId = :inputId AND ownerOrgId = :orgId LIMIT 1",
+      "SELECT inputId, ownerOrgId, productId, name, category, unit, baseUnit, unitFamily, unitConversionFactorsJson, totalAnnualDemand, materialCriticality, cnCode, materialArchetype, unitMassKg, productEmissionFactorTco2ePerUnit, pcfVerified FROM SupplyInput WHERE inputId = :inputId AND ownerOrgId = :orgId LIMIT 1",
       { inputId, orgId: safeOrgId },
     );
     const row = rows[0];
@@ -721,6 +721,15 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       ...(input.materialCriticality !== undefined
         ? { materialCriticality: input.materialCriticality }
         : {}),
+      ...(input.cnCode !== undefined ? { cnCode: input.cnCode } : {}),
+      ...(input.materialArchetype !== undefined
+        ? { materialArchetype: input.materialArchetype }
+        : {}),
+      ...(input.unitMassKg !== undefined ? { unitMassKg: input.unitMassKg } : {}),
+      ...(input.productEmissionFactorTco2ePerUnit !== undefined
+        ? { productEmissionFactorTco2ePerUnit: input.productEmissionFactorTco2ePerUnit }
+        : {}),
+      ...(input.pcfVerified !== undefined ? { pcfVerified: input.pcfVerified } : {}),
     });
 
     await this.db.command(
@@ -736,7 +745,12 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         unitFamily = :unitFamily,
         unitConversionFactorsJson = :unitConversionFactorsJson,
         totalAnnualDemand = :totalAnnualDemand,
-        materialCriticality = :materialCriticality`,
+        materialCriticality = :materialCriticality,
+        cnCode = :cnCode,
+        materialArchetype = :materialArchetype,
+        unitMassKg = :unitMassKg,
+        productEmissionFactorTco2ePerUnit = :productEmissionFactorTco2ePerUnit,
+        pcfVerified = :pcfVerified`,
       {
         inputId: created.inputId,
         ownerOrgId: created.ownerOrgId,
@@ -751,6 +765,12 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           : null,
         totalAnnualDemand: created.totalAnnualDemand ?? null,
         materialCriticality: created.materialCriticality ?? null,
+        cnCode: created.cnCode ?? null,
+        materialArchetype: created.materialArchetype ?? null,
+        unitMassKg: created.unitMassKg ?? null,
+        productEmissionFactorTco2ePerUnit:
+          created.productEmissionFactorTco2ePerUnit ?? null,
+        pcfVerified: created.pcfVerified ?? null,
       },
     );
 
@@ -795,6 +815,15 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       ...(input.materialCriticality !== undefined
         ? { materialCriticality: input.materialCriticality }
         : {}),
+      ...(input.cnCode !== undefined ? { cnCode: input.cnCode } : {}),
+      ...(input.materialArchetype !== undefined
+        ? { materialArchetype: input.materialArchetype }
+        : {}),
+      ...(input.unitMassKg !== undefined ? { unitMassKg: input.unitMassKg } : {}),
+      ...(input.productEmissionFactorTco2ePerUnit !== undefined
+        ? { productEmissionFactorTco2ePerUnit: input.productEmissionFactorTco2ePerUnit }
+        : {}),
+      ...(input.pcfVerified !== undefined ? { pcfVerified: input.pcfVerified } : {}),
     });
 
     await this.db.command(
@@ -808,7 +837,12 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         unitFamily = :unitFamily,
         unitConversionFactorsJson = :unitConversionFactorsJson,
         totalAnnualDemand = :totalAnnualDemand,
-        materialCriticality = :materialCriticality
+        materialCriticality = :materialCriticality,
+        cnCode = :cnCode,
+        materialArchetype = :materialArchetype,
+        unitMassKg = :unitMassKg,
+        productEmissionFactorTco2ePerUnit = :productEmissionFactorTco2ePerUnit,
+        pcfVerified = :pcfVerified
        WHERE inputId = :inputId AND ownerOrgId = :orgId`,
       {
         productId: updated.productId,
@@ -822,6 +856,12 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           : null,
         totalAnnualDemand: updated.totalAnnualDemand ?? null,
         materialCriticality: updated.materialCriticality ?? null,
+        cnCode: updated.cnCode ?? null,
+        materialArchetype: updated.materialArchetype ?? null,
+        unitMassKg: updated.unitMassKg ?? null,
+        productEmissionFactorTco2ePerUnit:
+          updated.productEmissionFactorTco2ePerUnit ?? null,
+        pcfVerified: updated.pcfVerified ?? null,
         inputId,
         orgId: safeOrgId,
       },
@@ -859,7 +899,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       "sql",
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
               lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
-              defaultCarryingCostPct
+              defaultCarryingCostPct, annualElectricityMwh, renewableElectricityPct,
+              renewableInstrumentsVerified, annualRevenueEur
        FROM Facility WHERE ownerOrgId = :orgId`,
       { orgId: safeOrgId },
     );
@@ -875,7 +916,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       "sql",
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
               lat, lng, isOwnFacility, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
-              defaultCarryingCostPct
+              defaultCarryingCostPct, annualElectricityMwh, renewableElectricityPct,
+              renewableInstrumentsVerified, annualRevenueEur
        FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :orgId LIMIT 1`,
       { facilityId, orgId: safeOrgId },
     );
@@ -920,6 +962,18 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       ...(input.defaultCarryingCostPct !== undefined
         ? { defaultCarryingCostPct: input.defaultCarryingCostPct }
         : {}),
+      ...(input.annualElectricityMwh !== undefined
+        ? { annualElectricityMwh: input.annualElectricityMwh }
+        : {}),
+      ...(input.renewableElectricityPct !== undefined
+        ? { renewableElectricityPct: input.renewableElectricityPct }
+        : {}),
+      ...(input.renewableInstrumentsVerified !== undefined
+        ? { renewableInstrumentsVerified: input.renewableInstrumentsVerified }
+        : {}),
+      ...(input.annualRevenueEur !== undefined
+        ? { annualRevenueEur: input.annualRevenueEur }
+        : {}),
     });
 
     const locationWkt = formatPointWkt(facility.lng, facility.lat);
@@ -942,7 +996,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         sector = :sector,
         esgBadges = :esgBadges,
         estimatedScope12Tco2e = :estimatedScope12Tco2e,
-        defaultCarryingCostPct = :defaultCarryingCostPct`,
+        defaultCarryingCostPct = :defaultCarryingCostPct,
+        annualElectricityMwh = :annualElectricityMwh,
+        renewableElectricityPct = :renewableElectricityPct,
+        renewableInstrumentsVerified = :renewableInstrumentsVerified,
+        annualRevenueEur = :annualRevenueEur`,
       {
         facilityId: facility.facilityId,
         ownerOrgId: facility.ownerOrgId,
@@ -960,6 +1018,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         esgBadges: facility.esgBadges,
         estimatedScope12Tco2e: facility.estimatedScope12Tco2e,
         defaultCarryingCostPct: facility.defaultCarryingCostPct ?? null,
+        annualElectricityMwh: facility.annualElectricityMwh ?? null,
+        renewableElectricityPct: facility.renewableElectricityPct ?? null,
+        renewableInstrumentsVerified:
+          facility.renewableInstrumentsVerified ?? null,
+        annualRevenueEur: facility.annualRevenueEur ?? null,
       },
     );
 
@@ -1005,6 +1068,18 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       ...(input.defaultCarryingCostPct !== undefined
         ? { defaultCarryingCostPct: input.defaultCarryingCostPct }
         : {}),
+      ...(input.annualElectricityMwh !== undefined
+        ? { annualElectricityMwh: input.annualElectricityMwh }
+        : {}),
+      ...(input.renewableElectricityPct !== undefined
+        ? { renewableElectricityPct: input.renewableElectricityPct }
+        : {}),
+      ...(input.renewableInstrumentsVerified !== undefined
+        ? { renewableInstrumentsVerified: input.renewableInstrumentsVerified }
+        : {}),
+      ...(input.annualRevenueEur !== undefined
+        ? { annualRevenueEur: input.annualRevenueEur }
+        : {}),
     });
 
     const locationWkt = formatPointWkt(updated.lng, updated.lat);
@@ -1023,7 +1098,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         sector = :sector,
         esgBadges = :esgBadges,
         estimatedScope12Tco2e = :estimatedScope12Tco2e,
-        defaultCarryingCostPct = :defaultCarryingCostPct
+        defaultCarryingCostPct = :defaultCarryingCostPct,
+        annualElectricityMwh = :annualElectricityMwh,
+        renewableElectricityPct = :renewableElectricityPct,
+        renewableInstrumentsVerified = :renewableInstrumentsVerified,
+        annualRevenueEur = :annualRevenueEur
        WHERE facilityId = :facilityId AND ownerOrgId = :orgId`,
       {
         name: updated.name,
@@ -1039,6 +1118,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         esgBadges: updated.esgBadges,
         estimatedScope12Tco2e: updated.estimatedScope12Tco2e,
         defaultCarryingCostPct: updated.defaultCarryingCostPct ?? null,
+        annualElectricityMwh: updated.annualElectricityMwh ?? null,
+        renewableElectricityPct: updated.renewableElectricityPct ?? null,
+        renewableInstrumentsVerified:
+          updated.renewableInstrumentsVerified ?? null,
+        annualRevenueEur: updated.annualRevenueEur ?? null,
         facilityId,
         orgId: safeOrgId,
       },
@@ -1238,7 +1322,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
               transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
               contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
               riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
-              unitLandedCostEur, ordinaryFreightCostPerUnitEur, customAnnualDisruptionProb, customTtrDays
+              unitLandedCostEur, ordinaryFreightCostPerUnitEur, customAnnualDisruptionProb, customTtrDays,
+              productEmissionFactorTco2ePerUnit, pcfVerified, economicAttributionRatio
        FROM SUPPLIES_LANE WHERE ownerOrgId = :orgId`,
       { orgId: safeOrgId },
     );
@@ -1256,7 +1341,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
               transportMode, volumeSharePct, annualVolume, volumeUnit, annualSpendEur,
               contractEndDate, contractTerms, leadTimeDays, distanceKm, estimatedLaneCo2e,
               riskStatus, riskReason, safetyStockDays, defectRatePct, carryingCostPct,
-              unitLandedCostEur, ordinaryFreightCostPerUnitEur, customAnnualDisruptionProb, customTtrDays
+              unitLandedCostEur, ordinaryFreightCostPerUnitEur, customAnnualDisruptionProb, customTtrDays,
+              productEmissionFactorTco2ePerUnit, pcfVerified, economicAttributionRatio
        FROM SUPPLIES_LANE WHERE laneId = :laneId AND ownerOrgId = :orgId LIMIT 1`,
       { laneId, orgId: safeOrgId },
     );
@@ -1346,6 +1432,13 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       ...(input.customTtrDays !== undefined
         ? { customTtrDays: input.customTtrDays }
         : {}),
+      ...(input.productEmissionFactorTco2ePerUnit !== undefined
+        ? { productEmissionFactorTco2ePerUnit: input.productEmissionFactorTco2ePerUnit }
+        : {}),
+      ...(input.pcfVerified !== undefined ? { pcfVerified: input.pcfVerified } : {}),
+      ...(input.economicAttributionRatio !== undefined
+        ? { economicAttributionRatio: input.economicAttributionRatio }
+        : {}),
     });
 
     await this.insertLaneEdge(lane);
@@ -1383,7 +1476,10 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
          unitLandedCostEur = :unitLandedCostEur,
          ordinaryFreightCostPerUnitEur = :ordinaryFreightCostPerUnitEur,
          customAnnualDisruptionProb = :customAnnualDisruptionProb,
-         customTtrDays = :customTtrDays`,
+         customTtrDays = :customTtrDays,
+         productEmissionFactorTco2ePerUnit = :productEmissionFactorTco2ePerUnit,
+         pcfVerified = :pcfVerified,
+         economicAttributionRatio = :economicAttributionRatio`,
       {
         laneId: lane.laneId,
         ownerOrgId: lane.ownerOrgId,
@@ -1411,6 +1507,10 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           lane.ordinaryFreightCostPerUnitEur ?? null,
         customAnnualDisruptionProb: lane.customAnnualDisruptionProb ?? null,
         customTtrDays: lane.customTtrDays ?? null,
+        productEmissionFactorTco2ePerUnit:
+          lane.productEmissionFactorTco2ePerUnit ?? null,
+        pcfVerified: lane.pcfVerified ?? null,
+        economicAttributionRatio: lane.economicAttributionRatio ?? null,
       },
     );
   }
@@ -1559,6 +1659,13 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       ...(input.customTtrDays !== undefined
         ? { customTtrDays: input.customTtrDays }
         : {}),
+      ...(input.productEmissionFactorTco2ePerUnit !== undefined
+        ? { productEmissionFactorTco2ePerUnit: input.productEmissionFactorTco2ePerUnit }
+        : {}),
+      ...(input.pcfVerified !== undefined ? { pcfVerified: input.pcfVerified } : {}),
+      ...(input.economicAttributionRatio !== undefined
+        ? { economicAttributionRatio: input.economicAttributionRatio }
+        : {}),
     });
 
     if (endpointsChanged) {
@@ -1617,7 +1724,10 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           unitLandedCostEur = :unitLandedCostEur,
           ordinaryFreightCostPerUnitEur = :ordinaryFreightCostPerUnitEur,
           customAnnualDisruptionProb = :customAnnualDisruptionProb,
-          customTtrDays = :customTtrDays
+          customTtrDays = :customTtrDays,
+          productEmissionFactorTco2ePerUnit = :productEmissionFactorTco2ePerUnit,
+          pcfVerified = :pcfVerified,
+          economicAttributionRatio = :economicAttributionRatio
          WHERE laneId = :laneId AND ownerOrgId = :orgId`,
         {
           inputId: updated.inputId,
@@ -1643,6 +1753,10 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
           customAnnualDisruptionProb:
             updated.customAnnualDisruptionProb ?? null,
           customTtrDays: updated.customTtrDays ?? null,
+          productEmissionFactorTco2ePerUnit:
+            updated.productEmissionFactorTco2ePerUnit ?? null,
+          pcfVerified: updated.pcfVerified ?? null,
+          economicAttributionRatio: updated.economicAttributionRatio ?? null,
           laneId,
           orgId: safeOrgId,
         },

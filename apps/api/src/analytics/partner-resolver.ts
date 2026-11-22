@@ -299,7 +299,14 @@ export function createPartnerHiddenSummaryResolver(
           );
           partnerTotalEmissionsCapTco2e = round2(partnerSummary.esg.totalTco2e);
         } else if (partnerOrgRevenueEur !== null) {
-          // Fall back consistently to org-wide emissions / org-wide revenue
+          // Fall back consistently to org-wide emissions / org-wide revenue across the complete partner network
+          const orgWideDeeperHiddenSummaries = await resolveForOrg(
+            link.partnerOrgId,
+            riskSignals,
+            nextVisited,
+            depth + 1,
+            rawPartnerNetwork,
+          );
           const orgWideSummary = evaluateNetworkAnalytics({
             organization: {
               orgId: partnerOrg?.orgId,
@@ -314,7 +321,7 @@ export function createPartnerHiddenSummaryResolver(
             facilities: rawPartnerNetwork.facilities,
             lanes: rawPartnerNetwork.lanes,
             riskSignals,
-            partnerHiddenSummaries: deeperHiddenSummaries,
+            partnerHiddenSummaries: orgWideDeeperHiddenSummaries,
           });
           if (orgWideSummary.esg.totalTco2e > 0) {
             supplierEmissionIntensityTco2ePerEur = round6(

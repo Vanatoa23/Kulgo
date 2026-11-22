@@ -524,7 +524,14 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     ).toBe(false);
     const baselineUpstreamScope3 = beforeSummary.esg.upstreamScope3Tco2e;
 
-    // 2. Org B maps its own private upstream network with hidden Tier-2 supplier Org C (in sanctioned RU)
+    // 2. Org B sets private revenue and maps its own private upstream network with hidden Tier-2 supplier Org C (in sanctioned RU)
+    const bOrgPatchRes = await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({ annualRevenueEur: 812345 }),
+    });
+    expect(bOrgPatchRes.status).toBe(200);
+
     const bOwnRes = await app.request("/api/v1/workspace/facilities", {
       method: "POST",
       headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
@@ -748,6 +755,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       "Raw Nickel Ore",
       "Tampere Processing Plant",
       bOwn.facilityId,
+      "812345",
     ];
 
     for (const secret of forbiddenSecrets) {
@@ -1941,6 +1949,228 @@ describe("Privacy Boundary Contract (Sub-Project 3 ESG Ledger & Partner Economic
     expect(auditBody.events.some((e) => e.action === "ESG_LEDGER_EXPORTED")).toBe(
       true,
     );
+  });
+
+  it("resolves org-wide verified upstream summaries when facility-scoped partner link falls back to org revenue", async () => {
+    const app = createTestApp();
+
+    const orgA = await registerOrg(app, "buyer-fallback@alpha.de", "Buyer Alpha GmbH");
+    const orgB = await registerOrg(app, "tier1-fallback@multiplant.fi", "Tier1 Multi-Plant Oy");
+    const orgC = await registerOrg(app, "tier2-fallback@smelter.se", "Tier2 Verified Smelter AB");
+
+    // Org C (Tier-2): 4,000 tCO2e / €4,000,000 = 0.001 tCO2e/EUR
+    expect(
+      (
+        await app.request("/api/v1/auth/organization", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Cookie: orgC.cookie },
+          body: JSON.stringify({
+            scope1Tco2e: 4_000,
+            scope2Tco2e: 0,
+            annualRevenueEur: 4_000_000,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+
+    // Org B (Tier-1): 1,000 tCO2e Scope 1 + €10,000,000 org revenue (no facility-level revenue)
+    expect(
+      (
+        await app.request("/api/v1/auth/organization", {
+          method: "PATCH",
+          headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+          body: JSON.stringify({
+            scope1Tco2e: 1_000,
+            scope2Tco2e: 0,
+            annualRevenueEur: 10_000_000,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+
+    // Org B has two own facilities: bFac1 (fulfills Org A, no upstream) and bFac2 (fed by verified Org C)
+    const bFac1Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Helsinki Assembly Plant",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 60.1699,
+        lng: 24.9384,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: bFac1 } = (await bFac1Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const bFac2Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Turku Foundry Plant",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 60.4518,
+        lng: 22.2666,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: bFac2 } = (await bFac2Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    // Co-located Tier-2 supplier node so transport distance = 0 km (0 transport tCO2e)
+    const bTier2Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        name: "Upstream Smelter Node",
+        kind: "FACTORY",
+        countryCode: "SE",
+        lat: 60.4518,
+        lng: 22.2666,
+        isOwnFacility: false,
+      }),
+    });
+    const { facility: bTier2 } = (await bTier2Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    // Org B spends €2,000,000 with Org C -> 2,000,000 * 0.001 = 2,000 tCO2e verified upstream
+    expect(
+      (
+        await app.request("/api/v1/workspace/lanes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+          body: JSON.stringify({
+            fromFacilityId: bTier2.facilityId,
+            toFacilityId: bFac2.facilityId,
+            materialCategory: "Refined Alloys",
+            transportMode: "ROAD",
+            volumeSharePct: 100,
+            annualVolume: 1,
+            volumeUnit: "UNITS",
+            annualSpendEur: 2_000_000,
+          }),
+        })
+      ).status,
+    ).toBe(201);
+
+    // Link Org B's bTier2 to Org C
+    const invBCRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({
+        targetFacilityId: bTier2.facilityId,
+        inviteeEmail: "tier2-fallback@smelter.se",
+      }),
+    });
+    const { inviteToken: tokenBC } = (await invBCRes.json()) as {
+      inviteToken: string;
+    };
+    expect(
+      (
+        await app.request(`/api/v1/invites/${tokenBC}/accept`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgC.cookie },
+          body: JSON.stringify({}),
+        })
+      ).status,
+    ).toBe(200);
+
+    // Org A creates its own facility + Tier-1 node co-located (0 transport) and spends €5,000,000
+    const aOwnRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Munich Plant",
+        kind: "FACTORY",
+        countryCode: "DE",
+        lat: 48.1351,
+        lng: 11.582,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: aOwn } = (await aOwnRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const aTier1Res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Multi-Plant Supplier",
+        kind: "FACTORY",
+        countryCode: "FI",
+        lat: 48.1351,
+        lng: 11.582,
+        isOwnFacility: false,
+      }),
+    });
+    const { facility: aTier1 } = (await aTier1Res.json()) as {
+      facility: { facilityId: string };
+    };
+
+    expect(
+      (
+        await app.request("/api/v1/workspace/lanes", {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+          body: JSON.stringify({
+            fromFacilityId: aTier1.facilityId,
+            toFacilityId: aOwn.facilityId,
+            materialCategory: "Precision Components",
+            transportMode: "ROAD",
+            volumeSharePct: 100,
+            annualVolume: 1,
+            volumeUnit: "UNITS",
+            annualSpendEur: 5_000_000,
+          }),
+        })
+      ).status,
+    ).toBe(201);
+
+    // Org B accepts Org A's invite scoped specifically to bFac1 (which has no facility revenue and no upstream!)
+    const invABRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        targetFacilityId: aTier1.facilityId,
+        inviteeEmail: "tier1-fallback@multiplant.fi",
+      }),
+    });
+    const { inviteToken: tokenAB } = (await invABRes.json()) as {
+      inviteToken: string;
+    };
+    expect(
+      (
+        await app.request(`/api/v1/invites/${tokenAB}/accept`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+          body: JSON.stringify({
+            fulfilledByFacilityId: bFac1.facilityId,
+          }),
+        })
+      ).status,
+    ).toBe(200);
+
+    // Org-wide fallback must resolve Org C's verified 2,000 tCO2e on bFac2:
+    // Org B org-wide total = 1,000 (Scope 1) + 2,000 (verified Org C) = 3,000 tCO2e
+    // Org B intensity = 3,000 / 10,000,000 = 0.0003 tCO2e/EUR
+    // Org A attribution = €5,000,000 * 0.0003 = 1,500 tCO2e
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summaryText = await summaryRes.text();
+    const summary = AnalyticsSummarySchema.parse(JSON.parse(summaryText));
+    expect(summary.esg.upstreamScope3Tco2e).toBe(1500);
+    expect(summaryText).not.toContain("Turku Foundry Plant");
+    expect(summaryText).not.toContain("Tier2 Verified Smelter");
+    expect(summaryText).not.toContain("10000000");
+    expect(summaryText).not.toContain("4000000");
   });
 });
 
