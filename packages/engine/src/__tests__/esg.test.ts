@@ -1,8 +1,18 @@
 import { describe, expect, it } from "vitest";
 import { haversineDistanceKm } from "../baselines.js";
-import { computeEsgSummary, estimateLaneCo2eTonnes } from "../esg.js";
+import { computeEsgSummary, computeSupplierScope3Attribution, estimateLaneCo2eTonnes } from "../esg.js";
 
 describe("ESG & transport emission engine", () => {
+  it.each([null, 1000, 100_000])("does not substitute raw inventory %s when proportional inputs are missing", (total) => {
+    const supplier = {
+      isPartnerVerified: true,
+      sector: "Metals",
+      reportedScope12Tco2e: total,
+      hiddenUpstreamScope3Tco2e: null,
+    };
+    // The legacy API lacks country/activity data; use its documented sector proxy.
+    expect(computeSupplierScope3Attribution(supplier, total ?? 1000)).toBe(1150 * 0.08);
+  });
   it("computes realistic Tallinn -> Shanghai great-circle distance", () => {
     const km = haversineDistanceKm(59.437, 24.7536, 31.2304, 121.4737);
     expect(km).toBeGreaterThan(7400);
@@ -46,9 +56,9 @@ describe("ESG & transport emission engine", () => {
 
     expect(summary.confidence).toBe("ESTIMATED");
     expect(summary.verifiedCoveragePct).toBe(50);
-    expect(summary.upstreamScope3Tco2e).toBe(300 + 450 + 1150);
+    expect(summary.upstreamScope3Tco2e).toBe(125.6);
     expect(summary.transportScope3Tco2e).toBe(58);
-    expect(summary.totalTco2e).toBe(120 + 80 + 1900 + 58);
+    expect(summary.totalTco2e).toBe(383.6);
   });
 
   it("upgrades ESG confidence to NETWORK_VERIFIED when 100% of suppliers are verified", () => {
@@ -119,10 +129,10 @@ describe("ESG & transport emission engine", () => {
 
     expect(summary.scope1Tco2e).toBe(0);
     expect(summary.scope2Tco2e).toBe(0);
-    // Verified supplier with NaN/Infinity contributes 0; unverified with Infinity falls back to Metals baseline (1150)
-    expect(summary.upstreamScope3Tco2e).toBe(1150);
+    // Empty verified inventory contributes 0; the unverified Metals proxy uses an 8% buyer share.
+    expect(summary.upstreamScope3Tco2e).toBe(92);
     expect(summary.transportScope3Tco2e).toBe(25.5);
-    expect(summary.totalTco2e).toBe(1175.5);
+    expect(summary.totalTco2e).toBe(117.5);
     expect(Number.isFinite(summary.totalTco2e)).toBe(true);
   });
 

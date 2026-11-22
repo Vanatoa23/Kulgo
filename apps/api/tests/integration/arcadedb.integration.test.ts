@@ -542,7 +542,8 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
     expect(verifiedTier1?.locationPrecision).toBe("SITE_VERIFIED");
 
     const sanctionAlert = summary.alerts.find(
-      (a) => a.category === "SECONDARY_SANCTION",
+      // A direct Baltic corridor signal may precede the hidden partner alert.
+      (a) => a.alertId === `partner-upstream-${aTier1Id}`,
     );
     expect(sanctionAlert).toBeDefined();
     expect(sanctionAlert?.confidence).toBe("NETWORK_VERIFIED");
