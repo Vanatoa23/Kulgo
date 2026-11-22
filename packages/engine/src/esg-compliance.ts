@@ -886,349 +886,356 @@ export function evaluateEsgAndCompliance(
       activeUnit,
       supplyInput?.unitMassKg,
     );
-    if (massTonnes !== null) {
-      totalPhysicalTonnes += massTonnes;
-    }
 
-    const taxonomy = resolveMaterialArchetype(supplyInput, lane, supplier);
-    const cnCode = supplyInput?.cnCode ?? null;
-
-    // EUDR & UFLPA checks
-    if (taxonomy.eudrCommodity && supplier.locationPrecision !== "SITE_VERIFIED") {
-      eudrLanesMissingSiteVerification.push(lane.laneId);
-    }
-    if (UFLPA_HIGH_RISK_ORIGINS.has(supplier.countryCode.toUpperCase()) && !supplier.isPartnerVerified) {
-      uflpaFlaggedFacilityIds.push(supplier.facilityId);
-    }
-
-    // Resolve Category 1 attribution method (6-Step Waterfall)
-    const pcfFactor =
-      lane.productEmissionFactorTco2ePerUnit ??
-      hidden?.productEmissionFactorTco2ePerUnit ??
-      supplyInput?.productEmissionFactorTco2ePerUnit ??
-      null;
-    const pcfVerified = Boolean(
-      lane.pcfVerified ?? hidden?.pcfVerified ?? supplyInput?.pcfVerified ?? false,
-    );
-    const partnerIntensity = hidden?.supplierEmissionIntensityTco2ePerEur ?? null;
-    const explicitRatio =
-      lane.economicAttributionRatio ?? hidden?.economicAttributionRatio ?? null;
-
-    let cat1Tco2e = 0;
-    let method: Scope3AttributionMethod = "SECTOR_BASELINE";
-    let pcafScore: PcafScore = 5;
-    let factorId = "";
-    let factorValue = 0;
-    let factorUnit = "";
-    let sourceCitation = "";
-    let licenseId = "";
-    let provenanceStatus: EsgLedgerEntry["provenanceStatus"] = "CALIBRATED_BASELINE_V1";
-    let activityValue: number | null = null;
-    let activityUnit = activeUnit;
-    let formulaTrace = "";
-    let matchConfidence: TaxonomyMatchConfidence = taxonomy.matchConfidence;
-    let skipLedgerEmission = false;
-
-    // Priority 1: PCF_VOLUME (PCAF 1 if third-party verified, else 2)
-    if (finitePositive(activeVolume) && finitePositive(pcfFactor)) {
-      method = "PCF_VOLUME";
-      cat1Tco2e = round2(activeVolume * pcfFactor);
-      pcafScore = pcfVerified ? 1 : 2;
-      factorId = `partner_pcf_${lane.laneId.slice(0, 8)}`;
-      factorValue = round4(pcfFactor);
-      factorUnit = `tCO2e / ${activeUnit}`;
-      sourceCitation = pcfVerified
-        ? "Third-party verified supplier Product Carbon Footprint (PACT/EPD)"
-        : "Supplier-provided primary Product Carbon Footprint (unaudited)";
-      licenseId = "PARTNER-PRIMARY";
-      provenanceStatus = "PARTNER_PRIMARY";
-      matchConfidence = "PRIMARY_PARTNER";
-      activityValue = round2(activeVolume);
-      activityUnit = activeUnit;
-      formulaTrace = `${round2(activeVolume)} ${activeUnit} × ${round4(pcfFactor)} tCO2e/${activeUnit} = ${cat1Tco2e} tCO2e`;
-    }
-    // Priority 2: ECONOMIC_INTENSITY (Server-side, partner revenue strictly hidden — PCAF 2)
-    else if (
-      supplier.isPartnerVerified &&
-      finitePositive(activeSpendEur) &&
-      finitePositive(partnerIntensity)
-    ) {
-      method = "ECONOMIC_INTENSITY";
-      const rawAttributed = activeSpendEur * partnerIntensity;
-      const capRemaining = remainingPartnerCapByKey.get(partnerCapKey);
-      const capped =
-        capRemaining !== undefined ? Math.min(capRemaining, rawAttributed) : rawAttributed;
-      if (capRemaining !== undefined) {
-        remainingPartnerCapByKey.set(
-          partnerCapKey,
-          Math.max(0, capRemaining - capped),
-        );
+    // Internal transfers between own facilities (e.g., own transit hub -> own plant)
+    // are already accounted for under own Scope 1 & 2 and must not be double-counted
+    // or assigned synthetic sector baselines as Scope 3 Category 1 purchased goods.
+    // Category 4 freight on the transfer leg is still evaluated below.
+    if (!supplier.isOwnFacility) {
+      if (massTonnes !== null) {
+        totalPhysicalTonnes += massTonnes;
       }
-      cat1Tco2e = round2(capped);
-      pcafScore = 2;
-      factorId = `verified_partner_intensity_${supplier.facilityId.slice(0, 8)}`;
-      factorValue = round4(partnerIntensity * 1000); // kgCO2e / EUR for readability
-      factorUnit = "kgCO2e / EUR";
-      sourceCitation =
-        "Verified Kulgo Tier-1 Partner Server-Side Emission Intensity (revenue confidential)";
-      licenseId = "PARTNER-PRIMARY";
-      provenanceStatus = "PARTNER_PRIMARY";
-      matchConfidence = "PRIMARY_PARTNER";
-      activityValue = round2(activeSpendEur);
-      activityUnit = "EUR";
-      // Privacy invariant: NEVER print partner revenue or partner total emissions!
-      formulaTrace = `€${round2(activeSpendEur)} × ${partnerIntensity.toFixed(6)} tCO2e/EUR (verified partner intensity) = ${cat1Tco2e} tCO2e`;
-    }
-    // Priority 3: ALLOCATION_RATIO (0 < ratio <= 1 — PCAF 2, capped by shared partner inventory cap, zero raw pool leakage)
-    else if (
-      finitePositive(explicitRatio) &&
-      explicitRatio <= 1 &&
-      (finitePositive(supplier.estimatedScope12Tco2e) ||
-        finitePositive(hidden?.hiddenUpstreamScope3Tco2e))
-    ) {
-      method = "ALLOCATION_RATIO";
-      const rawPool =
-        finiteNonNegative(supplier.estimatedScope12Tco2e) +
-        finiteNonNegative(hidden?.hiddenUpstreamScope3Tco2e);
-      const rawAllocated = rawPool * explicitRatio;
-      const capRemaining = remainingPartnerCapByKey.get(partnerCapKey);
-      const capped =
-        capRemaining !== undefined ? Math.min(capRemaining, rawAllocated) : rawAllocated;
-      if (capRemaining !== undefined) {
-        remainingPartnerCapByKey.set(
-          partnerCapKey,
-          Math.max(0, capRemaining - capped),
-        );
+
+      const taxonomy = resolveMaterialArchetype(supplyInput, lane, supplier);
+      const cnCode = supplyInput?.cnCode ?? null;
+
+      // EUDR & UFLPA checks
+      if (taxonomy.eudrCommodity && supplier.locationPrecision !== "SITE_VERIFIED") {
+        eudrLanesMissingSiteVerification.push(lane.laneId);
       }
-      cat1Tco2e = round2(capped);
-      pcafScore = 2;
-      factorId = `supplier_allocation_${supplier.facilityId.slice(0, 8)}`;
-      factorValue = round4(explicitRatio);
-      factorUnit = "allocation ratio";
-      sourceCitation = supplier.isPartnerVerified
-        ? "Verified Tier-1 Partner Proportional Allocation (pool confidential)"
-        : "Supplier-Reported Emissions × Explicit Allocation Share";
-      licenseId = "PARTNER-PRIMARY";
-      provenanceStatus = "PARTNER_PRIMARY";
-      matchConfidence = "PRIMARY_PARTNER";
-      // Privacy invariant: NEVER serialize rawPool in activityValue or formulaTrace!
-      activityValue = round4(explicitRatio);
-      activityUnit = "allocation share";
-      formulaTrace = `Allocated share (${round2(explicitRatio * 100)}%) of confidential supplier emissions = ${cat1Tco2e} tCO2e`;
-    }
-    // Priority 4: PHYSICAL_FACTOR (Rank #1 Open Physical Core — PCAF 3)
-    else if (massTonnes !== null && taxonomy.archetype !== null) {
-      method = "PHYSICAL_FACTOR";
-      const physEntry = OPEN_PHYSICAL_FACTORS[taxonomy.archetype];
-      const { value: physFactor, geoKey } = resolvePhysicalGeoFactor(
-        taxonomy.archetype,
-        supplier.countryCode,
-        supplier.renewableElectricityPct,
-        supplier.renewableInstrumentsVerified,
+      if (UFLPA_HIGH_RISK_ORIGINS.has(supplier.countryCode.toUpperCase()) && !supplier.isPartnerVerified) {
+        uflpaFlaggedFacilityIds.push(supplier.facilityId);
+      }
+
+      // Resolve Category 1 attribution method (6-Step Waterfall)
+      const pcfFactor =
+        lane.productEmissionFactorTco2ePerUnit ??
+        hidden?.productEmissionFactorTco2ePerUnit ??
+        supplyInput?.productEmissionFactorTco2ePerUnit ??
+        null;
+      const pcfVerified = Boolean(
+        lane.pcfVerified ?? hidden?.pcfVerified ?? supplyInput?.pcfVerified ?? false,
       );
-      cat1Tco2e = round2(massTonnes * physFactor);
-      pcafScore = 3;
-      factorId = `${physEntry.factorIdPrefix}_${geoKey.toLowerCase()}_2026`;
-      factorValue = physFactor;
-      factorUnit = "tCO2e / tonne";
-      sourceCitation = physEntry.sourceCitation;
-      licenseId = physEntry.licenseId;
-      provenanceStatus = physEntry.provenanceStatus;
-      activityValue = round2(massTonnes);
-      activityUnit = "TONNES";
-      formulaTrace = `${round2(massTonnes)} t × ${physFactor} tCO2e/t (${geoKey}) = ${cat1Tco2e} tCO2e`;
-    }
-    // Priority 5: SPEND_EEIO (Rank #2 EXIOBASE v3.8.2 pxp / Rank #3 US EPA USEEIO v1.3 — PCAF 4/5)
-    else if (finitePositive(activeSpendEur)) {
-      method = "SPEND_EEIO";
-      const cc = supplier.countryCode.toUpperCase();
-      const useUseeio = NORTH_AMERICA_USEEIO.has(cc) && taxonomy.archetype !== null;
-      const isDelivered = DELIVERED_INCOTERMS.has(incoterms);
+      const partnerIntensity = hidden?.supplierEmissionIntensityTco2ePerEur ?? null;
+      const explicitRatio =
+        lane.economicAttributionRatio ?? hidden?.economicAttributionRatio ?? null;
 
-      if (useUseeio && taxonomy.archetype) {
-        const naFactor = USEEIO_V13_NA_SPEND_FACTORS[taxonomy.archetype];
-        const marginStrip = isDelivered
-          ? EXIOBASE382_ARCHETYPE_FACTORS[taxonomy.archetype].deliveredMarginStripRatio
-          : 0;
-        const basisSpend = activeSpendEur * (1 - marginStrip);
-        cat1Tco2e = round2((basisSpend * naFactor.kgCo2ePerEur2026) / 1000);
-        pcafScore = 4;
-        factorId = naFactor.factorId;
-        factorValue = naFactor.kgCo2ePerEur2026;
-        factorUnit = "kgCO2e / EUR_2026";
-        sourceCitation = USEEIO_V13_SOURCE_CITATION;
-        licenseId = USEEIO_V13_LICENSE_ID;
-        provenanceStatus = "OFFICIAL_PUBLISHED";
-        activityValue = round2(basisSpend);
-        activityUnit = "EUR";
-        formulaTrace = isDelivered
-          ? `€${round2(activeSpendEur)} × (1 - ${round2(marginStrip * 100)}% ${incoterms} strip) × ${naFactor.kgCo2ePerEur2026} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`
-          : `€${round2(activeSpendEur)} × ${naFactor.kgCo2ePerEur2026} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`;
-      } else {
-        const { bucket, isExactOrRegional } = resolveExiobaseRegionBucket(cc);
-        let kgPerEur = 0.81;
-        let exioCode = "sector_mfg";
-        let marginStripRatio = 0.08;
+      let cat1Tco2e = 0;
+      let method: Scope3AttributionMethod = "SECTOR_BASELINE";
+      let pcafScore: PcafScore = 5;
+      let factorId = "";
+      let factorValue = 0;
+      let factorUnit = "";
+      let sourceCitation = "";
+      let licenseId = "";
+      let provenanceStatus: EsgLedgerEntry["provenanceStatus"] = "CALIBRATED_BASELINE_V1";
+      let activityValue: number | null = null;
+      let activityUnit = activeUnit;
+      let formulaTrace = "";
+      let matchConfidence: TaxonomyMatchConfidence = taxonomy.matchConfidence;
+      let skipLedgerEmission = false;
 
-        if (taxonomy.archetype) {
-          const exioEntry = EXIOBASE382_ARCHETYPE_FACTORS[taxonomy.archetype];
-          kgPerEur = exioEntry.kgCo2ePerEur2026[bucket];
-          exioCode = exioEntry.exiobaseCode;
-          marginStripRatio = exioEntry.deliveredMarginStripRatio;
-        } else {
-          const secKey = supplier.sector ?? "Manufacturing";
-          const secMap =
-            EXIOBASE382_SECTOR_SPEND_FACTORS[secKey] ??
-            EXIOBASE382_SECTOR_SPEND_FACTORS.Manufacturing!;
-          kgPerEur = secMap[bucket];
-          exioCode = `sector_${secKey.toLowerCase()}`;
-        }
-
-        const marginStrip = isDelivered ? marginStripRatio : 0;
-        const basisSpend = activeSpendEur * (1 - marginStrip);
-        cat1Tco2e = round2((basisSpend * kgPerEur) / 1000);
-        pcafScore = isExactOrRegional && taxonomy.archetype !== null ? 4 : 5;
-        factorId = `exiobase382_pxp_${bucket.toLowerCase()}_${exioCode.replace(/\./g, "")}_2026`;
-        factorValue = kgPerEur;
-        factorUnit = "kgCO2e / EUR_2026";
-        sourceCitation = EXIOBASE382_SOURCE_CITATION;
-        licenseId = EXIOBASE382_LICENSE_ID;
-        provenanceStatus = EXIOBASE382_PROVENANCE;
-        activityValue = round2(basisSpend);
-        activityUnit = "EUR";
-        formulaTrace = isDelivered
-          ? `€${round2(activeSpendEur)} × (1 - ${round2(marginStrip * 100)}% ${incoterms} strip) × ${kgPerEur} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`
-          : `€${round2(activeSpendEur)} × ${kgPerEur} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`;
+      // Priority 1: PCF_VOLUME (PCAF 1 if third-party verified, else 2)
+      if (finitePositive(activeVolume) && finitePositive(pcfFactor)) {
+        method = "PCF_VOLUME";
+        cat1Tco2e = round2(activeVolume * pcfFactor);
+        pcafScore = pcfVerified ? 1 : 2;
+        factorId = `partner_pcf_${lane.laneId.slice(0, 8)}`;
+        factorValue = round4(pcfFactor);
+        factorUnit = `tCO2e / ${activeUnit}`;
+        sourceCitation = pcfVerified
+          ? "Third-party verified supplier Product Carbon Footprint (PACT/EPD)"
+          : "Supplier-provided primary Product Carbon Footprint (unaudited)";
+        licenseId = "PARTNER-PRIMARY";
+        provenanceStatus = "PARTNER_PRIMARY";
+        matchConfidence = "PRIMARY_PARTNER";
+        activityValue = round2(activeVolume);
+        activityUnit = activeUnit;
+        formulaTrace = `${round2(activeVolume)} ${activeUnit} × ${round4(pcfFactor)} tCO2e/${activeUnit} = ${cat1Tco2e} tCO2e`;
       }
-    }
-    // Priority 6: SECTOR_BASELINE (Level-0 Country × Sector proxy scaled by buyer share prior — PCAF 5)
-    // Privacy invariant: when a verified partner has no PCF, intensity+spend, explicit allocation
-    // ratio, physical volume, or spend basis, NEVER attribute or expose its raw private footprint.
-    else {
-      method = "SECTOR_BASELINE";
-      if (supplier.isPartnerVerified && hidden) {
-        unscaledReportedWarningCount += 1;
-      }
-      if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
-        skipLedgerEmission = true;
-      } else {
-        level0BaselineEmittedForFacility.add(supplier.facilityId);
-        if (supplier.isPartnerVerified && !hidden && !finitePositive(supplier.estimatedScope12Tco2e)) {
-          // Cycle-broken verified partner with no activity data: emit 0 to prevent circular double-counting
-          skipLedgerEmission = true;
-        } else if (finitePositive(supplier.estimatedScope12Tco2e)) {
-          unscaledReportedWarningCount += 1;
-          cat1Tco2e = round2(supplier.estimatedScope12Tco2e);
-          pcafScore = 5;
-          factorId = `supplier_reported_unscaled_${supplier.facilityId.slice(0, 8)}`;
-          factorValue = cat1Tco2e;
-          factorUnit = "tCO2e (unscaled supplier estimate)";
-          sourceCitation =
-            "User-entered supplier facility Scope 1+2 estimate (add spend, volume, or allocation share for proportional attribution)";
-          licenseId = "ORG-REPORTED";
-          provenanceStatus = "ORG_REPORTED";
-          activityValue = cat1Tco2e;
-          activityUnit = "tCO2e";
-          formulaTrace = `Unscaled supplier estimate = ${cat1Tco2e} tCO2e (add spend/volume/ratio)`;
-        } else {
-          const sectorKey = supplier.sector ?? "Manufacturing";
-          const facilityBaseline =
-            SECTOR_BASELINE_SCOPE12_TCO2E[sectorKey] ??
-            SECTOR_BASELINE_SCOPE12_TCO2E.Manufacturing!;
-          const eu27Grid = COUNTRY_GRID_FACTORS.EU27!.locationTco2ePerMwh;
-          const supplierGrid = resolveCountryGridFactor(supplier.countryCode).locationTco2ePerMwh;
-          const countryMod = Math.min(2.2, Math.max(0.35, supplierGrid / eu27Grid));
-
-          cat1Tco2e = round2(facilityBaseline * countryMod * LEVEL0_DEFAULT_BUYER_SHARE);
-          pcafScore = 5;
-          factorId = `kulgo_level0_proxy_${sectorKey.toLowerCase()}_${supplier.countryCode.toLowerCase()}_2026`;
-          factorValue = round2(facilityBaseline * countryMod);
-          factorUnit = "tCO2e / supplier-year (8% SME buyer-share prior)";
-          sourceCitation =
-            "Kulgo Level-0 Country-Grid-Adjusted Sector Proxy (8% provisional SME buyer-share prior; prevents 100% over-attribution)";
-          licenseId = "CC-BY-4.0";
-          provenanceStatus = "CALIBRATED_BASELINE_V1";
-          activityValue = LEVEL0_DEFAULT_BUYER_SHARE;
-          activityUnit = "buyer-share prior";
-          formulaTrace = `${facilityBaseline} tCO2e × ${round2(countryMod)} grid-mod × 8% buyer-share prior = ${cat1Tco2e} tCO2e`;
-        }
-      }
-    }
-
-    if (!skipLedgerEmission) {
-      upstreamScope3Tco2e += cat1Tco2e;
-      if (pcafScore === 1 || pcafScore === 2) {
-        primaryDataScope3Tco2e += cat1Tco2e;
-      }
-
-      ledgerEntries.push({
-        entryId: `scope3-cat1-${lane.laneId}`,
-        scope: "SCOPE_3_CAT_1",
-        entityType: "TIER1_SUPPLIER_LANE",
-        entityId: lane.laneId,
-        entityName: `${supplier.name} → ${lane.materialCategory}`,
-        countryCode: supplier.countryCode,
-        sector: supplier.sector,
-        materialCategory: lane.materialCategory,
-        materialArchetype: taxonomy.archetype,
-        cnCode,
-        cbamCategory: taxonomy.cbamCategory,
-        matchConfidence,
-        activityValue,
-        activityUnit,
-        attributionMethod: method,
-        factorId,
-        factorVersion: FACTOR_MATRIX_VERSION,
-        factorValue,
-        factorUnit,
-        sourceCitation,
-        licenseId,
-        provenanceStatus,
-        pcafScore,
-        tco2e: cat1Tco2e,
-        formulaTrace,
-        networkVerified: supplier.isPartnerVerified,
-      });
-
-      hotspotsRaw.push({
-        entityId: lane.laneId,
-        entityType: "TIER1_SUPPLIER_LANE",
-        entityName: supplier.name,
-        materialCategory: lane.materialCategory,
-        countryCode: supplier.countryCode,
-        tco2e: cat1Tco2e,
-        shareOfScope3Pct: 0, // populated after total Scope 3 is known
-        pcafScore,
-        attributionMethod: method,
-        cbamCategory: taxonomy.cbamCategory,
-      });
-
-      // EU CBAM flagging for non-EU/EEA imports
-      if (
-        taxonomy.cbamCategory !== null &&
-        !EU_EEA_CBAM_EXEMPT.has(supplier.countryCode.toUpperCase())
+      // Priority 2: ECONOMIC_INTENSITY (Server-side, partner revenue strictly hidden — PCAF 2)
+      else if (
+        supplier.isPartnerVerified &&
+        finitePositive(activeSpendEur) &&
+        finitePositive(partnerIntensity)
       ) {
-        if (
-          taxonomy.cbamCategory === "ELECTRICITY" ||
-          taxonomy.cbamCategory === "HYDROGEN"
-        ) {
-          cbamHasNoThresholdCategory = true;
-        } else if (massTonnes !== null) {
-          cbamCumulativeMassTonnes += massTonnes;
+        method = "ECONOMIC_INTENSITY";
+        const rawAttributed = activeSpendEur * partnerIntensity;
+        const capRemaining = remainingPartnerCapByKey.get(partnerCapKey);
+        const capped =
+          capRemaining !== undefined ? Math.min(capRemaining, rawAttributed) : rawAttributed;
+        if (capRemaining !== undefined) {
+          remainingPartnerCapByKey.set(
+            partnerCapKey,
+            Math.max(0, capRemaining - capped),
+          );
+        }
+        cat1Tco2e = round2(capped);
+        pcafScore = 2;
+        factorId = `verified_partner_intensity_${supplier.facilityId.slice(0, 8)}`;
+        factorValue = round4(partnerIntensity * 1000); // kgCO2e / EUR for readability
+        factorUnit = "kgCO2e / EUR";
+        sourceCitation =
+          "Verified Kulgo Tier-1 Partner Server-Side Emission Intensity (revenue confidential)";
+        licenseId = "PARTNER-PRIMARY";
+        provenanceStatus = "PARTNER_PRIMARY";
+        matchConfidence = "PRIMARY_PARTNER";
+        activityValue = round2(activeSpendEur);
+        activityUnit = "EUR";
+        // Privacy invariant: NEVER print partner revenue or partner total emissions!
+        formulaTrace = `€${round2(activeSpendEur)} × ${partnerIntensity.toFixed(6)} tCO2e/EUR (verified partner intensity) = ${cat1Tco2e} tCO2e`;
+      }
+      // Priority 3: ALLOCATION_RATIO (0 < ratio <= 1 — PCAF 2, capped by shared partner inventory cap, zero raw pool leakage)
+      else if (
+        finitePositive(explicitRatio) &&
+        explicitRatio <= 1 &&
+        (finitePositive(supplier.estimatedScope12Tco2e) ||
+          finitePositive(hidden?.hiddenUpstreamScope3Tco2e))
+      ) {
+        method = "ALLOCATION_RATIO";
+        const rawPool =
+          finiteNonNegative(supplier.estimatedScope12Tco2e) +
+          finiteNonNegative(hidden?.hiddenUpstreamScope3Tco2e);
+        const rawAllocated = rawPool * explicitRatio;
+        const capRemaining = remainingPartnerCapByKey.get(partnerCapKey);
+        const capped =
+          capRemaining !== undefined ? Math.min(capRemaining, rawAllocated) : rawAllocated;
+        if (capRemaining !== undefined) {
+          remainingPartnerCapByKey.set(
+            partnerCapKey,
+            Math.max(0, capRemaining - capped),
+          );
+        }
+        cat1Tco2e = round2(capped);
+        pcafScore = 2;
+        factorId = `supplier_allocation_${supplier.facilityId.slice(0, 8)}`;
+        factorValue = round4(explicitRatio);
+        factorUnit = "allocation ratio";
+        sourceCitation = supplier.isPartnerVerified
+          ? "Verified Tier-1 Partner Proportional Allocation (pool confidential)"
+          : "Supplier-Reported Emissions × Explicit Allocation Share";
+        licenseId = "PARTNER-PRIMARY";
+        provenanceStatus = "PARTNER_PRIMARY";
+        matchConfidence = "PRIMARY_PARTNER";
+        // Privacy invariant: NEVER serialize rawPool in activityValue or formulaTrace!
+        activityValue = round4(explicitRatio);
+        activityUnit = "allocation share";
+        formulaTrace = `Allocated share (${round2(explicitRatio * 100)}%) of confidential supplier emissions = ${cat1Tco2e} tCO2e`;
+      }
+      // Priority 4: PHYSICAL_FACTOR (Rank #1 Open Physical Core — PCAF 3)
+      else if (massTonnes !== null && taxonomy.archetype !== null) {
+        method = "PHYSICAL_FACTOR";
+        const physEntry = OPEN_PHYSICAL_FACTORS[taxonomy.archetype];
+        const { value: physFactor, geoKey } = resolvePhysicalGeoFactor(
+          taxonomy.archetype,
+          supplier.countryCode,
+          supplier.renewableElectricityPct,
+          supplier.renewableInstrumentsVerified,
+        );
+        cat1Tco2e = round2(massTonnes * physFactor);
+        pcafScore = 3;
+        factorId = `${physEntry.factorIdPrefix}_${geoKey.toLowerCase()}_2026`;
+        factorValue = physFactor;
+        factorUnit = "tCO2e / tonne";
+        sourceCitation = physEntry.sourceCitation;
+        licenseId = physEntry.licenseId;
+        provenanceStatus = physEntry.provenanceStatus;
+        activityValue = round2(massTonnes);
+        activityUnit = "TONNES";
+        formulaTrace = `${round2(massTonnes)} t × ${physFactor} tCO2e/t (${geoKey}) = ${cat1Tco2e} tCO2e`;
+      }
+      // Priority 5: SPEND_EEIO (Rank #2 EXIOBASE v3.8.2 pxp / Rank #3 US EPA USEEIO v1.3 — PCAF 4/5)
+      else if (finitePositive(activeSpendEur)) {
+        method = "SPEND_EEIO";
+        const cc = supplier.countryCode.toUpperCase();
+        const useUseeio = NORTH_AMERICA_USEEIO.has(cc) && taxonomy.archetype !== null;
+        const isDelivered = DELIVERED_INCOTERMS.has(incoterms);
+
+        if (useUseeio && taxonomy.archetype) {
+          const naFactor = USEEIO_V13_NA_SPEND_FACTORS[taxonomy.archetype];
+          const marginStrip = isDelivered
+            ? EXIOBASE382_ARCHETYPE_FACTORS[taxonomy.archetype].deliveredMarginStripRatio
+            : 0;
+          const basisSpend = activeSpendEur * (1 - marginStrip);
+          cat1Tco2e = round2((basisSpend * naFactor.kgCo2ePerEur2026) / 1000);
+          pcafScore = 4;
+          factorId = naFactor.factorId;
+          factorValue = naFactor.kgCo2ePerEur2026;
+          factorUnit = "kgCO2e / EUR_2026";
+          sourceCitation = USEEIO_V13_SOURCE_CITATION;
+          licenseId = USEEIO_V13_LICENSE_ID;
+          provenanceStatus = "OFFICIAL_PUBLISHED";
+          activityValue = round2(basisSpend);
+          activityUnit = "EUR";
+          formulaTrace = isDelivered
+            ? `€${round2(activeSpendEur)} × (1 - ${round2(marginStrip * 100)}% ${incoterms} strip) × ${naFactor.kgCo2ePerEur2026} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`
+            : `€${round2(activeSpendEur)} × ${naFactor.kgCo2ePerEur2026} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`;
+        } else {
+          const { bucket, isExactOrRegional } = resolveExiobaseRegionBucket(cc);
+          let kgPerEur = 0.81;
+          let exioCode = "sector_mfg";
+          let marginStripRatio = 0.08;
+
+          if (taxonomy.archetype) {
+            const exioEntry = EXIOBASE382_ARCHETYPE_FACTORS[taxonomy.archetype];
+            kgPerEur = exioEntry.kgCo2ePerEur2026[bucket];
+            exioCode = exioEntry.exiobaseCode;
+            marginStripRatio = exioEntry.deliveredMarginStripRatio;
+          } else {
+            const secKey = supplier.sector ?? "Manufacturing";
+            const secMap =
+              EXIOBASE382_SECTOR_SPEND_FACTORS[secKey] ??
+              EXIOBASE382_SECTOR_SPEND_FACTORS.Manufacturing!;
+            kgPerEur = secMap[bucket];
+            exioCode = `sector_${secKey.toLowerCase()}`;
+          }
+
+          const marginStrip = isDelivered ? marginStripRatio : 0;
+          const basisSpend = activeSpendEur * (1 - marginStrip);
+          cat1Tco2e = round2((basisSpend * kgPerEur) / 1000);
+          pcafScore = isExactOrRegional && taxonomy.archetype !== null ? 4 : 5;
+          factorId = `exiobase382_pxp_${bucket.toLowerCase()}_${exioCode.replace(/\./g, "")}_2026`;
+          factorValue = kgPerEur;
+          factorUnit = "kgCO2e / EUR_2026";
+          sourceCitation = EXIOBASE382_SOURCE_CITATION;
+          licenseId = EXIOBASE382_LICENSE_ID;
+          provenanceStatus = EXIOBASE382_PROVENANCE;
+          activityValue = round2(basisSpend);
+          activityUnit = "EUR";
+          formulaTrace = isDelivered
+            ? `€${round2(activeSpendEur)} × (1 - ${round2(marginStrip * 100)}% ${incoterms} strip) × ${kgPerEur} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`
+            : `€${round2(activeSpendEur)} × ${kgPerEur} kgCO2e/€ / 1000 = ${cat1Tco2e} tCO2e`;
+        }
+      }
+      // Priority 6: SECTOR_BASELINE (Level-0 Country × Sector proxy scaled by buyer share prior — PCAF 5)
+      // Privacy invariant: when a verified partner has no PCF, intensity+spend, explicit allocation
+      // ratio, physical volume, or spend basis, NEVER attribute or expose its raw private footprint.
+      else {
+        method = "SECTOR_BASELINE";
+        if (supplier.isPartnerVerified && hidden) {
+          unscaledReportedWarningCount += 1;
+        }
+        if (level0BaselineEmittedForFacility.has(supplier.facilityId)) {
+          skipLedgerEmission = true;
+        } else {
+          level0BaselineEmittedForFacility.add(supplier.facilityId);
+          if (supplier.isPartnerVerified && !hidden && !finitePositive(supplier.estimatedScope12Tco2e)) {
+            // Cycle-broken verified partner with no activity data: emit 0 to prevent circular double-counting
+            skipLedgerEmission = true;
+          } else if (finitePositive(supplier.estimatedScope12Tco2e)) {
+            unscaledReportedWarningCount += 1;
+            cat1Tco2e = round2(supplier.estimatedScope12Tco2e);
+            pcafScore = 5;
+            factorId = `supplier_reported_unscaled_${supplier.facilityId.slice(0, 8)}`;
+            factorValue = cat1Tco2e;
+            factorUnit = "tCO2e (unscaled supplier estimate)";
+            sourceCitation =
+              "User-entered supplier facility Scope 1+2 estimate (add spend, volume, or allocation share for proportional attribution)";
+            licenseId = "ORG-REPORTED";
+            provenanceStatus = "ORG_REPORTED";
+            activityValue = cat1Tco2e;
+            activityUnit = "tCO2e";
+            formulaTrace = `Unscaled supplier estimate = ${cat1Tco2e} tCO2e (add spend/volume/ratio)`;
+          } else {
+            const sectorKey = supplier.sector ?? "Manufacturing";
+            const facilityBaseline =
+              SECTOR_BASELINE_SCOPE12_TCO2E[sectorKey] ??
+              SECTOR_BASELINE_SCOPE12_TCO2E.Manufacturing!;
+            const eu27Grid = COUNTRY_GRID_FACTORS.EU27!.locationTco2ePerMwh;
+            const supplierGrid = resolveCountryGridFactor(supplier.countryCode).locationTco2ePerMwh;
+            const countryMod = Math.min(2.2, Math.max(0.35, supplierGrid / eu27Grid));
+
+            cat1Tco2e = round2(facilityBaseline * countryMod * LEVEL0_DEFAULT_BUYER_SHARE);
+            pcafScore = 5;
+            factorId = `kulgo_level0_proxy_${sectorKey.toLowerCase()}_${supplier.countryCode.toLowerCase()}_2026`;
+            factorValue = round2(facilityBaseline * countryMod);
+            factorUnit = "tCO2e / supplier-year (8% SME buyer-share prior)";
+            sourceCitation =
+              "Kulgo Level-0 Country-Grid-Adjusted Sector Proxy (8% provisional SME buyer-share prior; prevents 100% over-attribution)";
+            licenseId = "CC-BY-4.0";
+            provenanceStatus = "CALIBRATED_BASELINE_V1";
+            activityValue = LEVEL0_DEFAULT_BUYER_SHARE;
+            activityUnit = "buyer-share prior";
+            formulaTrace = `${facilityBaseline} tCO2e × ${round2(countryMod)} grid-mod × 8% buyer-share prior = ${cat1Tco2e} tCO2e`;
+          }
+        }
+      }
+
+      if (!skipLedgerEmission) {
+        upstreamScope3Tco2e += cat1Tco2e;
+        if (pcafScore === 1 || pcafScore === 2) {
+          primaryDataScope3Tco2e += cat1Tco2e;
         }
 
-        cbamFlaggedLanes.push({
-          laneId: lane.laneId,
-          supplierName: supplier.name,
-          originCountryCode: supplier.countryCode.toUpperCase(),
+        ledgerEntries.push({
+          entryId: `scope3-cat1-${lane.laneId}`,
+          scope: "SCOPE_3_CAT_1",
+          entityType: "TIER1_SUPPLIER_LANE",
+          entityId: lane.laneId,
+          entityName: `${supplier.name} → ${lane.materialCategory}`,
+          countryCode: supplier.countryCode,
+          sector: supplier.sector,
           materialCategory: lane.materialCategory,
+          materialArchetype: taxonomy.archetype,
           cnCode,
           cbamCategory: taxonomy.cbamCategory,
-          annualTonnes: massTonnes !== null ? round2(massTonnes) : null,
-          embeddedTco2e: cat1Tco2e,
-          usingDefaultFactor: pcafScore >= 3,
+          matchConfidence,
+          activityValue,
+          activityUnit,
+          attributionMethod: method,
+          factorId,
+          factorVersion: FACTOR_MATRIX_VERSION,
+          factorValue,
+          factorUnit,
+          sourceCitation,
+          licenseId,
+          provenanceStatus,
           pcafScore,
+          tco2e: cat1Tco2e,
+          formulaTrace,
+          networkVerified: supplier.isPartnerVerified,
         });
+
+        hotspotsRaw.push({
+          entityId: lane.laneId,
+          entityType: "TIER1_SUPPLIER_LANE",
+          entityName: supplier.name,
+          materialCategory: lane.materialCategory,
+          countryCode: supplier.countryCode,
+          tco2e: cat1Tco2e,
+          shareOfScope3Pct: 0, // populated after total Scope 3 is known
+          pcafScore,
+          attributionMethod: method,
+          cbamCategory: taxonomy.cbamCategory,
+        });
+
+        // EU CBAM flagging for non-EU/EEA imports
+        if (
+          taxonomy.cbamCategory !== null &&
+          !EU_EEA_CBAM_EXEMPT.has(supplier.countryCode.toUpperCase())
+        ) {
+          if (
+            taxonomy.cbamCategory === "ELECTRICITY" ||
+            taxonomy.cbamCategory === "HYDROGEN"
+          ) {
+            cbamHasNoThresholdCategory = true;
+          } else if (massTonnes !== null) {
+            cbamCumulativeMassTonnes += massTonnes;
+          }
+
+          cbamFlaggedLanes.push({
+            laneId: lane.laneId,
+            supplierName: supplier.name,
+            originCountryCode: supplier.countryCode.toUpperCase(),
+            materialCategory: lane.materialCategory,
+            cnCode,
+            cbamCategory: taxonomy.cbamCategory,
+            annualTonnes: massTonnes !== null ? round2(massTonnes) : null,
+            embeddedTco2e: cat1Tco2e,
+            usingDefaultFactor: pcafScore >= 3,
+            pcafScore,
+          });
+        }
       }
     }
 

@@ -127,14 +127,21 @@ function getActiveTier1FacilityIds(
 }
 
 /**
- * Scopes a verified partner's network to the subgraph feeding `fulfilledByFacilityId`
- * when two-sided facility reconciliation has been bound on `VERIFIED_PARTNER_LINK`.
+ * Scopes a verified partner's network to the full upstream subgraph feeding
+ * `fulfilledByFacilityId` when two-sided facility reconciliation has been bound
+ * on `VERIFIED_PARTNER_LINK`.
+ *
+ * Traverses active inbound lanes (`volumeSharePct > 0`) transitively from the
+ * fulfilling own facility so multi-hop internal topologies (e.g.
+ * supplier -> own transit facility -> fulfilling plant), branches, diamonds,
+ * and cycles are resolved without infinite recursion or duplicate entries while
+ * excluding unrelated branches.
  *
  * When `fulfilledByFacilityId` is omitted or does not match an own facility in
  * `partnerNetwork`, falls back conservatively to the partner's full active upstream
  * network per `docs/PRIVACY_CONTRACT.md`.
  */
-function scopePartnerNetworkForReconciliation(
+export function scopePartnerNetworkForReconciliation(
   partnerNetwork: WorkspaceNetworkResponse,
   fulfilledByFacilityId?: string | null,
 ): WorkspaceNetworkResponse {
@@ -150,16 +157,47 @@ function scopePartnerNetworkForReconciliation(
     return partnerNetwork;
   }
 
-  const scopedLanes = partnerNetwork.lanes.filter(
-    (lane) => lane.toFacilityId === fulfillingOwnFacility.facilityId,
-  );
+  const inboundByToFacilityId = new Map<
+    string,
+    WorkspaceNetworkResponse["lanes"]
+  >();
+  for (const lane of partnerNetwork.lanes) {
+    if (lane.volumeSharePct <= 0) {
+      continue;
+    }
+    const existing = inboundByToFacilityId.get(lane.toFacilityId);
+    if (existing) {
+      existing.push(lane);
+    } else {
+      inboundByToFacilityId.set(lane.toFacilityId, [lane]);
+    }
+  }
+
   const feedingFacilityIds = new Set<string>([
     fulfillingOwnFacility.facilityId,
   ]);
-  for (const lane of scopedLanes) {
-    feedingFacilityIds.add(lane.fromFacilityId);
+  const scopedLaneIds = new Set<string>();
+  const queue: string[] = [fulfillingOwnFacility.facilityId];
+  let head = 0;
+
+  while (head < queue.length) {
+    const currentFacilityId = queue[head++]!;
+    const inboundLanes = inboundByToFacilityId.get(currentFacilityId);
+    if (!inboundLanes) {
+      continue;
+    }
+    for (const lane of inboundLanes) {
+      scopedLaneIds.add(lane.laneId);
+      if (!feedingFacilityIds.has(lane.fromFacilityId)) {
+        feedingFacilityIds.add(lane.fromFacilityId);
+        queue.push(lane.fromFacilityId);
+      }
+    }
   }
 
+  const scopedLanes = partnerNetwork.lanes.filter((lane) =>
+    scopedLaneIds.has(lane.laneId),
+  );
   const scopedFacilities = partnerNetwork.facilities.filter((f) =>
     feedingFacilityIds.has(f.facilityId),
   );

@@ -2176,5 +2176,619 @@ describe("Privacy Boundary Contract (Sub-Project 3 ESG Ledger & Partner Economic
   });
 });
 
+describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)", () => {
+  async function createFacility(
+    app: ReturnType<typeof createTestApp>,
+    cookie: string,
+    payload: {
+      name: string;
+      kind?: "FACTORY" | "WAREHOUSE" | "PORT" | "HQ" | "MINE";
+      countryCode: string;
+      lat: number;
+      lng: number;
+      isOwnFacility: boolean;
+      estimatedScope12Tco2e?: number | null;
+      annualRevenueEur?: number | null;
+    },
+  ): Promise<string> {
+    const res = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        kind: "FACTORY",
+        ...payload,
+      }),
+    });
+    expect(res.status).toBe(201);
+    const body = (await res.json()) as { facility: { facilityId: string } };
+    return body.facility.facilityId;
+  }
+
+  async function createLane(
+    app: ReturnType<typeof createTestApp>,
+    cookie: string,
+    payload: {
+      fromFacilityId: string;
+      toFacilityId: string;
+      materialCategory: string;
+      transportMode?: "ROAD" | "RAIL" | "SEA" | "AIR" | "MULTIMODAL";
+      volumeSharePct?: number;
+      economicAttributionRatio?: number | null;
+      estimatedLaneCo2e?: number | null;
+      riskStatus?: "GREEN" | "YELLOW" | "RED";
+      riskReason?: string | null;
+    },
+  ): Promise<void> {
+    const res = await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        transportMode: "ROAD",
+        volumeSharePct: 100,
+        ...payload,
+      }),
+    });
+    expect(res.status).toBe(201);
+  }
+
+  async function linkVerifiedPartner(
+    app: ReturnType<typeof createTestApp>,
+    buyerCookie: string,
+    targetFacilityId: string,
+    inviteeEmail: string,
+    partnerCookie: string,
+    fulfilledByFacilityId?: string,
+  ): Promise<void> {
+    const invRes = await app.request("/api/v1/invites", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyerCookie },
+      body: JSON.stringify({ targetFacilityId, inviteeEmail }),
+    });
+    expect(invRes.status).toBe(201);
+    const { inviteToken } = (await invRes.json()) as { inviteToken: string };
+    const acceptRes = await app.request(`/api/v1/invites/${inviteToken}/accept`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: partnerCookie },
+      body: JSON.stringify(
+        fulfilledByFacilityId ? { fulfilledByFacilityId } : {},
+      ),
+    });
+    expect(acceptRes.status).toBe(200);
+  }
+
+  it("traverses supplier -> own transit facility -> fulfilling plant for sanctions, shared chokepoints, and emissions while excluding unrelated branches", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, "tx-buyer@reconcile.ee", "Org A Buyer");
+    const orgB = await registerOrg(app, "tx-partner-b@reconcile.fi", "Org B Multi-Hop Partner");
+    const orgD = await registerOrg(app, "tx-partner-d@reconcile.se", "Org D Second Partner");
+
+    // Org A has own plant + two Tier-1 partners (Org B and Org D)
+    const aOwnId = await createFacility(app, orgA.cookie, {
+      name: "Org A Tallinn Plant",
+      countryCode: "EE",
+      lat: 59.437,
+      lng: 24.7536,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 100,
+    });
+    const aTier1BId = await createFacility(app, orgA.cookie, {
+      name: "Org B Tier-1 Placeholder",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    const aTier1DId = await createFacility(app, orgA.cookie, {
+      name: "Org D Tier-1 Placeholder",
+      countryCode: "SE",
+      lat: 59.3293,
+      lng: 18.0686,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    await createLane(app, orgA.cookie, {
+      fromFacilityId: aTier1BId,
+      toFacilityId: aOwnId,
+      materialCategory: "Drive Assemblies",
+      economicAttributionRatio: 0.5,
+    });
+    await createLane(app, orgA.cookie, {
+      fromFacilityId: aTier1DId,
+      toFacilityId: aOwnId,
+      materialCategory: "Sensor Modules",
+      economicAttributionRatio: 0.5,
+    });
+
+    // Org B:
+    //   - bSupplierRu (RU, sanctioned, 120 tCO2e, freight 10) -> bTransit (own, 40 tCO2e) -> bPlant (80 tCO2e, freight 10)
+    //   - bSupplierKr (KR, clean, 80 tCO2e, freight 5) -> bTransit -> bPlant (shares KR chokepoint with Org D)
+    // Plus unrelated branch: unrelatedSup (BY, 999 tCO2e) -> unrelatedTransit (500) -> unrelatedPlant (500)
+    // Plus outgoing branch from transit: bTransit -> unrelatedPlant (must be excluded)
+    const bPlantId = await createFacility(app, orgB.cookie, {
+      name: "Org B Fulfilling Plant Secret",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 80,
+    });
+    const bTransitId = await createFacility(app, orgB.cookie, {
+      name: "Org B Own Transit Hub Secret",
+      kind: "WAREHOUSE",
+      countryCode: "FI",
+      lat: 60.4518,
+      lng: 22.2666,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 40,
+    });
+    const bSupplierRuId = await createFacility(app, orgB.cookie, {
+      name: "Ural Hidden Metals Co",
+      countryCode: "RU",
+      lat: 55.7558,
+      lng: 37.6173,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: 120,
+    });
+    const bSupplierKrId = await createFacility(app, orgB.cookie, {
+      name: "Busan Hidden Magnets Co",
+      countryCode: "KR",
+      lat: 35.1796,
+      lng: 129.0756,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: 80,
+    });
+    const bUnrelatedPlantId = await createFacility(app, orgB.cookie, {
+      name: "Org B Unrelated Plant Secret",
+      countryCode: "FI",
+      lat: 61.4978,
+      lng: 23.761,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 500,
+    });
+    const bUnrelatedTransitId = await createFacility(app, orgB.cookie, {
+      name: "Org B Unrelated Transit Secret",
+      kind: "WAREHOUSE",
+      countryCode: "FI",
+      lat: 62.2426,
+      lng: 25.7473,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 500,
+    });
+    const bUnrelatedSupId = await createFacility(app, orgB.cookie, {
+      name: "Unrelated Minsk Smelter",
+      countryCode: "BY",
+      lat: 53.9006,
+      lng: 27.559,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: 999,
+    });
+
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bSupplierRuId,
+      toFacilityId: bTransitId,
+      materialCategory: "Sanctioned Alloy",
+      transportMode: "RAIL",
+      estimatedLaneCo2e: 10,
+      riskStatus: "RED",
+      riskReason: "Secondary sanctions exposure on upstream feedstock",
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bSupplierKrId,
+      toFacilityId: bTransitId,
+      materialCategory: "Rare Earth Magnets",
+      transportMode: "SEA",
+      estimatedLaneCo2e: 5,
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bTransitId,
+      toFacilityId: bPlantId,
+      materialCategory: "Internal Transit Feedstock",
+      transportMode: "ROAD",
+      estimatedLaneCo2e: 10,
+    });
+    // Outgoing from transit to unrelated plant + unrelated branch
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bTransitId,
+      toFacilityId: bUnrelatedPlantId,
+      materialCategory: "Internal Outgoing",
+      estimatedLaneCo2e: 100,
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bUnrelatedSupId,
+      toFacilityId: bUnrelatedTransitId,
+      materialCategory: "Unrelated Feedstock",
+      estimatedLaneCo2e: 50,
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bUnrelatedTransitId,
+      toFacilityId: bUnrelatedPlantId,
+      materialCategory: "Unrelated Transfer",
+      estimatedLaneCo2e: 50,
+    });
+
+    // Org D also sources from KR to trigger SHARED_UPSTREAM_CHOKEPOINT across Org B & Org D
+    const dPlantId = await createFacility(app, orgD.cookie, {
+      name: "Org D Stockholm Plant",
+      countryCode: "SE",
+      lat: 59.3293,
+      lng: 18.0686,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 60,
+    });
+    const dSupplierKrId = await createFacility(app, orgD.cookie, {
+      name: "Incheon Hidden Sensor Co",
+      countryCode: "KR",
+      lat: 37.4563,
+      lng: 126.7052,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: 40,
+    });
+    await createLane(app, orgD.cookie, {
+      fromFacilityId: dSupplierKrId,
+      toFacilityId: dPlantId,
+      materialCategory: "Optical Chips",
+      estimatedLaneCo2e: 0,
+    });
+
+    await linkVerifiedPartner(
+      app,
+      orgA.cookie,
+      aTier1BId,
+      "tx-partner-b@reconcile.fi",
+      orgB.cookie,
+      bPlantId,
+    );
+    await linkVerifiedPartner(
+      app,
+      orgA.cookie,
+      aTier1DId,
+      "tx-partner-d@reconcile.se",
+      orgD.cookie,
+      dPlantId,
+    );
+
+    const summaryRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(summaryRes.status).toBe(200);
+    const summaryText = await summaryRes.text();
+    const summary = AnalyticsSummarySchema.parse(JSON.parse(summaryText));
+
+    // Risk: sanctions from supplierRu -> transit -> plant MUST propagate; shared KR chokepoint MUST be detected
+    const sanctionAlert = summary.alerts.find(
+      (a) =>
+        a.category === "SECONDARY_SANCTION" &&
+        a.affectedTier1FacilityIds.includes(aTier1BId),
+    );
+    expect(sanctionAlert).toBeDefined();
+    expect(sanctionAlert?.affectedRegionCode).toBe("RU");
+
+    const chokepointAlert = summary.alerts.find(
+      (a) => a.category === "SHARED_UPSTREAM_CHOKEPOINT",
+    );
+    expect(chokepointAlert).toBeDefined();
+    expect(chokepointAlert?.affectedRegionCode).toBe("KR");
+    expect(chokepointAlert?.affectedTier1FacilityIds).toEqual(
+      expect.arrayContaining([aTier1BId, aTier1DId]),
+    );
+
+    // Emissions:
+    // Org B scoped subgraph = 80 (plant) + 40 (transit) + 120 (supplierRu) + 80 (supplierKr) + 10 + 5 + 10 (freight) = 345 -> 50% = 172.5
+    // Org D scoped subgraph = 60 (plant) + 40 (supplierKr) = 100 -> 50% = 50
+    // Total attributed upstream Scope 3 = 222.5 (excludes unrelated branch & does not double-count transit)
+    expect(summary.esg.upstreamScope3Tco2e).toBe(222.5);
+
+    // Privacy: zero Tier-2+ names or IDs leak
+    for (const secret of [
+      "Org B Fulfilling Plant Secret",
+      "Org B Own Transit Hub Secret",
+      "Ural Hidden Metals Co",
+      "Busan Hidden Magnets Co",
+      "Org B Unrelated Plant Secret",
+      "Unrelated Minsk Smelter",
+      bPlantId,
+      bTransitId,
+      bSupplierRuId,
+      bSupplierKrId,
+      bUnrelatedSupId,
+    ]) {
+      expect(summaryText).not.toContain(secret);
+    }
+  });
+
+  it("handles diamond branching without duplicate counting and preserves conservative org-wide fallback when unbound", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, "dia-buyer@reconcile.ee", "Org A Diamond Buyer");
+    const orgAFallback = await registerOrg(app, "dia-fallback@reconcile.ee", "Org A Fallback Buyer");
+    const orgB = await registerOrg(app, "dia-partner@reconcile.fi", "Org B Diamond Partner");
+
+    // Org B: diamond (supplier -> transitA -> plant, supplier -> transitB -> plant) + unrelated sanctioned branch
+    const bPlantId = await createFacility(app, orgB.cookie, {
+      name: "Diamond Fulfilling Plant",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 50,
+    });
+    const bTransitAId = await createFacility(app, orgB.cookie, {
+      name: "Diamond Transit A",
+      kind: "WAREHOUSE",
+      countryCode: "FI",
+      lat: 60.4518,
+      lng: 22.2666,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 30,
+    });
+    const bTransitBId = await createFacility(app, orgB.cookie, {
+      name: "Diamond Transit B",
+      kind: "WAREHOUSE",
+      countryCode: "FI",
+      lat: 61.4978,
+      lng: 23.761,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 20,
+    });
+    const bSupId = await createFacility(app, orgB.cookie, {
+      name: "Shared Diamond Upstream",
+      countryCode: "DE",
+      lat: 51.4556,
+      lng: 7.0116,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: 200,
+    });
+    const bUnrelatedPlantId = await createFacility(app, orgB.cookie, {
+      name: "Unrelated South Plant",
+      countryCode: "FI",
+      lat: 60.8,
+      lng: 24.1,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 400,
+    });
+    const bUnrelatedRuId = await createFacility(app, orgB.cookie, {
+      name: "Unrelated Sanctioned Supplier",
+      countryCode: "RU",
+      lat: 55.7558,
+      lng: 37.6173,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: 500,
+    });
+
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bSupId,
+      toFacilityId: bTransitAId,
+      materialCategory: "Alloy Bar",
+      volumeSharePct: 50,
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bSupId,
+      toFacilityId: bTransitBId,
+      materialCategory: "Alloy Bar",
+      volumeSharePct: 50,
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bTransitAId,
+      toFacilityId: bPlantId,
+      materialCategory: "Alloy Bar Transfer A",
+      volumeSharePct: 50,
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bTransitBId,
+      toFacilityId: bPlantId,
+      materialCategory: "Alloy Bar Transfer B",
+      volumeSharePct: 50,
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bUnrelatedRuId,
+      toFacilityId: bUnrelatedPlantId,
+      materialCategory: "Sanctioned Ore",
+      riskStatus: "RED",
+      riskReason: "Sanctions exposure on unrelated plant",
+    });
+
+    // Org A (facility-scoped to bPlantId)
+    const aOwnId = await createFacility(app, orgA.cookie, {
+      name: "Org A Plant",
+      countryCode: "EE",
+      lat: 59.437,
+      lng: 24.7536,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 100,
+    });
+    const aTier1Id = await createFacility(app, orgA.cookie, {
+      name: "Org B Diamond Node",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    await createLane(app, orgA.cookie, {
+      fromFacilityId: aTier1Id,
+      toFacilityId: aOwnId,
+      materialCategory: "Machined Parts",
+      economicAttributionRatio: 0.5,
+    });
+    await linkVerifiedPartner(
+      app,
+      orgA.cookie,
+      aTier1Id,
+      "dia-partner@reconcile.fi",
+      orgB.cookie,
+      bPlantId,
+    );
+
+    const scopedRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(scopedRes.status).toBe(200);
+    const scopedSummary = AnalyticsSummarySchema.parse(await scopedRes.json());
+
+    // Scoped diamond: 50 (plant) + 30 (transitA) + 20 (transitB) + 200 (bSup counted ONCE) = 300 -> 50% = 150
+    expect(scopedSummary.esg.upstreamScope3Tco2e).toBe(150);
+    expect(
+      scopedSummary.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
+    ).toBe(false);
+
+    // Org A Fallback (unbound — omits fulfilledByFacilityId)
+    const fbOwnId = await createFacility(app, orgAFallback.cookie, {
+      name: "Org A Fallback Plant",
+      countryCode: "EE",
+      lat: 59.437,
+      lng: 24.7536,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 100,
+    });
+    const fbTier1Id = await createFacility(app, orgAFallback.cookie, {
+      name: "Org B Unbound Node",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    await createLane(app, orgAFallback.cookie, {
+      fromFacilityId: fbTier1Id,
+      toFacilityId: fbOwnId,
+      materialCategory: "Machined Parts",
+      economicAttributionRatio: 0.5,
+    });
+    await linkVerifiedPartner(
+      app,
+      orgAFallback.cookie,
+      fbTier1Id,
+      "dia-partner@reconcile.fi",
+      orgB.cookie,
+    );
+
+    const fbRes = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgAFallback.cookie },
+    });
+    expect(fbRes.status).toBe(200);
+    const fbSummary = AnalyticsSummarySchema.parse(await fbRes.json());
+
+    // Conservative org-wide fallback: includes unrelated plant (400) + RU supplier (500) -> (300 + 900) * 0.5 = 600
+    expect(fbSummary.esg.upstreamScope3Tco2e).toBe(600);
+    expect(
+      fbSummary.alerts.some((a) => a.category === "SECONDARY_SANCTION"),
+    ).toBe(true);
+  });
+
+  it("handles cyclic internal transit topologies without infinite recursion or duplicate counting", async () => {
+    const app = createTestApp();
+    const orgA = await registerOrg(app, "cyc-buyer@reconcile.ee", "Org A Cycle Buyer");
+    const orgB = await registerOrg(app, "cyc-partner@reconcile.fi", "Org B Cycle Partner");
+
+    const bPlantId = await createFacility(app, orgB.cookie, {
+      name: "Cycle Fulfilling Plant",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 60,
+    });
+    const bTransitAId = await createFacility(app, orgB.cookie, {
+      name: "Cycle Transit A",
+      kind: "WAREHOUSE",
+      countryCode: "FI",
+      lat: 60.4518,
+      lng: 22.2666,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 20,
+    });
+    const bTransitBId = await createFacility(app, orgB.cookie, {
+      name: "Cycle Transit B",
+      kind: "WAREHOUSE",
+      countryCode: "FI",
+      lat: 61.4978,
+      lng: 23.761,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 20,
+    });
+    const bSupId = await createFacility(app, orgB.cookie, {
+      name: "Cycle Sanctioned Supplier",
+      countryCode: "RU",
+      lat: 55.7558,
+      lng: 37.6173,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: 100,
+    });
+
+    // Cycle: bTransitA -> bTransitB -> bTransitA -> bPlant, fed by bSup -> bTransitA
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bSupId,
+      toFacilityId: bTransitAId,
+      materialCategory: "Cyclic Feedstock",
+      riskStatus: "RED",
+      riskReason: "Sanctions exposure on cyclic feedstock",
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bTransitAId,
+      toFacilityId: bTransitBId,
+      materialCategory: "Rework Loop Out",
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bTransitBId,
+      toFacilityId: bTransitAId,
+      materialCategory: "Rework Loop Return",
+    });
+    await createLane(app, orgB.cookie, {
+      fromFacilityId: bTransitAId,
+      toFacilityId: bPlantId,
+      materialCategory: "Final Delivery",
+    });
+
+    const aOwnId = await createFacility(app, orgA.cookie, {
+      name: "Org A Cycle Plant",
+      countryCode: "EE",
+      lat: 59.437,
+      lng: 24.7536,
+      isOwnFacility: true,
+      estimatedScope12Tco2e: 50,
+    });
+    const aTier1Id = await createFacility(app, orgA.cookie, {
+      name: "Org B Cycle Node",
+      countryCode: "FI",
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: false,
+      estimatedScope12Tco2e: null,
+    });
+    await createLane(app, orgA.cookie, {
+      fromFacilityId: aTier1Id,
+      toFacilityId: aOwnId,
+      materialCategory: "Finished Drives",
+      economicAttributionRatio: 0.5,
+    });
+    await linkVerifiedPartner(
+      app,
+      orgA.cookie,
+      aTier1Id,
+      "cyc-partner@reconcile.fi",
+      orgB.cookie,
+      bPlantId,
+    );
+
+    const res = await app.request("/api/v1/analytics/summary", {
+      headers: { Cookie: orgA.cookie },
+    });
+    expect(res.status).toBe(200);
+    const summary = AnalyticsSummarySchema.parse(await res.json());
+
+    // Cycle terminates cleanly; sanction propagates; each facility counted once:
+    // (60 plant + 20 transitA + 20 transitB + 100 supplier) * 0.5 = 100
+    expect(summary.esg.upstreamScope3Tco2e).toBe(100);
+    expect(
+      summary.alerts.some(
+        (a) =>
+          a.category === "SECONDARY_SANCTION" &&
+          a.affectedRegionCode === "RU" &&
+          a.affectedTier1FacilityIds.includes(aTier1Id),
+      ),
+    ).toBe(true);
+  });
+});
+
 
 

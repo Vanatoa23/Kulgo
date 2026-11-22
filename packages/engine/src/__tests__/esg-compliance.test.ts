@@ -802,6 +802,131 @@ describe("Sub-Project 3 ESG & Multi-Region Compliance Engine", () => {
     const futureEntry = res3.ledgerEntries.find((e) => e.scope === "SCOPE_3_CAT_1");
     expect(futureEntry?.attributionMethod).toBe("SECTOR_BASELINE");
   });
+
+  it("does not double-count own transit facilities in Scope 3 Cat 1 while preserving Cat 4 freight on internal transfer legs", () => {
+    const plant: Facility = {
+      facilityId: FAC_TALLINN,
+      ownerOrgId: ORG_ID,
+      name: "Fulfilling Plant",
+      kind: "FACTORY",
+      locationPrecision: "SITE_VERIFIED",
+      countryCode: "FI",
+      regionCode: null,
+      lat: 60.1699,
+      lng: 24.9384,
+      isOwnFacility: true,
+      isPartnerVerified: false,
+      sector: "Manufacturing",
+      esgBadges: [],
+      estimatedScope12Tco2e: 80,
+    };
+    const transitHub: Facility = {
+      facilityId: "44444444-4444-4444-8444-444444444499",
+      ownerOrgId: ORG_ID,
+      name: "Own Transit Hub",
+      kind: "WAREHOUSE",
+      locationPrecision: "SITE_VERIFIED",
+      countryCode: "FI",
+      regionCode: null,
+      lat: 60.4518,
+      lng: 22.2666,
+      isOwnFacility: true,
+      isPartnerVerified: false,
+      sector: "Logistics",
+      esgBadges: [],
+      estimatedScope12Tco2e: 40,
+    };
+    const extSupplier: Facility = {
+      facilityId: FAC_DE_STEEL,
+      ownerOrgId: ORG_ID,
+      name: "External Raw Supplier",
+      kind: "FACTORY",
+      locationPrecision: "SITE_VERIFIED",
+      countryCode: "DE",
+      regionCode: null,
+      lat: 51.4556,
+      lng: 7.0116,
+      isOwnFacility: false,
+      isPartnerVerified: false,
+      sector: "Metals",
+      esgBadges: [],
+      estimatedScope12Tco2e: 200,
+    };
+
+    const lanes: SupplyLane[] = [
+      {
+        laneId: LANE_DE_STEEL,
+        ownerOrgId: ORG_ID,
+        fromFacilityId: extSupplier.facilityId,
+        toFacilityId: transitHub.facilityId,
+        inputId: null,
+        materialCategory: "Raw Feedstock",
+        transportMode: "SEA",
+        volumeSharePct: 100,
+        annualVolume: null,
+        volumeUnit: "TONNES",
+        annualSpendEur: null,
+        productEmissionFactorTco2ePerUnit: null,
+        economicAttributionRatio: null,
+        distanceKm: 1000,
+        estimatedLaneCo2e: 15,
+        leadTimeDays: 10,
+        contractEndDate: null,
+        contractTerms: null,
+        riskStatus: "GREEN",
+        riskReason: null,
+      },
+      {
+        laneId: LANE_CN_STEEL,
+        ownerOrgId: ORG_ID,
+        fromFacilityId: transitHub.facilityId,
+        toFacilityId: plant.facilityId,
+        inputId: null,
+        materialCategory: "Internal Transit Feedstock",
+        transportMode: "ROAD",
+        volumeSharePct: 100,
+        annualVolume: null,
+        volumeUnit: "TONNES",
+        annualSpendEur: null,
+        productEmissionFactorTco2ePerUnit: null,
+        economicAttributionRatio: null,
+        distanceKm: 180,
+        estimatedLaneCo2e: 10,
+        leadTimeDays: 2,
+        contractEndDate: null,
+        contractTerms: null,
+        riskStatus: "GREEN",
+        riskReason: null,
+      },
+    ];
+
+    const res = evaluateEsgAndCompliance({
+      organization: {
+        orgId: ORG_ID,
+        name: "Multi-Hop Partner",
+        countryCode: "FI",
+        scope1Tco2e: null,
+        scope2Tco2e: null,
+      },
+      inputs: [],
+      facilities: [plant, transitHub, extSupplier],
+      lanes,
+    });
+
+    // Own Scope 1+2 = plant (80) + transitHub (40) = 120
+    expect(res.summary.scope1Tco2e + res.summary.scope2Tco2e).toBe(120);
+    // Upstream Scope 3 Cat 1 = external supplier ONLY (200), NOT transitHub again
+    expect(res.summary.upstreamScope3Tco2e).toBe(200);
+    // Transport Scope 3 Cat 4 = both legs (15 + 10 = 25)
+    expect(res.summary.transportScope3Tco2e).toBe(25);
+    expect(res.summary.totalTco2e).toBe(345);
+    expect(
+      res.ledgerEntries.filter((e) => e.scope === "SCOPE_3_CAT_1"),
+    ).toHaveLength(1);
+    expect(
+      res.ledgerEntries.filter((e) => e.scope === "SCOPE_3_CAT_4"),
+    ).toHaveLength(2);
+  });
 });
 
 
