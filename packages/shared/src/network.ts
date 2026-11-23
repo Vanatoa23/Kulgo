@@ -363,12 +363,21 @@ export type AlertNotificationPreference = z.infer<
   typeof AlertNotificationPreferenceSchema
 >;
 
+export const AlertAckReasonSchema = z.enum([
+  "HANDLED",
+  "WRONG_ENTITY_OR_SITE",
+  "FALSE_OR_OUTDATED_EVENT",
+  "NOT_RELEVANT_TO_LANE",
+]);
+export type AlertAckReason = z.infer<typeof AlertAckReasonSchema>;
+
 export const OrgAlertAckSchema = z
   .object({
     orgId: z.string().uuid(),
     signalId: z.string().min(1),
     status: z.enum(["ACKNOWLEDGED", "MUTED"]),
     acknowledgedByUserId: z.string().uuid(),
+    reason: AlertAckReasonSchema.nullable().default(null),
     note: z.string().max(500).nullable().default(null),
     acknowledgedAt: z.string().datetime(),
   })

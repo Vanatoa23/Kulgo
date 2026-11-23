@@ -1,6 +1,7 @@
 import {
   AlertNotificationPreferenceSchema,
   ChokepointCodeSchema,
+  AlertAckReasonSchema,
   OrgAlertAckSchema,
   RiskSignalKindSchema,
   RiskSignalSchema,
@@ -22,6 +23,7 @@ import {
 const AckAlertRequestSchema = z
   .object({
     status: z.enum(["ACKNOWLEDGED", "MUTED"]),
+    reason: AlertAckReasonSchema.nullable().optional(),
     note: z.string().trim().max(500).nullable().optional(),
   })
   .strict();
@@ -148,6 +150,7 @@ export function createAlertRoutes({
       signalId,
       status: parsed.data.status,
       acknowledgedByUserId: auth.user.userId,
+      reason: parsed.data.reason ?? null,
       note: parsed.data.note ?? null,
       acknowledgedAt: new Date().toISOString(),
     });

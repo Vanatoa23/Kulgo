@@ -236,7 +236,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
   async listAlertAcks(orgId: string): Promise<OrgAlertAck[]> {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      `SELECT orgId, signalId, status, acknowledgedByUserId, note, acknowledgedAt
+      `SELECT orgId, signalId, status, acknowledgedByUserId, reason, note, acknowledgedAt
        FROM OrgAlertAck
        WHERE orgId = :orgId`,
       { orgId },
@@ -247,6 +247,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
         signalId: row.signalId,
         status: row.status,
         acknowledgedByUserId: row.acknowledgedByUserId,
+        reason: typeof row.reason === "string" ? row.reason : null,
         note: typeof row.note === "string" ? row.note : null,
         acknowledgedAt: row.acknowledgedAt,
       }),
@@ -267,6 +268,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
       signalId: parsed.signalId,
       status: parsed.status,
       acknowledgedByUserId: parsed.acknowledgedByUserId,
+      reason: parsed.reason,
       note: parsed.note,
       acknowledgedAt: parsed.acknowledgedAt,
     };
@@ -277,6 +279,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
         `UPDATE OrgAlertAck SET
           status = :status,
           acknowledgedByUserId = :acknowledgedByUserId,
+          reason = :reason,
           note = :note,
           acknowledgedAt = :acknowledgedAt
          WHERE ackKey = :ackKey`,
@@ -291,6 +294,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
           signalId = :signalId,
           status = :status,
           acknowledgedByUserId = :acknowledgedByUserId,
+          reason = :reason,
           note = :note,
           acknowledgedAt = :acknowledgedAt`,
         params,
