@@ -182,6 +182,7 @@ export function preFilterUnstructuredItems(
   items: readonly UnstructuredFeedItem[],
   seenUrls: ReadonlySet<string> = new Set(),
   recentTitles: readonly string[] = [],
+  changedUrls: ReadonlySet<string> = new Set(),
 ): UnstructuredFeedItem[] {
   const accepted: UnstructuredFeedItem[] = [];
   const acceptedTitles = [...recentTitles];
@@ -198,7 +199,7 @@ export function preFilterUnstructuredItems(
     const isNearDuplicate = acceptedTitles.some(
       (existing) => trigramJaccardSimilarity(existing, item.title) >= 0.75,
     );
-    if (isNearDuplicate) continue;
+    if (isNearDuplicate && !changedUrls.has(item.sourceUrl)) continue;
 
     localUrls.add(item.sourceUrl);
     acceptedTitles.push(item.title);
@@ -319,3 +320,4 @@ export async function classifyUnstructuredItems(
     errors,
   };
 }
+

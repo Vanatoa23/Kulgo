@@ -359,6 +359,7 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
 
     // 4. Cross-sweep 72h URL & title deduplication in IntelligenceRunner.runSweep()
     let llmCallCount = 0;
+    let updated = false;
     const countingRouter = new LlmRouter([
       {
         name: "gemini",
@@ -375,7 +376,7 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
                 affectedCountryCodes: ["EE"],
                 affectedChokepoints: ["BALTIC_SEA"],
                 affectedSectors: ["Logistics"],
-                lifecycle: "ACTIVE",
+                lifecycle: updated ? "RESOLVED" : "ACTIVE",
                 sourceUrl: "https://err.ee/parnu-sadam-tooseisak",
                 publishedAt: "2026-11-21T06:00:00Z",
                 confidence: 0.9,
@@ -401,7 +402,7 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
       fetchStage2Raw: async () => [
         {
           title: "Tööseisak ja tarneraskused Pärnu sadamas",
-          summary: "Ulatuslik tööseisak Pärnu sadamas",
+          summary: updated ? "Tööseisak lõppes Pärnu sadamas" : "Ulatuslik tööseisak Pärnu sadamas",
           sourceUrl: "https://err.ee/parnu-sadam-tooseisak",
           publishedAt: "2026-11-21T06:00:00Z",
         },
@@ -425,6 +426,12 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
     const sweep2 = await runner.runSweep({ nowIso: "2026-11-21T12:00:00Z" });
     expect(sweep2.stage2Classified).toBe(0);
     expect(llmCallCount).toBe(1);
+
+    updated = true;
+    const sweep3 = await runner.runSweep({ nowIso: "2026-11-21T13:00:00Z" });
+    expect(sweep3.stage2Classified).toBe(1);
+    expect(llmCallCount).toBe(2);
+    expect(await riskSignalRepo.listActive()).toHaveLength(0);
   });
 });
 
@@ -616,3 +623,4 @@ describe("/api/v1/alerts HTTP routes", () => {
     expect(sweepRes.status).toBe(200);
   });
 });
+

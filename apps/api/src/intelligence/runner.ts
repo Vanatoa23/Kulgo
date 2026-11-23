@@ -70,6 +70,8 @@ export interface IntelligenceRunnerDeps {
  * and strictly anonymized Tier-2+ partner regions).
  */
 export class IntelligenceRunner {
+  private readonly articleVersions = new Map<string, string>();
+
   constructor(private readonly deps: IntelligenceRunnerDeps) {}
 
   /**
@@ -195,26 +197,36 @@ export class IntelligenceRunner {
         const refMs = Date.parse(refIso);
         return Number.isNaN(refMs) || refMs >= cutoffMs;
       });
+      // Active signals contain derived descriptions, not the original article content.
+      // Only a previously classified version can establish that an article is unchanged.
       const seenUrls = new Set<string>();
-      const recentTitles: string[] = [];
-      for (const sig of [...recentSignals, ...stage1.signals]) {
-        for (const url of sig.sourceUrls) {
-          seenUrls.add(url);
-        }
-        if (sig.title) {
-          recentTitles.push(sig.title);
-        }
+      const changedUrls = new Set<string>();
+      const activeUrls = new Set(activeSignals.flatMap((sig) => sig.sourceUrls));
+      for (const item of rawItems) {
+        const version = JSON.stringify([item.title, item.summary, item.publishedAt]);
+        const previous = this.articleVersions.get(item.sourceUrl);
+        if (previous === version) seenUrls.add(item.sourceUrl);
+        else if (previous !== undefined || activeUrls.has(item.sourceUrl)) changedUrls.add(item.sourceUrl);
       }
+      const recentTitles = [...recentSignals, ...stage1.signals]
+        .map((sig) => sig.title).filter(Boolean);
       const filtered = preFilterUnstructuredItems(
         rawItems,
         seenUrls,
         recentTitles,
+        changedUrls,
       );
       const classified = await classifyUnstructuredItems(
         filtered,
         this.deps.llmRouter,
         startedAt,
       );
+      // Do not cache failed or unconfigured classifications: they must be retried.
+      if (classified.errors.length === 0 && classified.providersUsed.length > 0) {
+        for (const item of filtered) {
+          this.articleVersions.set(item.sourceUrl, JSON.stringify([item.title, item.summary, item.publishedAt]));
+        }
+      }
       stage2Signals = classified.signals;
       errors.push(...classified.errors);
     }
@@ -286,3 +298,4 @@ export class IntelligenceRunner {
     };
   }
 }
+
