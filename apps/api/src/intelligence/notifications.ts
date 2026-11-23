@@ -196,18 +196,20 @@ export async function dispatchInstantRedAlerts(
       matchedChokepoints: a.matchedChokepoints,
     }));
 
-    // 1. Instant RED Email
+    // 1. Instant RED Email (atomic outbox claim before provider call)
     if (
       storedPref.preference.instantRedEmailEnabled &&
       storedPref.preference.emailRecipients.length > 0 &&
       deps.redEmailProvider
     ) {
-      const alreadySent = await deps.alertRepo.hasDelivered(
+      const claimed = await deps.alertRepo.claimDelivery({
         orgId,
-        signal.signalId,
-        "EMAIL_RED",
-      );
-      if (alreadySent) {
+        signalId: signal.signalId,
+        channel: "EMAIL_RED",
+        provider: deps.redEmailProvider.name,
+        claimedAt: nowIso,
+      });
+      if (!claimed) {
         summary.skippedDuplicate++;
       } else {
         const subject = `[Kulgo RED Alert] ${signal.title}`;
@@ -262,14 +264,16 @@ export async function dispatchInstantRedAlerts(
       }
     }
 
-    // 2. Signed Webhook
+    // 2. Signed Webhook (atomic outbox claim before network call)
     if (storedPref.preference.webhookUrl) {
-      const alreadySent = await deps.alertRepo.hasDelivered(
+      const claimed = await deps.alertRepo.claimDelivery({
         orgId,
-        signal.signalId,
-        "WEBHOOK",
-      );
-      if (alreadySent) {
+        signalId: signal.signalId,
+        channel: "WEBHOOK",
+        provider: "webhook",
+        claimedAt: nowIso,
+      });
+      if (!claimed) {
         summary.skippedDuplicate++;
       } else {
         const payloadObj: WebhookAlertPayload = {

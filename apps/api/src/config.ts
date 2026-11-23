@@ -74,6 +74,14 @@ const RawEnvSchema = z.object({
   GROQ_API_KEY: optionalIntegrationKey,
   OPENAI_API_KEY: optionalIntegrationKey,
   OPENROUTER_API_KEY: optionalIntegrationKey,
+  LLM_MAX_DAILY_REQUESTS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).optional(),
+  ),
+  LLM_MAX_DAILY_TOKENS: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.coerce.number().int().min(0).optional(),
+  ),
   RESEND_API_KEY: optionalIntegrationKey,
   BREVO_API_KEY: optionalIntegrationKey,
   ALERT_FROM_EMAIL: z.string().email().default("alerts@kulgo.eu"),

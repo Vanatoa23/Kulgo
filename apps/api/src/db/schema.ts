@@ -181,6 +181,16 @@ export const KULGO_SCHEMA_STATEMENTS: readonly string[] = [
   "CREATE INDEX IF NOT EXISTS ON AlertDeliveryLog (deliveryKey) UNIQUE",
   "CREATE INDEX IF NOT EXISTS ON AlertDeliveryLog (orgId) NOTUNIQUE",
 
+  "CREATE VERTEX TYPE IntelligenceSweepLease IF NOT EXISTS",
+  "CREATE PROPERTY IntelligenceSweepLease.leaseKey IF NOT EXISTS STRING",
+  "CREATE PROPERTY IntelligenceSweepLease.ownerId IF NOT EXISTS STRING",
+  "CREATE PROPERTY IntelligenceSweepLease.status IF NOT EXISTS STRING",
+  "CREATE PROPERTY IntelligenceSweepLease.acquiredAt IF NOT EXISTS STRING",
+  "CREATE PROPERTY IntelligenceSweepLease.expiresAt IF NOT EXISTS STRING",
+  "CREATE PROPERTY IntelligenceSweepLease.completedAt IF NOT EXISTS STRING",
+  "CREATE PROPERTY IntelligenceSweepLease.lastError IF NOT EXISTS STRING",
+  "CREATE INDEX IF NOT EXISTS ON IntelligenceSweepLease (leaseKey) UNIQUE",
+
   "CREATE VERTEX TYPE AuditEvent IF NOT EXISTS",
   "CREATE PROPERTY AuditEvent.eventId IF NOT EXISTS STRING",
   "CREATE PROPERTY AuditEvent.orgId IF NOT EXISTS STRING",

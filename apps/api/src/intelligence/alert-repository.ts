@@ -12,10 +12,46 @@ export interface AlertDeliveryRecord {
   orgId: string;
   signalId: string;
   channel: AlertDeliveryChannel;
-  status: "SENT" | "FAILED" | "SKIPPED";
+  status: "PENDING" | "SENT" | "FAILED" | "SKIPPED";
   provider: string;
   errorMessage: string | null;
   deliveredAt: string;
+}
+
+export interface ClaimDeliveryInput {
+  orgId: string;
+  signalId: string;
+  channel: AlertDeliveryChannel;
+  provider: string;
+  claimedAt: string;
+}
+
+export type SweepLeaseStatus = "RUNNING" | "COMPLETED" | "FAILED";
+
+export interface SweepLeaseRecord {
+  leaseKey: string;
+  ownerId: string;
+  status: SweepLeaseStatus;
+  acquiredAt: string;
+  expiresAt: string;
+  completedAt: string | null;
+  lastError: string | null;
+}
+
+export interface AcquireSweepLeaseInput {
+  leaseKey: string;
+  ownerId: string;
+  nowIso: string;
+  ttlMs: number;
+  preventRerunAfterComplete?: boolean;
+}
+
+export interface ReleaseSweepLeaseInput {
+  leaseKey: string;
+  ownerId: string;
+  status: "COMPLETED" | "FAILED";
+  completedAt: string;
+  lastError?: string | null;
 }
 
 export interface StoredNotificationPreference {
@@ -44,8 +80,17 @@ export interface AlertRepository {
     signalId: string,
     channel: AlertDeliveryChannel,
   ): Promise<boolean>;
+  /**
+   * Atomically claims an alert delivery slot (`PENDING`) before invoking
+   * external email/webhook providers. Returns `false` if already `SENT` or
+   * `PENDING`, preventing duplicate sends across overlapping sweeps or restarts.
+   */
+  claimDelivery(input: ClaimDeliveryInput): Promise<boolean>;
   recordDelivery(record: AlertDeliveryRecord): Promise<void>;
   listDeliveries(orgId: string): Promise<AlertDeliveryRecord[]>;
+  acquireSweepLease(input: AcquireSweepLeaseInput): Promise<boolean>;
+  releaseSweepLease(input: ReleaseSweepLeaseInput): Promise<void>;
+  getSweepLease(leaseKey: string): Promise<SweepLeaseRecord | null>;
 }
 
 function defaultPreference(orgId: string): StoredNotificationPreference {
@@ -251,6 +296,15 @@ export class ArcadeDbAlertRepository implements AlertRepository {
     return parsed;
   }
 
+  private isConflictError(err: unknown): boolean {
+    return (
+      err instanceof Error &&
+      /(?:DuplicatedKeyException|ConcurrentModificationException|NeedRetryException)/.test(
+        err.message,
+      )
+    );
+  }
+
   async hasDelivered(
     orgId: string,
     signalId: string,
@@ -264,6 +318,73 @@ export class ArcadeDbAlertRepository implements AlertRepository {
       { deliveryKey: deliveryKey(orgId, signalId, channel) },
     );
     return rows.length > 0;
+  }
+
+  async claimDelivery(input: ClaimDeliveryInput): Promise<boolean> {
+    const key = deliveryKey(input.orgId, input.signalId, input.channel);
+    const work = async (db: ArcadeDbClient): Promise<boolean> => {
+      const existing = await db.query<Record<string, unknown>>(
+        "sql",
+        "SELECT deliveryKey, status FROM AlertDeliveryLog WHERE deliveryKey = :deliveryKey LIMIT 1",
+        { deliveryKey: key },
+      );
+      if (existing.length > 0) {
+        const status = String(existing[0]?.status ?? "");
+        if (status === "SENT" || status === "PENDING") {
+          return false;
+        }
+        const updated = await db.command<Record<string, unknown>>(
+          "sql",
+          `UPDATE AlertDeliveryLog SET
+            status = 'PENDING',
+            provider = :provider,
+            errorMessage = null,
+            deliveredAt = :claimedAt
+           WHERE deliveryKey = :deliveryKey
+             AND status <> 'SENT'
+             AND status <> 'PENDING'`,
+          {
+            deliveryKey: key,
+            provider: input.provider,
+            claimedAt: input.claimedAt,
+          },
+        );
+        return Number(updated[0]?.count ?? 0) > 0;
+      }
+
+      await db.command(
+        "sql",
+        `CREATE VERTEX AlertDeliveryLog SET
+          deliveryKey = :deliveryKey,
+          orgId = :orgId,
+          signalId = :signalId,
+          channel = :channel,
+          status = 'PENDING',
+          provider = :provider,
+          errorMessage = null,
+          deliveredAt = :claimedAt`,
+        {
+          deliveryKey: key,
+          orgId: input.orgId,
+          signalId: input.signalId,
+          channel: input.channel,
+          provider: input.provider,
+          claimedAt: input.claimedAt,
+        },
+      );
+      return true;
+    };
+
+    try {
+      return this.db.transaction
+        ? await this.db.transaction(work)
+        : await work(this.db);
+    } catch (err) {
+      if (this.isConflictError(err)) {
+        return false;
+      }
+      throw err;
+    }
   }
 
   async recordDelivery(record: AlertDeliveryRecord): Promise<void> {
@@ -331,12 +452,135 @@ export class ArcadeDbAlertRepository implements AlertRepository {
       deliveredAt: String(row.deliveredAt),
     }));
   }
+
+  async acquireSweepLease(input: AcquireSweepLeaseInput): Promise<boolean> {
+    const nowMs = Date.parse(input.nowIso);
+    const normalizedNowIso = new Date(nowMs).toISOString();
+    const expiresAt = new Date(nowMs + Math.max(1_000, input.ttlMs)).toISOString();
+    const work = async (db: ArcadeDbClient): Promise<boolean> => {
+      const existing = await db.query<Record<string, unknown>>(
+        "sql",
+        `SELECT leaseKey, ownerId, status, acquiredAt, expiresAt, completedAt, lastError
+         FROM IntelligenceSweepLease
+         WHERE leaseKey = :leaseKey
+         LIMIT 1`,
+        { leaseKey: input.leaseKey },
+      );
+
+      if (existing.length > 0) {
+        const row = existing[0]!;
+        const status = String(row.status ?? "");
+        const existingExpiresMs =
+          typeof row.expiresAt === "string" ? Date.parse(row.expiresAt) : 0;
+        if (status === "RUNNING" && Number.isFinite(existingExpiresMs) && existingExpiresMs > nowMs) {
+          return false;
+        }
+        if (input.preventRerunAfterComplete && status === "COMPLETED") {
+          return false;
+        }
+        const whereGuard = input.preventRerunAfterComplete
+          ? "WHERE leaseKey = :leaseKey AND status <> 'COMPLETED' AND (status <> 'RUNNING' OR expiresAt <= :nowIso)"
+          : "WHERE leaseKey = :leaseKey AND (status <> 'RUNNING' OR expiresAt <= :nowIso)";
+        const updated = await db.command<Record<string, unknown>>(
+          "sql",
+          `UPDATE IntelligenceSweepLease SET
+            ownerId = :ownerId,
+            status = 'RUNNING',
+            acquiredAt = :acquiredAt,
+            expiresAt = :expiresAt,
+            completedAt = null,
+            lastError = null
+           ${whereGuard}`,
+          {
+            leaseKey: input.leaseKey,
+            ownerId: input.ownerId,
+            acquiredAt: normalizedNowIso,
+            expiresAt,
+            nowIso: normalizedNowIso,
+          },
+        );
+        return Number(updated[0]?.count ?? 0) > 0;
+      }
+
+      await db.command(
+        "sql",
+        `CREATE VERTEX IntelligenceSweepLease SET
+          leaseKey = :leaseKey,
+          ownerId = :ownerId,
+          status = 'RUNNING',
+          acquiredAt = :acquiredAt,
+          expiresAt = :expiresAt,
+          completedAt = null,
+          lastError = null`,
+        {
+          leaseKey: input.leaseKey,
+          ownerId: input.ownerId,
+          acquiredAt: normalizedNowIso,
+          expiresAt,
+        },
+      );
+      return true;
+    };
+
+    try {
+      return this.db.transaction
+        ? await this.db.transaction(work)
+        : await work(this.db);
+    } catch (err) {
+      if (this.isConflictError(err)) {
+        return false;
+      }
+      throw err;
+    }
+  }
+
+  async releaseSweepLease(input: ReleaseSweepLeaseInput): Promise<void> {
+    await this.db.command(
+      "sql",
+      `UPDATE IntelligenceSweepLease SET
+        status = :status,
+        completedAt = :completedAt,
+        expiresAt = :completedAt,
+        lastError = :lastError
+       WHERE leaseKey = :leaseKey AND ownerId = :ownerId`,
+      {
+        leaseKey: input.leaseKey,
+        ownerId: input.ownerId,
+        status: input.status,
+        completedAt: input.completedAt,
+        lastError: input.lastError ?? null,
+      },
+    );
+  }
+
+  async getSweepLease(leaseKey: string): Promise<SweepLeaseRecord | null> {
+    const rows = await this.db.query<Record<string, unknown>>(
+      "sql",
+      `SELECT leaseKey, ownerId, status, acquiredAt, expiresAt, completedAt, lastError
+       FROM IntelligenceSweepLease
+       WHERE leaseKey = :leaseKey
+       LIMIT 1`,
+      { leaseKey },
+    );
+    if (rows.length === 0) return null;
+    const row = rows[0]!;
+    return {
+      leaseKey: String(row.leaseKey),
+      ownerId: String(row.ownerId),
+      status: String(row.status) as SweepLeaseStatus,
+      acquiredAt: String(row.acquiredAt),
+      expiresAt: String(row.expiresAt),
+      completedAt: typeof row.completedAt === "string" ? row.completedAt : null,
+      lastError: typeof row.lastError === "string" ? row.lastError : null,
+    };
+  }
 }
 
 export class InMemoryAlertRepository implements AlertRepository {
   private readonly prefs = new Map<string, StoredNotificationPreference>();
   private readonly acks = new Map<string, OrgAlertAck>();
   private readonly deliveries = new Map<string, AlertDeliveryRecord>();
+  private readonly sweepLeases = new Map<string, SweepLeaseRecord>();
 
   async getNotificationPreference(
     orgId: string,
@@ -395,6 +639,24 @@ export class InMemoryAlertRepository implements AlertRepository {
     return rec?.status === "SENT";
   }
 
+  async claimDelivery(input: ClaimDeliveryInput): Promise<boolean> {
+    const key = deliveryKey(input.orgId, input.signalId, input.channel);
+    const existing = this.deliveries.get(key);
+    if (existing && (existing.status === "SENT" || existing.status === "PENDING")) {
+      return false;
+    }
+    this.deliveries.set(key, {
+      orgId: input.orgId,
+      signalId: input.signalId,
+      channel: input.channel,
+      status: "PENDING",
+      provider: input.provider,
+      errorMessage: null,
+      deliveredAt: input.claimedAt,
+    });
+    return true;
+  }
+
   async recordDelivery(record: AlertDeliveryRecord): Promise<void> {
     this.deliveries.set(
       deliveryKey(record.orgId, record.signalId, record.channel),
@@ -406,5 +668,53 @@ export class InMemoryAlertRepository implements AlertRepository {
     return Array.from(this.deliveries.values()).filter(
       (r) => r.orgId === orgId,
     );
+  }
+
+  async acquireSweepLease(input: AcquireSweepLeaseInput): Promise<boolean> {
+    const nowMs = Date.parse(input.nowIso);
+    const existing = this.sweepLeases.get(input.leaseKey);
+    if (existing) {
+      const existingExpiresMs = Date.parse(existing.expiresAt);
+      if (
+        existing.status === "RUNNING" &&
+        Number.isFinite(existingExpiresMs) &&
+        existingExpiresMs > nowMs
+      ) {
+        return false;
+      }
+      if (input.preventRerunAfterComplete && existing.status === "COMPLETED") {
+        return false;
+      }
+    }
+    const expiresAt = new Date(nowMs + Math.max(1_000, input.ttlMs)).toISOString();
+    this.sweepLeases.set(input.leaseKey, {
+      leaseKey: input.leaseKey,
+      ownerId: input.ownerId,
+      status: "RUNNING",
+      acquiredAt: input.nowIso,
+      expiresAt,
+      completedAt: null,
+      lastError: null,
+    });
+    return true;
+  }
+
+  async releaseSweepLease(input: ReleaseSweepLeaseInput): Promise<void> {
+    const existing = this.sweepLeases.get(input.leaseKey);
+    if (!existing || existing.ownerId !== input.ownerId) {
+      return;
+    }
+    this.sweepLeases.set(input.leaseKey, {
+      ...existing,
+      status: input.status,
+      completedAt: input.completedAt,
+      expiresAt: input.completedAt,
+      lastError: input.lastError ?? null,
+    });
+  }
+
+  async getSweepLease(leaseKey: string): Promise<SweepLeaseRecord | null> {
+    const record = this.sweepLeases.get(leaseKey);
+    return record ? { ...record } : null;
   }
 }

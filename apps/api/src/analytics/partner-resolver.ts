@@ -16,7 +16,7 @@ import type { InvitationRepository } from "../invites/repository.js";
 import type { WorkspaceRepository } from "../workspace/repository.js";
 import type { RiskSignalRepository } from "./risk-signals.js";
 
-const MAX_TRAVERSAL_DEPTH = 4;
+export const MAX_TRAVERSAL_DEPTH = 4;
 
 function round2(value: number): number {
   return Math.round(value * 100) / 100;
