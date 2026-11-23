@@ -56,6 +56,7 @@ import {
   type Invitation,
   type LoginInput,
   type Organization,
+  type AlertAckReason,
   type OrgAlertAck,
   type OrgMember,
   type Product,
@@ -833,7 +834,11 @@ export async function getAlertFeed(): Promise<LiveAlertFeedResponse> {
 
 export async function acknowledgeAlert(
   signalId: string,
-  input: { status: "ACKNOWLEDGED" | "MUTED"; note?: string | null },
+  input: {
+    status: "ACKNOWLEDGED" | "MUTED";
+    reason?: AlertAckReason | null;
+    note?: string | null;
+  },
 ): Promise<OrgAlertAck> {
   return apiRequest(
     `/api/v1/alerts/${encodeURIComponent(signalId)}/ack`,

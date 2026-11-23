@@ -1,5 +1,6 @@
 import { PendingContractSavesProvider } from "./lib/pending-contract-saves.js";
 import type {
+  AlertAckReason,
   AnalyticsSummary,
   AuthMeResponse,
   CreateFacilityInput,
@@ -294,10 +295,14 @@ export function App() {
   }, [session, network, refreshAlertFeed]);
 
   const handleAcknowledgeAlert = useCallback(
-    async (signalId: string, status: "ACKNOWLEDGED" | "MUTED") => {
+    async (
+      signalId: string,
+      status: "ACKNOWLEDGED" | "MUTED",
+      reason?: AlertAckReason | null,
+    ) => {
       const sessionTicket = sessionGuard.capture();
       try {
-        await acknowledgeAlert(signalId, { status });
+        await acknowledgeAlert(signalId, { status, reason: reason ?? null });
         if (!sessionTicket.isCurrent()) return;
         await refreshAlertFeed();
       } catch (err) {

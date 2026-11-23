@@ -1,4 +1,11 @@
-import type { Facility, OrgAlertAck, RiskSignal, SupplyLane, UserRole } from "@kulgo/shared";
+import type {
+  AlertAckReason,
+  Facility,
+  OrgAlertAck,   RiskSignal,
+  SupplyLane,
+  UserRole,
+} from "@kulgo/shared";
+import { useState } from "react";
 import {
   BellOff,
   CheckCircle2,
@@ -18,7 +25,11 @@ export interface LiveAlertsPanelProps {
   userRole?: UserRole;
   facilities: readonly Facility[];
   lanes: readonly SupplyLane[];
-  onAcknowledge: (signalId: string, status: "ACKNOWLEDGED" | "MUTED") => Promise<void>;
+  onAcknowledge: (
+    signalId: string,
+    status: "ACKNOWLEDGED" | "MUTED",
+    reason?: AlertAckReason | null,
+  ) => Promise<void>;
   onTriggerSweep: () => Promise<void>;
   onOpenSettings: () => void;
   onSelectFacility: (facilityId: string) => void;
@@ -35,6 +46,13 @@ function verificationBadgeStyle(status: RiskSignal["verificationStatus"]): strin
   return "bg-slate-700/50 text-slate-300 border-slate-600/60";
 }
 
+const ACK_REASON_LABELS: Record<AlertAckReason, string> = {
+  HANDLED: "Handled",
+  WRONG_ENTITY_OR_SITE: "Wrong entity / site",
+  FALSE_OR_OUTDATED_EVENT: "False or outdated event",
+  NOT_RELEVANT_TO_LANE: "Not relevant to lane",
+};
+
 export function LiveAlertsPanel({
   feed,
   loading,
@@ -48,6 +66,9 @@ export function LiveAlertsPanel({
   onSelectFacility,
   onSelectLane,
 }: LiveAlertsPanelProps) {
+  const [reasonBySignal, setReasonBySignal] = useState<
+    Record<string, AlertAckReason | "">
+  >({});
   const signals = feed?.signals ?? [];
   const ackBySignalId = new Map<string, OrgAlertAck>(
     (feed?.acknowledgements ?? []).map((a) => [a.signalId, a]),
@@ -247,10 +268,40 @@ export function LiveAlertsPanel({
                         : "Unacknowledged"}
                   </span>
                   <div className="flex items-center gap-1.5">
+                    <select
+                      aria-label="Reason"
+                      value={
+                        reasonBySignal[signal.signalId] ??
+                        ackBySignalId.get(signal.signalId)?.reason ??
+                        ""
+                      }
+                      onChange={(e) =>
+                        setReasonBySignal((prev) => ({
+                          ...prev,
+                          [signal.signalId]: e.target.value as
+                            | AlertAckReason
+                            | "",
+                        }))
+                      }
+                      className="rounded-md border border-slate-700 bg-slate-900 px-1 py-0.5 text-[10px] text-slate-300"
+                    >
+                      <option value="">Reason (optional)</option>
+                      {(Object.keys(ACK_REASON_LABELS) as AlertAckReason[]).map(
+                        (r) => (
+                          <option key={r} value={r}>
+                            {ACK_REASON_LABELS[r]}
+                          </option>
+                        ),
+                      )}
+                    </select>
                     <button
                       type="button"
                       onClick={() =>
-                        void onAcknowledge(signal.signalId, "ACKNOWLEDGED")
+                        void onAcknowledge(
+                          signal.signalId,
+                          "ACKNOWLEDGED",
+                          reasonBySignal[signal.signalId] || null,
+                        )
                       }
                       className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-medium transition ${
                         isAcked
@@ -263,7 +314,13 @@ export function LiveAlertsPanel({
                     </button>
                     <button
                       type="button"
-                      onClick={() => void onAcknowledge(signal.signalId, "MUTED")}
+                      onClick={() =>
+                        void onAcknowledge(
+                          signal.signalId,
+                          "MUTED",
+                          reasonBySignal[signal.signalId] || null,
+                        )
+                      }
                       className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-medium transition ${
                         isMuted
                           ? "border-amber-500/50 bg-amber-500/20 text-amber-200"
