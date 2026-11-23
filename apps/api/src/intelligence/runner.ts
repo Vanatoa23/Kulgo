@@ -279,13 +279,25 @@ export class IntelligenceRunner {
     const ownerId = options.leaseOwnerId ?? randomUUID();
     const ttlMs = options.leaseTtlMs ?? DEFAULT_SWEEP_LEASE_TTL_MS;
 
-    const acquired = await this.deps.alertRepo.acquireSweepLease({
+    const executionAcquired = await this.deps.alertRepo.acquireSweepLease({
+      leaseKey: DEFAULT_SWEEP_LEASE_KEY, ownerId, nowIso: startedAt, ttlMs,
+    });
+    let acquired = executionAcquired;
+    if (executionAcquired && leaseKey !== DEFAULT_SWEEP_LEASE_KEY) {
+      try {
+        acquired = await this.deps.alertRepo.acquireSweepLease({
       leaseKey,
       ownerId,
       nowIso: startedAt,
       ttlMs,
       preventRerunAfterComplete: options.preventRerunAfterComplete,
-    });
+        });
+      } catch (err) {
+        await this.deps.alertRepo.releaseSweepLease({ leaseKey: DEFAULT_SWEEP_LEASE_KEY, ownerId, status: "FAILED", completedAt: new Date().toISOString() });
+        throw err;
+      }
+      if (!acquired) await this.deps.alertRepo.releaseSweepLease({ leaseKey: DEFAULT_SWEEP_LEASE_KEY, ownerId, status: "FAILED", completedAt: new Date().toISOString() });
+    }
     if (!acquired) {
       return {
         startedAt,
@@ -416,6 +428,10 @@ export class IntelligenceRunner {
         })
         .catch(() => undefined);
       throw err;
+    } finally {
+      if (leaseKey !== DEFAULT_SWEEP_LEASE_KEY) {
+        await this.deps.alertRepo.releaseSweepLease({ leaseKey: DEFAULT_SWEEP_LEASE_KEY, ownerId, status: "COMPLETED", completedAt: new Date().toISOString() });
+      }
     }
   }
 }

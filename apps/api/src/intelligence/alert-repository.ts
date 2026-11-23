@@ -16,6 +16,7 @@ export interface AlertDeliveryRecord {
   provider: string;
   errorMessage: string | null;
   deliveredAt: string;
+  claimTimestamp?: string;
 }
 
 export interface ClaimDeliveryInput {
@@ -83,7 +84,7 @@ export interface AlertRepository {
   /**
    * Atomically claims an alert delivery slot (`PENDING`) before invoking
    * external email/webhook providers. Returns `false` if already `SENT` or
-   * `PENDING`, preventing duplicate sends across overlapping sweeps or restarts.
+   * a fresh `PENDING` claim. Stale claims can be recovered after the TTL.
    */
   claimDelivery(input: ClaimDeliveryInput): Promise<boolean>;
   recordDelivery(record: AlertDeliveryRecord): Promise<void>;
@@ -107,6 +108,8 @@ function defaultPreference(orgId: string): StoredNotificationPreference {
     webhookSecret: null,
   };
 }
+
+export const DELIVERY_CLAIM_TTL_MS = 15 * 60 * 1000;
 
 function deliveryKey(
   orgId: string,
@@ -330,7 +333,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
       );
       if (existing.length > 0) {
         const status = String(existing[0]?.status ?? "");
-        if (status === "SENT" || status === "PENDING") {
+        if (status === "SENT") {
           return false;
         }
         const updated = await db.command<Record<string, unknown>>(
@@ -342,11 +345,12 @@ export class ArcadeDbAlertRepository implements AlertRepository {
             deliveredAt = :claimedAt
            WHERE deliveryKey = :deliveryKey
              AND status <> 'SENT'
-             AND status <> 'PENDING'`,
+             AND (status <> 'PENDING' OR deliveredAt <= :staleBefore)`,
           {
             deliveryKey: key,
             provider: input.provider,
             claimedAt: input.claimedAt,
+            staleBefore: new Date(Date.parse(input.claimedAt) - DELIVERY_CLAIM_TTL_MS).toISOString(),
           },
         );
         return Number(updated[0]?.count ?? 0) > 0;
@@ -403,6 +407,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
       provider: record.provider,
       errorMessage: record.errorMessage,
       deliveredAt: record.deliveredAt,
+      claimTimestamp: record.claimTimestamp,
     };
 
     if (existing.length > 0) {
@@ -413,8 +418,9 @@ export class ArcadeDbAlertRepository implements AlertRepository {
           provider = :provider,
           errorMessage = :errorMessage,
           deliveredAt = :deliveredAt
-         WHERE deliveryKey = :deliveryKey`,
-        params,
+         WHERE deliveryKey = :deliveryKey
+           AND (:claimTimestamp IS NULL OR (status = 'PENDING' AND deliveredAt = :claimTimestamp))`,
+        { ...params, claimTimestamp: record.claimTimestamp ?? null },
       );
     } else {
       await this.db.command(
@@ -642,7 +648,7 @@ export class InMemoryAlertRepository implements AlertRepository {
   async claimDelivery(input: ClaimDeliveryInput): Promise<boolean> {
     const key = deliveryKey(input.orgId, input.signalId, input.channel);
     const existing = this.deliveries.get(key);
-    if (existing && (existing.status === "SENT" || existing.status === "PENDING")) {
+    if (existing && (existing.status === "SENT" || (existing.status === "PENDING" && Date.parse(existing.deliveredAt) > Date.parse(input.claimedAt) - DELIVERY_CLAIM_TTL_MS))) {
       return false;
     }
     this.deliveries.set(key, {
@@ -658,6 +664,8 @@ export class InMemoryAlertRepository implements AlertRepository {
   }
 
   async recordDelivery(record: AlertDeliveryRecord): Promise<void> {
+    const existing = this.deliveries.get(deliveryKey(record.orgId, record.signalId, record.channel));
+    if (record.claimTimestamp && (existing?.status !== "PENDING" || existing.deliveredAt !== record.claimTimestamp)) return;
     this.deliveries.set(
       deliveryKey(record.orgId, record.signalId, record.channel),
       record,

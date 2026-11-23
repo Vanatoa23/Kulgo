@@ -445,6 +445,7 @@ describe("Issue #67.2 — Atomic alert delivery claim / outbox", () => {
         alertRepo,
         redEmailProvider: emailProvider,
         fromEmail: "alerts@kulgo.eu",
+        nowIso: "2026-11-21T08:01:00Z",
       },
     );
     expect(afterCrash.emailsSent).toBe(0);
@@ -480,6 +481,16 @@ describe("Issue #67.2 — Atomic alert delivery claim / outbox", () => {
     );
     expect(retryRun.emailsSent).toBe(1);
     expect(emailProvider.sent).toHaveLength(1);
+  });
+
+  it("recovers stale claims and fences a late worker's result", async () => {
+    const repo = new InMemoryAlertRepository();
+    const claim = { orgId: uuid(2), signalId: "stale", channel: "EMAIL_RED" as const, provider: "resend", claimedAt: "2026-11-21T08:00:00.000Z" };
+    expect(await repo.claimDelivery(claim)).toBe(true);
+    expect(await repo.claimDelivery({ ...claim, claimedAt: "2026-11-21T08:14:59.000Z" })).toBe(false);
+    expect(await repo.claimDelivery({ ...claim, claimedAt: "2026-11-21T08:15:00.000Z" })).toBe(true);
+    await repo.recordDelivery({ ...claim, status: "FAILED", errorMessage: "late", deliveredAt: claim.claimedAt, claimTimestamp: claim.claimedAt });
+    expect((await repo.listDeliveries(claim.orgId))[0]?.status).toBe("PENDING");
   });
 
   it("handles ArcadeDB unique-key conflict on claimDelivery by returning false without throwing", async () => {
@@ -858,7 +869,7 @@ describe("Issue #67.4 — Persisted sweep lease prevents concurrent & duplicate 
     const slot = nextUtcSweepSlot(new Date("2026-11-21T05:30:00Z"));
     expect(slot.slotKey).toBe("scheduled:2026-11-21T06:00Z");
 
-    // Two replicas fire concurrently for the same scheduled slot
+    // A scheduled run and a manual run share the execution lock
     const [r1, r2] = await Promise.all([
       runner.runSweep({
         nowIso: "2026-11-21T06:00:00Z",
@@ -868,9 +879,7 @@ describe("Issue #67.4 — Persisted sweep lease prevents concurrent & duplicate 
       }),
       runner.runSweep({
         nowIso: "2026-11-21T06:00:00Z",
-        leaseKey: slot.slotKey,
         leaseOwnerId: "replica-b",
-        preventRerunAfterComplete: true,
       }),
     ]);
 

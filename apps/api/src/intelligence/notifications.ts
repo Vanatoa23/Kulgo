@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import type {
   AnonymizedPartnerRegionAlert,
   FacilitySignalMatch,
@@ -17,6 +17,7 @@ export interface OutboundEmailMessage {
   subject: string;
   text: string;
   html: string;
+  idempotencyKey?: string;
 }
 
 export interface EmailProvider {
@@ -36,6 +37,7 @@ export function createResendEmailProvider(
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
+          ...(message.idempotencyKey ? { "Idempotency-Key": message.idempotencyKey } : {}),
         },
         body: JSON.stringify({
           from: message.from,
@@ -234,6 +236,7 @@ export async function dispatchInstantRedAlerts(
 
         try {
           await deps.redEmailProvider.send({
+            idempotencyKey: createHash("sha256").update(JSON.stringify([orgId, signal.signalId, "EMAIL_RED"])).digest("hex"),
             from: deps.fromEmail,
             to: storedPref.preference.emailRecipients,
             subject,
@@ -248,6 +251,7 @@ export async function dispatchInstantRedAlerts(
             provider: deps.redEmailProvider.name,
             errorMessage: null,
             deliveredAt: nowIso,
+            claimTimestamp: nowIso,
           });
           summary.emailsSent++;
         } catch (err) {
@@ -259,6 +263,7 @@ export async function dispatchInstantRedAlerts(
             provider: deps.redEmailProvider.name,
             errorMessage: err instanceof Error ? err.message : String(err),
             deliveredAt: nowIso,
+            claimTimestamp: nowIso,
           });
         }
       }
@@ -295,6 +300,7 @@ export async function dispatchInstantRedAlerts(
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
           "X-Kulgo-Event": "kulgo.risk_signal.red",
+          "Idempotency-Key": createHash("sha256").update(JSON.stringify([orgId, signal.signalId, "WEBHOOK"])).digest("hex"),
         };
         if (storedPref.webhookSecret) {
           headers["X-Kulgo-Signature-256"] = signWebhookPayload(
@@ -319,6 +325,7 @@ export async function dispatchInstantRedAlerts(
             provider: "webhook",
             errorMessage: null,
             deliveredAt: nowIso,
+            claimTimestamp: nowIso,
           });
           summary.webhooksSent++;
         } catch (err) {
@@ -331,6 +338,7 @@ export async function dispatchInstantRedAlerts(
             provider: "webhook",
             errorMessage: rawMessage.slice(0, 500),
             deliveredAt: nowIso,
+            claimTimestamp: nowIso,
           });
         }
       }
