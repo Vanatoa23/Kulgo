@@ -184,8 +184,32 @@ export class IntelligenceRunner {
 
     let stage2Signals: RiskSignal[] = [];
     if (this.deps.fetchStage2Raw) {
-      const rawItems = await this.deps.fetchStage2Raw();
-      const filtered = preFilterUnstructuredItems(rawItems);
+      const [rawItems, activeSignals] = await Promise.all([
+        this.deps.fetchStage2Raw(),
+        this.deps.riskSignalRepo.listActive(),
+      ]);
+      const cutoffMs = Date.parse(startedAt) - 72 * 3_600_000;
+      const recentSignals = activeSignals.filter((sig) => {
+        const refIso = sig.lastSeenAt ?? sig.publishedAt;
+        if (!refIso) return true;
+        const refMs = Date.parse(refIso);
+        return Number.isNaN(refMs) || refMs >= cutoffMs;
+      });
+      const seenUrls = new Set<string>();
+      const recentTitles: string[] = [];
+      for (const sig of [...recentSignals, ...stage1.signals]) {
+        for (const url of sig.sourceUrls) {
+          seenUrls.add(url);
+        }
+        if (sig.title) {
+          recentTitles.push(sig.title);
+        }
+      }
+      const filtered = preFilterUnstructuredItems(
+        rawItems,
+        seenUrls,
+        recentTitles,
+      );
       const classified = await classifyUnstructuredItems(
         filtered,
         this.deps.llmRouter,
