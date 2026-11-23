@@ -1,10 +1,19 @@
+import { IntelligenceRunner } from "../src/intelligence/runner.js";
+import { InMemoryInvitationRepository } from "../src/invites/repository.js";
+import { InMemoryWorkspaceRepository } from "../src/workspace/repository.js";
+import { buildOrgSlug, InMemoryAuthRepository } from "../src/auth/repository.js";
+import { matchFacilityRiskSignals } from "@kulgo/engine";
+import { RiskSignalSchema } from "@kulgo/shared";
 import { describe, expect, it } from "vitest";
 import { z } from "zod";
 import { InMemoryRiskSignalRepository } from "../src/analytics/risk-signals.js";
 import { createTestApp } from "../src/app.js";
 import { InMemoryAlertRepository } from "../src/intelligence/alert-repository.js";
 import {
+  areSignalsSameEvent,
+  buildTrigrams,
   computeCanonicalDedupeKey,
+  extractSourceDomain,
   trigramJaccardSimilarity,
 } from "../src/intelligence/dedupe.js";
 import {
@@ -16,6 +25,7 @@ import {
 import {
   classifyUnstructuredItems,
   preFilterUnstructuredItems,
+  Stage2ExtractionBatchSchema,
 } from "../src/intelligence/feeds/stage2.js";
 import { LlmRouter, type LlmProviderAdapter } from "../src/intelligence/llm-router.js";
 import {
@@ -172,12 +182,13 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
     expect(res.attempts[0]?.error).toContain("429");
   });
 
-  it("pre-filters duplicates/irrelevant items and promotes ALLEGED -> CORROBORATED across independent domains", async () => {
+  it("pre-filters duplicates/irrelevant items, binds server-verified provenance, blocks syndication self-corroboration, and promotes genuine independent corroboration", async () => {
     const items = preFilterUnstructuredItems([
       {
+        articleId: "hamburg-1",
         title: "Port of Hamburg dockworkers announce 48-hour strike",
-        summary: "Container terminal operations halted",
-        sourceUrl: "https://reuters.example/hamburg-strike",
+        summary: "Container terminal operations halted across Hamburg berths.",
+        sourceUrl: "https://www.reuters.com/world/hamburg-strike",
         publishedAt: "2026-11-21T07:00:00Z",
       },
       {
@@ -204,14 +215,18 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
       ),
     ).toBeGreaterThanOrEqual(0.75);
 
+    let capturedUserPrompt = "";
     const mockRouter = new LlmRouter([
       {
         name: "gemini",
         model: "gemini-2.5-flash-lite",
-        async completeJson() {
+        async completeJson(req) {
+          capturedUserPrompt = req.userPrompt;
           return JSON.stringify({
             signals: [
               {
+                articleId: "hamburg-1",
+                evidenceQuote: "Container terminal operations halted across Hamburg berths",
                 kind: "LABOR_INDUSTRIAL",
                 severity: "RED",
                 title: "Port of Hamburg 48-hour Dockworker Strike",
@@ -220,8 +235,6 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
                 affectedChokepoints: ["NORTH_SEA"],
                 affectedSectors: ["Logistics"],
                 lifecycle: "ACTIVE",
-                sourceUrl: "https://reuters.example/hamburg-strike",
-                publishedAt: "2026-11-21T07:00:00Z",
                 confidence: 0.85,
               },
             ],
@@ -235,7 +248,19 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
       mockRouter,
       "2026-11-21T08:00:00Z",
     );
+    expect(classified.errors).toEqual([]);
     expect(classified.signals).toHaveLength(1);
+    // Input prompt must include explicit articleId and omit sourceUrl
+    expect(capturedUserPrompt).toContain('"articleId":"hamburg-1"');
+    expect(capturedUserPrompt).not.toContain("reuters.com");
+    // Server attaches verified sourceUrl and publishedAt from matched input article
+    expect(classified.signals[0]!.sourceUrls).toEqual([
+      "https://www.reuters.com/world/hamburg-strike",
+    ]);
+    expect(classified.signals[0]!.publishedAt).toBe("2026-11-21T07:00:00.000Z");
+    expect(classified.signals[0]!.evidenceQuotes).toEqual([
+      "Container terminal operations halted across Hamburg berths",
+    ]);
     expect(classified.signals[0]!.verificationStatus).toBe("ALLEGED");
 
     // Upsert first report -> ALLEGED
@@ -244,17 +269,493 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
     expect(first.created).toBe(true);
     expect(first.signal.verificationStatus).toBe("ALLEGED");
 
-    // Second independent domain reporting same canonical event -> merges & promotes to CORROBORATED
-    const secondReport = {
+    // Same publisher on a different subdomain -> collapses to reuters.com, stays ALLEGED
+    const subdomainReport = {
+      ...classified.signals[0]!,
+      signalId: "sig-s2-reuters-uk",
+      title: "Port of Hamburg 48-hour Dockworker Strike enters afternoon",
+      evidenceQuotes: ["Vessels anchored off Elbe estuary as union talks stall"],
+      sourceUrls: ["https://uk.reuters.com/world/hamburg-strike-update"],
+    };
+    const mergedSubdomain = await repo.upsertSignal(subdomainReport);
+    expect(mergedSubdomain.created).toBe(false);
+    expect(mergedSubdomain.signal.verificationStatus).toBe("ALLEGED");
+
+    // Verbatim syndicated copy on a different domain -> merges URL but stays ALLEGED
+    const syndicatedReport = {
+      ...classified.signals[0]!,
+      signalId: "sig-s2-syndicated-wire",
+      sourceUrls: ["https://finance.yahoo.com/news/hamburg-strike-reuters"],
+    };
+    const mergedSyndicated = await repo.upsertSignal(syndicatedReport);
+    expect(mergedSyndicated.created).toBe(false);
+    expect(mergedSyndicated.signal.verificationStatus).toBe("ALLEGED");
+
+    // Second independent domain with distinct reporting -> merges & promotes to CORROBORATED
+    const independentReport = {
       ...classified.signals[0]!,
       signalId: "sig-s2-second-domain",
+      title: "Hamburg container terminals shut down as dockworker walkout widens",
+      description: "Shipping lines divert vessels to Bremerhaven and Rotterdam.",
+      evidenceQuotes: ["Shipping lines diverted six container vessels away from Hamburg"],
       sourceUrls: ["https://lloydslist.example/hamburg-strike-confirmed"],
     };
-    const merged = await repo.upsertSignal(secondReport);
+    const merged = await repo.upsertSignal(independentReport);
     expect(merged.created).toBe(false);
     expect(merged.signal.signalId).toBe(first.signal.signalId);
-    expect(merged.signal.sourceUrls).toHaveLength(2);
+    expect(merged.signal.sourceUrls).toHaveLength(4);
     expect(merged.signal.verificationStatus).toBe("CORROBORATED");
+  });
+
+  it("enforces .strict() on Stage 2 schemas and rejects unknown articleId or fabricated quotes", async () => {
+    // .strict() rejects LLM-invented sourceUrl or extra fields
+    expect(() =>
+      Stage2ExtractionBatchSchema.parse({
+        signals: [
+          {
+            articleId: "art-1",
+            evidenceQuote: "Port of Tallinn strike",
+            kind: "LABOR_INDUSTRIAL",
+            severity: "RED",
+            title: "Port of Tallinn Strike",
+            sourceUrl: "https://hallucinated.example/fake",
+          },
+        ],
+      }),
+    ).toThrow();
+
+    expect(() =>
+      Stage2ExtractionBatchSchema.parse({
+        signals: [],
+        extraMetadata: true,
+      }),
+    ).toThrow();
+
+    const routerWithBadProvenance = new LlmRouter([
+      {
+        name: "gemini",
+        model: "gemini-2.5-flash-lite",
+        async completeJson() {
+          return JSON.stringify({
+            signals: [
+              {
+                articleId: "unknown-999",
+                evidenceQuote: "Container terminal operations halted",
+                kind: "LABOR_INDUSTRIAL",
+                severity: "RED",
+                title: "Ghost Strike",
+                affectedCountryCodes: ["DE"],
+              },
+              {
+                articleId: "art-1",
+                evidenceQuote: "Fabricated quote not present in source article text",
+                kind: "LABOR_INDUSTRIAL",
+                severity: "RED",
+                title: "Hallucinated Strike",
+                affectedCountryCodes: ["DE"],
+              },
+            ],
+          });
+        },
+      },
+    ]);
+
+    const res = await classifyUnstructuredItems(
+      [
+        {
+          title: "Port of Hamburg dockworkers announce 48-hour strike",
+          summary: "Container terminal operations halted across Hamburg berths.",
+          sourceUrl: "https://reuters.example/hamburg-strike",
+          publishedAt: "2026-11-21T07:00:00Z",
+        },
+      ],
+      routerWithBadProvenance,
+      "2026-11-21T08:00:00Z",
+    );
+    expect(res.signals).toHaveLength(0);
+    expect(res.errors).toHaveLength(2);
+    expect(res.errors[0]).toContain("unknown articleId");
+    expect(res.errors[1]).toContain("non-verbatim evidenceQuote");
+  });
+
+  it("omits fake EU/Baltic fallback polygon for country-only Stage 2 signals so neighboring countries are not hit", async () => {
+    const countryOnlyRouter = new LlmRouter([
+      {
+        name: "gemini",
+        model: "gemini-2.5-flash-lite",
+        async completeJson() {
+          return JSON.stringify({
+            signals: [
+              {
+                articleId: "art-1",
+                evidenceQuote: "Nationwide rail freight strike disrupts German industrial corridors",
+                kind: "LABOR_INDUSTRIAL",
+                severity: "RED",
+                title: "German Rail Freight Strike",
+                description: "Freight trains halted across Germany.",
+                affectedCountryCodes: ["DE"],
+                affectedChokepoints: [],
+                affectedSectors: [],
+                lifecycle: "ACTIVE",
+                confidence: 0.85,
+              },
+            ],
+          });
+        },
+      },
+    ]);
+
+    const res = await classifyUnstructuredItems(
+      [
+        {
+          title: "Nationwide rail freight strike disrupts German industrial corridors",
+          summary: "Train drivers begin 48-hour walkout across Germany.",
+          sourceUrl: "https://dw.example/de-rail-strike",
+          publishedAt: "2026-11-21T07:00:00Z",
+        },
+      ],
+      countryOnlyRouter,
+      "2026-11-21T08:00:00Z",
+    );
+
+    expect(res.signals).toHaveLength(1);
+    expect(res.signals[0]!.polygonWkt).toBe("POLYGON EMPTY");
+
+    // Facility in Germany matches via COUNTRY; facility in Estonia (previously inside fake EU/Baltic box) does NOT match
+    const matches = matchFacilityRiskSignals(
+      [
+        { facilityId: "fac-de", lat: 52.52, lng: 13.405, countryCode: "DE", regionCode: "DE-BE" },
+        { facilityId: "fac-ee", lat: 59.437, lng: 24.7536, countryCode: "EE", regionCode: "EE-37" },
+      ],
+      res.signals,
+      "2026-11-21T08:00:00Z",
+    );
+    expect(matches).toEqual([
+      {
+        facilityId: "fac-de",
+        signalId: res.signals[0]!.signalId,
+        matchType: "COUNTRY",
+        severity: "RED",
+      },
+    ]);
+  });
+
+  it("extracts true registrable domains across subdomains and multi-part public suffixes", () => {
+    expect(extractSourceDomain("https://www.reuters.com/world/a")).toBe("reuters.com");
+    expect(extractSourceDomain("https://uk.reuters.com/world/b")).toBe("reuters.com");
+    expect(extractSourceDomain("https://m.bbc.co.uk/news/business-123")).toBe("bbc.co.uk");
+    expect(extractSourceDomain("https://www.bbc.co.uk/news/business-456")).toBe("bbc.co.uk");
+    expect(extractSourceDomain("https://news.err.ee/1609123")).toBe("err.ee");
+    expect(extractSourceDomain("not-a-url")).toBeNull();
+  });
+
+  it("keeps unrelated same-country/same-week events separate while merging ongoing events across an ISO-week boundary", async () => {
+    const router = new LlmRouter([
+      {
+        name: "gemini",
+        model: "gemini-2.5-flash-lite",
+        async completeJson(req) {
+          const batch = JSON.parse(req.userPrompt) as Array<{ articleId: string; title: string; summary: string }>;
+          return JSON.stringify({
+            signals: batch.map((a) => {
+              if (a.articleId === "hamburg-sun") {
+                return {
+                  articleId: a.articleId,
+                  evidenceQuote: "Port of Hamburg dockworkers begin strike",
+                  kind: "LABOR_INDUSTRIAL",
+                  severity: "RED",
+                  title: "Port of Hamburg Dockworker Strike",
+                  affectedCountryCodes: ["DE"],
+                  affectedChokepoints: [],
+                };
+              }
+              if (a.articleId === "munich-sun") {
+                return {
+                  articleId: a.articleId,
+                  evidenceQuote: "Munich automotive assembly plant workers walk out",
+                  kind: "LABOR_INDUSTRIAL",
+                  severity: "YELLOW",
+                  title: "Munich Automotive Assembly Plant Walkout",
+                  affectedCountryCodes: ["DE"],
+                  affectedChokepoints: [],
+                };
+              }
+              return {
+                articleId: a.articleId,
+                evidenceQuote: "Hamburg container terminals remain closed on Monday",
+                kind: "LABOR_INDUSTRIAL",
+                severity: "RED",
+                title: "Port of Hamburg Dockworker Strike Continues on Day Two",
+                affectedCountryCodes: ["DE"],
+                affectedChokepoints: [],
+              };
+            }),
+          });
+        },
+      },
+    ]);
+
+    // Sunday 2026-11-22 is 2026-W47; Monday 2026-11-23 is 2026-W48
+    const sundayBatch = await classifyUnstructuredItems(
+      [
+        {
+          articleId: "hamburg-sun",
+          title: "Port of Hamburg dockworkers begin strike",
+          summary: "Cargo handling halted on Sunday evening.",
+          sourceUrl: "https://reuters.com/hamburg-sun",
+          publishedAt: "2026-11-22T18:00:00Z",
+        },
+        {
+          articleId: "munich-sun",
+          title: "Munich automotive assembly plant workers walk out",
+          summary: "Bavarian car plant halts production over wage dispute.",
+          sourceUrl: "https://handelsblatt.com/munich-auto",
+          publishedAt: "2026-11-22T19:00:00Z",
+        },
+      ],
+      router,
+      "2026-11-22T20:00:00Z",
+    );
+
+    const mondayBatch = await classifyUnstructuredItems(
+      [
+        {
+          articleId: "hamburg-mon",
+          title: "Hamburg container terminals remain closed on Monday",
+          summary: "Independent shipping survey confirms ongoing berth closures.",
+          sourceUrl: "https://lloydslist.com/hamburg-mon",
+          publishedAt: "2026-11-23T08:00:00Z",
+        },
+      ],
+      router,
+      "2026-11-23T09:00:00Z",
+    );
+
+    const repo = new InMemoryRiskSignalRepository([]);
+    const r1 = await repo.upsertSignal(sundayBatch.signals[0]!);
+    const r2 = await repo.upsertSignal(sundayBatch.signals[1]!);
+    const r3 = await repo.upsertSignal(mondayBatch.signals[0]!);
+
+    // Unrelated Hamburg and Munich strikes in DE/2026-W47 must NOT merge
+    expect(r1.created).toBe(true);
+    expect(r2.created).toBe(true);
+    expect(r2.signal.signalId).not.toBe(r1.signal.signalId);
+    expect(r2.signal.verificationStatus).toBe("ALLEGED");
+
+    // Monday's Hamburg update (2026-W48) MUST merge into Sunday's Hamburg signal (2026-W47) and corroborate it
+    expect(r3.created).toBe(false);
+    expect(r3.signal.signalId).toBe(r1.signal.signalId);
+    expect(r3.signal.verificationStatus).toBe("CORROBORATED");
+    expect(await repo.listActive()).toHaveLength(2);
+  });
+
+  it("separates event validity window (eventStartAt/eventEndAt) from 7-day feed staleness TTL", async () => {
+    const repo = new InMemoryRiskSignalRepository([]);
+
+    // Planned strike announced on Day 0 for Day 10..Day 12, even with an aggressive 7-day feed TTL (Day 7)
+    const plannedSignal = RiskSignalSchema.parse({
+      signalId: "sig-planned-strike",
+      kind: "LABOR_INDUSTRIAL",
+      severity: "RED",
+      title: "Planned Port of Rotterdam Strike",
+      affectedCountryCodes: ["NL"],
+      polygonWkt: "POLYGON EMPTY",
+      sourceUrls: ["https://reuters.com/rotterdam-planned"],
+      publishedAt: "2026-11-01T08:00:00Z",
+      lastSeenAt: "2026-11-01T08:00:00Z",
+      eventStartAt: "2026-11-11T00:00:00Z",
+      eventEndAt: "2026-11-13T00:00:00Z",
+      expiresAt: "2026-11-08T08:00:00Z",
+      lifecycle: "PLANNED",
+      verificationStatus: "CORROBORATED",
+      active: true,
+    });
+    await repo.upsertSignal(plannedSignal);
+
+    // Day 9: past 7-day feed TTL (Nov 8), but before eventStartAt (Nov 11) -> MUST stay active & PLANNED
+    expect(await repo.resolveExpired("2026-11-09T12:00:00Z")).toBe(0);
+    let active = await repo.listActive();
+    expect(active).toHaveLength(1);
+    expect(active[0]!.lifecycle).toBe("PLANNED");
+
+    // Day 11: eventStartAt reached, still before eventEndAt (Nov 13) -> transitions PLANNED -> ACTIVE
+    expect(await repo.resolveExpired("2026-11-11T12:00:00Z")).toBe(0);
+    active = await repo.listActive();
+    expect(active).toHaveLength(1);
+    expect(active[0]!.lifecycle).toBe("ACTIVE");
+
+    // Day 14: past eventEndAt (Nov 13) -> NOW resolves
+    expect(await repo.resolveExpired("2026-11-14T00:00:00Z")).toBe(1);
+    expect(await repo.listActive()).toHaveLength(0);
+  });
+  it("preserves UTF-8 diacritics in trigrams, matches multilingual Baltic/EU headlines & compounds, transliterates org slugs, and deduplicates across sweeps", async () => {
+    // 1. UTF-8 / Unicode trigrams preserve Estonian/Nordic characters instead of splitting into spaces
+    const estonianTrigrams = buildTrigrams("Tööseisak Pärnu sadamas");
+    expect(estonianTrigrams.has("töö")).toBe(true);
+    expect(estonianTrigrams.has("öös")).toBe(true);
+    expect(estonianTrigrams.has("pär")).toBe(true);
+
+    // Distinct words with different diacritics should not collapse to identical empty/stripped strings
+    expect(trigramJaccardSimilarity("töö", "tää")).toBe(0);
+    // Composed (NFC) vs decomposed (NFD) Unicode strings normalize identically via NFKC
+    expect(
+      trigramJaccardSimilarity(
+        "Tööseisak Pärnu sadamas".normalize("NFC"),
+        "Tööseisak Pärnu sadamas".normalize("NFD"),
+      ),
+    ).toBe(1);
+
+    // 2. Multilingual Stage 2 pre-filter accepts Estonian, Finnish, Swedish, German, French, Polish, Latvian, Lithuanian headlines & compounds
+    const multilingualBatch = [
+      {
+        title: "Tööseisak ja tarneraskused Pärnu sadamas",
+        summary: "Ulatuslik elektrikatkestus ning torm häirivad laevaliiklust",
+        sourceUrl: "https://err.ee/parnu-sadam-tooseisak",
+        publishedAt: "2026-11-21T06:00:00Z",
+      },
+      {
+        // Near-duplicate Estonian headline with punctuation difference -> dropped by trigram Jaccard
+        title: "Tööseisak ja tarneraskused Pärnu sadamas!",
+        summary: "Kordusuudis",
+        sourceUrl: "https://postimees.ee/parnu-sadam-tooseisak",
+        publishedAt: "2026-11-21T06:05:00Z",
+      },
+      {
+        title: "Satamalakko pysäyttää Vuosaaren konttiliikenteen ja aiheuttaa toimitushäiriöitä",
+        summary: "AKT:n lakko ja alihankkijan konkurssi vaikuttavat vientiin",
+        sourceUrl: "https://yle.fi/vuosaari-satamalakko",
+        publishedAt: "2026-11-21T06:10:00Z",
+      },
+      {
+        title: "Hamnstrejk i Göteborg och plötslig konkurs hos underleverantör",
+        summary: "Omfattande leveransstörningar i Västra Götaland",
+        sourceUrl: "https://svt.se/goteborg-hamnstrejk",
+        publishedAt: "2026-11-21T06:15:00Z",
+      },
+      {
+        title: "Warnstreik und Stromausfall legen Hamburger Hafen lahm",
+        summary: "Zulieferer meldet Insolvenz nach Hochwasser an",
+        sourceUrl: "https://ndr.de/hamburg-warnstreik-hafen",
+        publishedAt: "2026-11-21T06:20:00Z",
+      },
+      {
+        title: "Grève des dockers au port du Havre et faillite d'un transporteur",
+        summary: "Blocage logistique majeur",
+        sourceUrl: "https://lemonde.fr/le-havre-greve",
+        publishedAt: "2026-11-21T06:25:00Z",
+      },
+      {
+        title: "Strajk w porcie Gdańsk oraz upadłość operatora kolejowego",
+        summary: "Poważny przestój w terminalu kontenerowym",
+        sourceUrl: "https://pap.pl/gdansk-strajk-port",
+        publishedAt: "2026-11-21T06:30:00Z",
+      },
+      {
+        title: "Rīgas ostā streiks un spēcīga vētra kavē kravu pārvadājumus",
+        summary: "Loģistikas pārtraukums",
+        sourceUrl: "https://lsm.lv/rigas-osta-streiks",
+        publishedAt: "2026-11-21T06:35:00Z",
+      },
+      {
+        title: "Klaipėdos uoste streikas ir tiekimo sutrikimai dėl audros",
+        summary: "Geležinkelio pervežimai sustabdyti",
+        sourceUrl: "https://lrt.lt/klaipedos-uostas-streikas",
+        publishedAt: "2026-11-21T06:40:00Z",
+      },
+    ];
+
+    const filteredMultilingual = preFilterUnstructuredItems(multilingualBatch);
+    expect(filteredMultilingual).toHaveLength(8);
+    expect(
+      filteredMultilingual.some(
+        (i) => i.sourceUrl === "https://postimees.ee/parnu-sadam-tooseisak",
+      ),
+    ).toBe(false);
+
+    // 3. Diacritic-safe organization slugs
+    expect(buildOrgSlug("Pärnu Tööstus OÜ")).toMatch(
+      /^parnu-toostus-ou-[0-9a-f]{8}$/,
+    );
+    expect(buildOrgSlug("Øresund & Ærø Straßentransport Łódź")).toMatch(
+      /^oresund-aero-strassentransport-lodz-[0-9a-f]{8}$/,
+    );
+
+    // 4. Cross-sweep 72h URL & title deduplication in IntelligenceRunner.runSweep()
+    let llmCallCount = 0;
+    let updated = false;
+    const countingRouter = new LlmRouter([
+      {
+        name: "gemini",
+        model: "gemini-2.5-flash-lite",
+        async completeJson(req) {
+          llmCallCount++;
+          const article = JSON.parse(req.userPrompt)[0];
+          return JSON.stringify({
+            signals: [
+              {
+                articleId: article.articleId,
+                evidenceQuote: article.title,
+                kind: "LABOR_INDUSTRIAL",
+                severity: "RED",
+                title: "Tööseisak ja tarneraskused Pärnu sadamas",
+                description: "Pärnu sadama töö on peatatud.",
+                affectedCountryCodes: ["EE"],
+                affectedChokepoints: ["BALTIC_SEA"],
+                affectedSectors: ["Logistics"],
+                lifecycle: updated ? "RESOLVED" : "ACTIVE",
+                confidence: 0.9,
+              },
+            ],
+          });
+        },
+      },
+    ]);
+
+    const authRepo = new InMemoryAuthRepository();
+    const workspaceRepo = new InMemoryWorkspaceRepository();
+    const riskSignalRepo = new InMemoryRiskSignalRepository([]);
+    const runner = new IntelligenceRunner({
+      authRepo,
+      workspaceRepo,
+      inviteRepo: new InMemoryInvitationRepository({ authRepo, workspaceRepo }),
+      riskSignalRepo,
+      alertRepo: new InMemoryAlertRepository(),
+      llmRouter: countingRouter,
+      fromEmail: "alerts@kulgo.eu",
+      fetchStage1: async () => ({ signals: [], errors: [] }),
+      fetchStage2Raw: async () => [
+        {
+          title: "Tööseisak ja tarneraskused Pärnu sadamas",
+          summary: updated ? "Tööseisak lõppes Pärnu sadamas" : "Ulatuslik tööseisak Pärnu sadamas",
+          sourceUrl: "https://err.ee/parnu-sadam-tooseisak",
+          publishedAt: "2026-11-21T06:00:00Z",
+        },
+        {
+          // Near-duplicate headline from a second URL on subsequent sweep
+          title: "Tööseisak ja tarneraskused Pärnu sadamas!",
+          summary: "Kordusuudis teisest portaalist",
+          sourceUrl: "https://delfi.ee/parnu-sadam-tooseisak",
+          publishedAt: "2026-11-21T12:00:00Z",
+        },
+      ],
+    });
+
+    // 06:00 UTC sweep classifies the new article once
+    const sweep1 = await runner.runSweep({ nowIso: "2026-11-21T06:00:00Z" });
+    expect(sweep1.stage2Classified).toBe(1);
+    expect(sweep1.upsertedNew).toBe(1);
+    expect(llmCallCount).toBe(1);
+
+    // 12:00 UTC sweep sees the active signal's URL & title from 06:00 UTC and skips LLM invocation altogether
+    const sweep2 = await runner.runSweep({ nowIso: "2026-11-21T12:00:00Z" });
+    expect(sweep2.stage2Classified).toBe(0);
+    expect(llmCallCount).toBe(1);
+
+    updated = true;
+    const sweep3 = await runner.runSweep({ nowIso: "2026-11-21T13:00:00Z" });
+    expect(sweep3.stage2Classified).toBe(1);
+    expect(llmCallCount).toBe(2);
+    expect(await riskSignalRepo.listActive()).toHaveLength(0);
   });
 });
 
@@ -446,3 +947,18 @@ describe("/api/v1/alerts HTTP routes", () => {
     expect(sweepRes.status).toBe(200);
   });
 });
+
+
+describe("structured event identity", () => {
+  it("keeps separate confirmed weather alerts and their polygons", async () => {
+    const repo = new InMemoryRiskSignalRepository([]);
+    const base = parseMeteoAlarmAtomXml(`<feed><entry><id>wind-1</id><title>Wind (EE — Harju)</title><cap:event>Wind</cap:event><cap:severity>Severe</cap:severity><cap:areaDesc>Harju</cap:areaDesc><cap:sent>2026-11-21T06:00:00Z</cap:sent><cap:polygon>59,24 59,25 60,25 59,24</cap:polygon></entry></feed>`, "EE", "2026-11-21T08:00:00Z")[0]!;
+    const wind = { ...base, signalId: "wind", dedupeKey: "wind-key", title: "Wind (EE — Harju)", verificationStatus: "CONFIRMED" as const };
+    const flood = { ...wind, signalId: "flood", dedupeKey: "flood-key", title: "Flood (EE — Harju)", polygonWkt: "POLYGON ((25 59, 26 59, 26 60, 25 59))" };
+    expect(areSignalsSameEvent(wind, flood)).toBe(false);
+    expect((await repo.upsertSignal(wind)).created).toBe(true);
+    expect((await repo.upsertSignal(flood)).created).toBe(true);
+    expect((await repo.listActive()).map(s => s.polygonWkt)).toEqual([wind.polygonWkt, flood.polygonWkt]);
+  });
+});
+

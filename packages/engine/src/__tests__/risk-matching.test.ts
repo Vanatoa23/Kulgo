@@ -104,4 +104,31 @@ describe("consistent alert and financial risk matching (#38)", () => {
     expect(alerts(suez, air).some(a => a.alertId === "signal-earthquake")).toBe(false);
     expect(exposure(suez, air)).toBe(exposure(null, air));
   });
+
+  it("keeps future planned and ongoing disruptions active past feed staleness expiresAt until eventEndAt passes", () => {
+    const ongoingPastTtl = RiskSignalSchema.parse({
+      ...signal,
+      expiresAt: "2026-11-21T00:00:00Z",
+      eventStartAt: "2026-11-18T00:00:00Z",
+      eventEndAt: "2026-11-28T00:00:00Z",
+    });
+    expect(alerts(ongoingPastTtl)).toContainEqual(expect.objectContaining({ alertId: "signal-earthquake" }));
+
+    const plannedPastTtl = RiskSignalSchema.parse({
+      ...signal,
+      lifecycle: "PLANNED",
+      expiresAt: "2026-11-21T00:00:00Z",
+      eventStartAt: "2026-11-25T00:00:00Z",
+      eventEndAt: null,
+    });
+    expect(alerts(plannedPastTtl)).toContainEqual(expect.objectContaining({ alertId: "signal-earthquake" }));
+
+    const endedBeforeTtl = RiskSignalSchema.parse({
+      ...signal,
+      expiresAt: "2026-11-30T00:00:00Z",
+      eventStartAt: "2026-11-18T00:00:00Z",
+      eventEndAt: "2026-11-21T00:00:00Z",
+    });
+    expect(alerts(endedBeforeTtl).some(a => a.alertId === "signal-earthquake")).toBe(false);
+  });
 });

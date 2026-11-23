@@ -1,6 +1,10 @@
+import { isSignalExpired } from "@kulgo/engine";
 import { RiskSignalSchema, type RiskSignal } from "@kulgo/shared";
 import type { ArcadeDbClient } from "../db/client.js";
-import { mergeRiskSignals } from "../intelligence/dedupe.js";
+import {
+  findMatchingSignal,
+  mergeRiskSignals,
+} from "../intelligence/dedupe.js";
 
 /**
  * Built-in demo RiskSignal polygons for the Latvia secondary-sanctions corridor
@@ -56,11 +60,16 @@ export interface RiskSignalRepository {
 const RISK_SIGNAL_SELECT_FIELDS = `
   signalId, kind, severity, title, description, regionCode,
   affectedCountryCodes, affectedChokepoints, affectedSectors,
-  polygonWkt, sourceUrls, publishedAt, lastSeenAt, expiresAt,
-  resolvedAt, dedupeKey, confidence, verificationStatus, lifecycle, active
+  polygonWkt, sourceUrls, evidenceQuotes, publishedAt, lastSeenAt,
+  eventStartAt, eventEndAt, expiresAt, resolvedAt, dedupeKey,
+  confidence, verificationStatus, lifecycle, active
 `;
 
 function mapRiskSignalRow(row: Record<string, unknown>): RiskSignal {
+  const evidenceQuotes = Array.isArray(row.evidenceQuotes)
+    ? row.evidenceQuotes.filter((q): q is string => typeof q === "string")
+    : undefined;
+
   return RiskSignalSchema.parse({
     signalId: row.signalId,
     kind: row.kind,
@@ -79,8 +88,19 @@ function mapRiskSignalRow(row: Record<string, unknown>): RiskSignal {
       : [],
     polygonWkt: row.polygonWkt,
     sourceUrls: Array.isArray(row.sourceUrls) ? row.sourceUrls : [],
+    ...(evidenceQuotes && evidenceQuotes.length > 0 ? { evidenceQuotes } : {}),
     publishedAt: typeof row.publishedAt === "string" ? row.publishedAt : null,
     lastSeenAt: typeof row.lastSeenAt === "string" ? row.lastSeenAt : null,
+    ...(typeof row.eventStartAt === "string"
+      ? { eventStartAt: row.eventStartAt }
+      : row.eventStartAt === null
+        ? { eventStartAt: null }
+        : {}),
+    ...(typeof row.eventEndAt === "string"
+      ? { eventEndAt: row.eventEndAt }
+      : row.eventEndAt === null
+        ? { eventEndAt: null }
+        : {}),
     expiresAt: typeof row.expiresAt === "string" ? row.expiresAt : null,
     resolvedAt: typeof row.resolvedAt === "string" ? row.resolvedAt : null,
     dedupeKey: typeof row.dedupeKey === "string" ? row.dedupeKey : null,
@@ -107,8 +127,11 @@ function toSqlParams(signal: RiskSignal): Record<string, unknown> {
     affectedSectors: signal.affectedSectors,
     polygonWkt: signal.polygonWkt,
     sourceUrls: signal.sourceUrls,
+    evidenceQuotes: signal.evidenceQuotes ?? [],
     publishedAt: signal.publishedAt,
     lastSeenAt: signal.lastSeenAt,
+    eventStartAt: signal.eventStartAt ?? null,
+    eventEndAt: signal.eventEndAt ?? null,
     expiresAt: signal.expiresAt,
     resolvedAt: signal.resolvedAt,
     dedupeKey: signal.dedupeKey,
@@ -117,6 +140,17 @@ function toSqlParams(signal: RiskSignal): Record<string, unknown> {
     lifecycle: signal.lifecycle,
     active: signal.active,
   };
+}
+
+function shouldActivatePlannedSignal(
+  signal: RiskSignal,
+  nowMs: number,
+): boolean {
+  if (signal.lifecycle !== "PLANNED" || !signal.eventStartAt) {
+    return false;
+  }
+  const startMs = Date.parse(signal.eventStartAt);
+  return !Number.isNaN(startMs) && startMs <= nowMs;
 }
 
 export class ArcadeDbRiskSignalRepository implements RiskSignalRepository {
@@ -141,28 +175,34 @@ export class ArcadeDbRiskSignalRepository implements RiskSignalRepository {
 
   async upsertSignal(incoming: RiskSignal): Promise<UpsertSignalResult> {
     const parsed = RiskSignalSchema.parse(incoming);
-    const existingRows = parsed.dedupeKey
-      ? await this.db.query<Record<string, unknown>>(
-          "sql",
-          `SELECT ${RISK_SIGNAL_SELECT_FIELDS}
-           FROM RiskSignal
-           WHERE signalId = :signalId OR dedupeKey = :dedupeKey
-           LIMIT 1`,
-          { signalId: parsed.signalId, dedupeKey: parsed.dedupeKey },
-        )
-      : await this.db.query<Record<string, unknown>>(
-          "sql",
-          `SELECT ${RISK_SIGNAL_SELECT_FIELDS}
-           FROM RiskSignal
-           WHERE signalId = :signalId
-           LIMIT 1`,
-          { signalId: parsed.signalId },
-        );
+    const exactRows = await this.db.query<Record<string, unknown>>(
+      "sql",
+      `SELECT ${RISK_SIGNAL_SELECT_FIELDS}
+       FROM RiskSignal
+       WHERE signalId = :signalId
+       LIMIT 1`,
+      { signalId: parsed.signalId },
+    );
 
-    if (existingRows.length > 0) {
-      const merged = RiskSignalSchema.parse(
-        mergeRiskSignals(mapRiskSignalRow(existingRows[0]!), parsed),
+    let existing: RiskSignal | null =
+      exactRows.length > 0 ? mapRiskSignalRow(exactRows[0]!) : null;
+
+    if (!existing) {
+      const candidateRows = await this.db.query<Record<string, unknown>>(
+        "sql",
+        `SELECT ${RISK_SIGNAL_SELECT_FIELDS}
+         FROM RiskSignal
+         WHERE active = true AND kind = :kind`,
+        { kind: parsed.kind },
       );
+      existing = findMatchingSignal(
+        candidateRows.map(mapRiskSignalRow),
+        parsed,
+      );
+    }
+
+    if (existing) {
+      const merged = RiskSignalSchema.parse(mergeRiskSignals(existing, parsed));
       await this.db.command(
         "sql",
         `UPDATE RiskSignal SET
@@ -171,8 +211,12 @@ export class ArcadeDbRiskSignalRepository implements RiskSignalRepository {
           affectedCountryCodes = :affectedCountryCodes,
           affectedChokepoints = :affectedChokepoints,
           affectedSectors = :affectedSectors,
+          polygonWkt = :polygonWkt,
           sourceUrls = :sourceUrls,
+          evidenceQuotes = :evidenceQuotes,
           lastSeenAt = :lastSeenAt,
+          eventStartAt = :eventStartAt,
+          eventEndAt = :eventEndAt,
           expiresAt = :expiresAt,
           resolvedAt = :resolvedAt,
           confidence = :confidence,
@@ -199,8 +243,11 @@ export class ArcadeDbRiskSignalRepository implements RiskSignalRepository {
         affectedSectors = :affectedSectors,
         polygonWkt = :polygonWkt,
         sourceUrls = :sourceUrls,
+        evidenceQuotes = :evidenceQuotes,
         publishedAt = :publishedAt,
         lastSeenAt = :lastSeenAt,
+        eventStartAt = :eventStartAt,
+        eventEndAt = :eventEndAt,
         expiresAt = :expiresAt,
         resolvedAt = :resolvedAt,
         dedupeKey = :dedupeKey,
@@ -214,21 +261,47 @@ export class ArcadeDbRiskSignalRepository implements RiskSignalRepository {
   }
 
   async resolveExpired(nowIso: string): Promise<number> {
-    const expired = await this.db.query<Record<string, unknown>>(
+    const activeRows = await this.db.query<Record<string, unknown>>(
       "sql",
-      `SELECT signalId FROM RiskSignal
-       WHERE active = true AND expiresAt IS NOT NULL AND expiresAt <= :nowIso`,
-      { nowIso },
+      `SELECT ${RISK_SIGNAL_SELECT_FIELDS}
+       FROM RiskSignal
+       WHERE active = true`,
     );
-    if (expired.length === 0) return 0;
+    const nowMs = Date.parse(nowIso);
+    let resolvedCount = 0;
 
-    await this.db.command(
-      "sql",
-      `UPDATE RiskSignal SET active = false, lifecycle = 'RESOLVED', resolvedAt = :nowIso
-       WHERE active = true AND expiresAt IS NOT NULL AND expiresAt <= :nowIso`,
-      { nowIso },
-    );
-    return expired.length;
+    for (const row of activeRows) {
+      const signal = mapRiskSignalRow(row);
+      if (isSignalExpired(signal, nowIso)) {
+        await this.db.command(
+          "sql",
+          `UPDATE RiskSignal SET active = :active, lifecycle = :lifecycle, resolvedAt = :resolvedAt
+           WHERE signalId = :signalId`,
+          {
+            signalId: signal.signalId,
+            active: false,
+            lifecycle: "RESOLVED",
+            resolvedAt: nowIso,
+          },
+        );
+        resolvedCount++;
+      } else if (
+        !Number.isNaN(nowMs) &&
+        shouldActivatePlannedSignal(signal, nowMs)
+      ) {
+        await this.db.command(
+          "sql",
+          `UPDATE RiskSignal SET lifecycle = :lifecycle
+           WHERE signalId = :signalId`,
+          {
+            signalId: signal.signalId,
+            lifecycle: "ACTIVE",
+          },
+        );
+      }
+    }
+
+    return resolvedCount;
   }
 }
 
@@ -258,15 +331,10 @@ export class InMemoryRiskSignalRepository implements RiskSignalRepository {
 
   async upsertSignal(incoming: RiskSignal): Promise<UpsertSignalResult> {
     const parsed = RiskSignalSchema.parse(incoming);
-    let existing = this.signals.get(parsed.signalId);
-    if (!existing && parsed.dedupeKey) {
-      for (const candidate of this.signals.values()) {
-        if (candidate.dedupeKey === parsed.dedupeKey) {
-          existing = candidate;
-          break;
-        }
-      }
-    }
+    const existing = findMatchingSignal(
+      Array.from(this.signals.values()),
+      parsed,
+    );
 
     if (existing) {
       const merged = RiskSignalSchema.parse(mergeRiskSignals(existing, parsed));
@@ -282,11 +350,9 @@ export class InMemoryRiskSignalRepository implements RiskSignalRepository {
     let count = 0;
     const nowMs = Date.parse(nowIso);
     for (const [id, signal] of this.signals.entries()) {
-      if (
-        signal.active &&
-        signal.expiresAt &&
-        Date.parse(signal.expiresAt) <= nowMs
-      ) {
+      if (!signal.active) continue;
+
+      if (isSignalExpired(signal, nowIso)) {
         this.signals.set(id, {
           ...signal,
           active: false,
@@ -294,6 +360,14 @@ export class InMemoryRiskSignalRepository implements RiskSignalRepository {
           resolvedAt: nowIso,
         });
         count++;
+      } else if (
+        !Number.isNaN(nowMs) &&
+        shouldActivatePlannedSignal(signal, nowMs)
+      ) {
+        this.signals.set(id, {
+          ...signal,
+          lifecycle: "ACTIVE",
+        });
       }
     }
     return count;
