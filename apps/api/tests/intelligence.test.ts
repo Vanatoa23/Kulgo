@@ -6,6 +6,7 @@ import { InMemoryRiskSignalRepository } from "../src/analytics/risk-signals.js";
 import { createTestApp } from "../src/app.js";
 import { InMemoryAlertRepository } from "../src/intelligence/alert-repository.js";
 import {
+  areSignalsSameEvent,
   computeCanonicalDedupeKey,
   extractSourceDomain,
   trigramJaccardSimilarity,
@@ -267,7 +268,7 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
     const subdomainReport = {
       ...classified.signals[0]!,
       signalId: "sig-s2-reuters-uk",
-      title: "Hamburg port strike enters afternoon with vessels queued",
+      title: "Port of Hamburg 48-hour Dockworker Strike enters afternoon",
       evidenceQuotes: ["Vessels anchored off Elbe estuary as union talks stall"],
       sourceUrls: ["https://uk.reuters.com/world/hamburg-strike-update"],
     };
@@ -479,7 +480,7 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
                 evidenceQuote: "Hamburg container terminals remain closed on Monday",
                 kind: "LABOR_INDUSTRIAL",
                 severity: "RED",
-                title: "Hamburg Container Terminals Shut Down on Day Two",
+                title: "Port of Hamburg Dockworker Strike Continues on Day Two",
                 affectedCountryCodes: ["DE"],
                 affectedChokepoints: [],
               };
@@ -772,3 +773,18 @@ describe("/api/v1/alerts HTTP routes", () => {
     expect(sweepRes.status).toBe(200);
   });
 });
+
+
+describe("structured event identity", () => {
+  it("keeps separate confirmed weather alerts and their polygons", async () => {
+    const repo = new InMemoryRiskSignalRepository([]);
+    const base = parseMeteoAlarmAtomXml(`<feed><entry><id>wind-1</id><title>Wind (EE — Harju)</title><cap:event>Wind</cap:event><cap:severity>Severe</cap:severity><cap:areaDesc>Harju</cap:areaDesc><cap:sent>2026-11-21T06:00:00Z</cap:sent><cap:polygon>59,24 59,25 60,25 59,24</cap:polygon></entry></feed>`, "EE", "2026-11-21T08:00:00Z")[0]!;
+    const wind = { ...base, signalId: "wind", dedupeKey: "wind-key", title: "Wind (EE — Harju)", verificationStatus: "CONFIRMED" as const };
+    const flood = { ...wind, signalId: "flood", dedupeKey: "flood-key", title: "Flood (EE — Harju)", polygonWkt: "POLYGON ((25 59, 26 59, 26 60, 25 59))" };
+    expect(areSignalsSameEvent(wind, flood)).toBe(false);
+    expect((await repo.upsertSignal(wind)).created).toBe(true);
+    expect((await repo.upsertSignal(flood)).created).toBe(true);
+    expect((await repo.listActive()).map(s => s.polygonWkt)).toEqual([wind.polygonWkt, flood.polygonWkt]);
+  });
+});
+

@@ -5,7 +5,7 @@ const EVENT_MERGE_WINDOW_MS = 7 * 86_400_000;
 const SYNDICATION_TITLE_THRESHOLD = 0.8;
 const SYNDICATION_QUOTE_THRESHOLD = 0.78;
 const SYNDICATION_DESCRIPTION_THRESHOLD = 0.85;
-const TOPIC_TITLE_SIMILARITY_THRESHOLD = 0.35;
+const TOPIC_TITLE_SIMILARITY_THRESHOLD = 0.75;
 
 const MULTI_PART_PUBLIC_SUFFIXES = new Set([
   "co.uk",
@@ -318,15 +318,10 @@ function tokensShareDistinctiveEntity(
   tokensA: ReadonlySet<string>,
   tokensB: ReadonlySet<string>,
 ): boolean {
-  for (const a of tokensA) {
-    if (tokensB.has(a)) return true;
-    if (a.length >= 5) {
-      for (const b of tokensB) {
-        if (b.length >= 5 && (a.startsWith(b) || b.startsWith(a))) {
-          return true;
-        }
-      }
-    }
+  // A single shared place or generic event word is not evidence of identity.
+  let shared = 0;
+  for (const token of tokensA) {
+    if (tokensB.has(token) && ++shared >= 2) return true;
   }
   return false;
 }
@@ -456,6 +451,16 @@ export function areSignalsSameEvent(
     incoming.verificationStatus === "CONFIRMED"
   ) {
     return true;
+  }
+
+  // Distinct confirmed feed records have authoritative identities. Fuzzy title
+  // matching must never collapse their independent geographic coverage.
+  if (
+    existing.verificationStatus === "CONFIRMED" &&
+    incoming.verificationStatus === "CONFIRMED" &&
+    !sameDedupeKey
+  ) {
+    return false;
   }
 
   if (!isWithinEventMergeWindow(existing, incoming)) {
@@ -740,3 +745,4 @@ export function trigramJaccardSimilarity(a: string, b: string): number {
   const union = setA.size + setB.size - intersection;
   return union === 0 ? 0 : intersection / union;
 }
+
