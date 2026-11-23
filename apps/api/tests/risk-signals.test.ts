@@ -83,4 +83,25 @@ describe("database risk signals", () => {
     expect(email.sent).toEqual([]);
     expect(fetchFn).not.toHaveBeenCalled();
   });
+
+  it("keeps future planned and ongoing signals active in ArcadeDB past feed staleness TTL until eventEndAt", async () => {
+    const repo = new ArcadeDbRiskSignalRepository(database());
+    await repo.upsertSignal({
+      ...DEMO_RISK_SIGNALS[0]!,
+      signalId: "planned-strike-db",
+      lifecycle: "PLANNED",
+      eventStartAt: "2026-01-10T00:00:00Z",
+      eventEndAt: "2026-01-14T00:00:00Z",
+      expiresAt: "2026-01-07T00:00:00Z",
+    });
+
+    expect(await repo.resolveExpired("2026-01-08T00:00:00Z")).toBe(0);
+    expect((await repo.listActive())[0]?.lifecycle).toBe("PLANNED");
+
+    expect(await repo.resolveExpired("2026-01-11T00:00:00Z")).toBe(0);
+    expect((await repo.listActive())[0]?.lifecycle).toBe("ACTIVE");
+
+    expect(await repo.resolveExpired("2026-01-15T00:00:00Z")).toBe(1);
+    expect(await repo.listActive()).toEqual([]);
+  });
 });
