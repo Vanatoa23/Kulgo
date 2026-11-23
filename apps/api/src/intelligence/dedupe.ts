@@ -148,10 +148,11 @@ export function mergeRiskSignals(
   };
 }
 
-function buildTrigrams(text: string): Set<string> {
+export function buildTrigrams(text: string): Set<string> {
   const normalized = text
+    .normalize("NFKC")
     .toLowerCase()
-    .replace(/[^a-z0-9\s]/g, " ")
+    .replace(/[^\p{L}\p{N}\s]/gu, " ")
     .replace(/\s+/g, " ")
     .trim();
   const trigrams = new Set<string>();

@@ -101,10 +101,19 @@ export function normalizeEmail(email: string): string {
   return email.trim().toLowerCase();
 }
 
-function buildOrgSlug(name: string): string {
-  const base = name
+export function buildOrgSlug(name: string): string {
+  const transliterated = name
     .trim()
     .toLowerCase()
+    .replace(/ß/g, "ss")
+    .replace(/æ/g, "ae")
+    .replace(/œ/g, "oe")
+    .replace(/ø/g, "o")
+    .replace(/ł/g, "l")
+    .replace(/đ/g, "d")
+    .normalize("NFKD")
+    .replace(/\p{M}/gu, "");
+  const base = transliterated
     .replace(/[^a-z0-9]+/g, "-")
     .replace(/^-+|-+$/g, "")
     .slice(0, 64);

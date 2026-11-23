@@ -39,8 +39,138 @@ export const Stage2ExtractionBatchSchema = z.object({
   signals: z.array(ExtractedSignalItemSchema),
 });
 
-const DISRUPTION_KEYWORD_PATTERN =
-  /\b(strike|walkout|blockade|port|ports|canal|sanction|sanctions|embargo|tariff|tariffs|ransomware|cyberattack|bankruptcy|insolvency|outage|shutdown|flood|floods|storm|rail|customs|border|streik|lakko|grève|strajk)\b/i;
+export const DISRUPTION_KEYWORD_PATTERN = new RegExp(
+  [
+    // Prefix boundary (start of string or non-letter/number) + stem/prefix keywords
+    "(?:^|[^\\p{L}\\p{N}])(?:" +
+      [
+        // English
+        "strike",
+        "walkout",
+        "blockade",
+        "port",
+        "ports",
+        "canal",
+        "sanction",
+        "sanctions",
+        "embargo",
+        "tariff",
+        "tariffs",
+        "ransomware",
+        "cyberattack",
+        "bankruptcy",
+        "insolvency",
+        "outage",
+        "shutdown",
+        "flood",
+        "floods",
+        "storm",
+        "rail",
+        "customs",
+        "border",
+        // Estonian (EE)
+        "tööseisak",
+        "streik",
+        "streig",
+        "pankrot",
+        "tarneraskus",
+        "tarnehäir",
+        "katkestus",
+        "elektrikatkestus",
+        "sadam",
+        "torm",
+        "üleujutus",
+        "küberrünnak",
+        "sanktsioon",
+        "blokaad",
+        "piiripunkt",
+        "raudtee",
+        // Finnish (FI)
+        "lakko",
+        "satamalakko",
+        "työnseisaus",
+        "konkurssi",
+        "toimitushäiriö",
+        "sähkökatko",
+        "tulva",
+        "myrsky",
+        "kyberhyökkäys",
+        "pakote",
+        "pakotteet",
+        "satama",
+        // Swedish (SE)
+        "strejk",
+        "hamnstrejk",
+        "konkurs",
+        "leveransstörning",
+        "strömavbrott",
+        "driftstopp",
+        "översvämning",
+        "cyberattack",
+        "blockad",
+        // Latvian (LV)
+        "streiks",
+        "streik",
+        "bankrots",
+        "bankrot",
+        "plūdi",
+        "vētra",
+        "osta",
+        "ostas",
+        "sankcijas",
+        "kiberuzbrukums",
+        "pārtraukums",
+        "dzelzceļ",
+        // Lithuanian (LT)
+        "streikas",
+        "bankrotas",
+        "uostas",
+        "uosto",
+        "potvynis",
+        "audra",
+        "sankcijos",
+        "kibernetin",
+        "sutrikim",
+        "geležinkel",
+        // German (DE)
+        "warnstreik",
+        "hafenstreik",
+        "insolvenz",
+        "lieferengpass",
+        "lieferstopp",
+        "stromausfall",
+        "betriebsausfall",
+        "überschwemmung",
+        "hochwasser",
+        "sturmflut",
+        "cyberangriff",
+        "hafen",
+        "zoll",
+        // French (FR)
+        "grève",
+        "greve",
+        "faillite",
+        "inondation",
+        "tempête",
+        "cyberattaque",
+        "pénurie",
+        "douane",
+        // Polish (PL)
+        "strajk",
+        "upadłość",
+        "bankructwo",
+        "powódź",
+        "awaria",
+        "przestój",
+        "sankcje",
+        "cyberatak",
+      ].join("|") +
+      ")",
+    // Compound-word suffixes (e.g. satamalakko, tööseisak, hafenstreik, hamnstrejk, tarneraskused, elektrikatkestus)
+    "(?:tööseisak|streik|pankrot|tarneraskus|katkestus|üleujutus|lakko|konkurssi|strejk|konkurs|insolvenz|ausfall|hochwasser)",
+  ].join("|"),
+  "iu",
+);
 
 /**
  * Zero-token pre-filter:
@@ -52,6 +182,7 @@ export function preFilterUnstructuredItems(
   items: readonly UnstructuredFeedItem[],
   seenUrls: ReadonlySet<string> = new Set(),
   recentTitles: readonly string[] = [],
+  changedUrls: ReadonlySet<string> = new Set(),
 ): UnstructuredFeedItem[] {
   const accepted: UnstructuredFeedItem[] = [];
   const acceptedTitles = [...recentTitles];
@@ -60,7 +191,7 @@ export function preFilterUnstructuredItems(
   for (const item of items) {
     if (localUrls.has(item.sourceUrl)) continue;
 
-    const haystack = `${item.title} ${item.summary}`;
+    const haystack = `${item.title} ${item.summary}`.normalize("NFKC");
     if (!DISRUPTION_KEYWORD_PATTERN.test(haystack)) {
       continue;
     }
@@ -68,7 +199,7 @@ export function preFilterUnstructuredItems(
     const isNearDuplicate = acceptedTitles.some(
       (existing) => trigramJaccardSimilarity(existing, item.title) >= 0.75,
     );
-    if (isNearDuplicate) continue;
+    if (isNearDuplicate && !changedUrls.has(item.sourceUrl)) continue;
 
     localUrls.add(item.sourceUrl);
     acceptedTitles.push(item.title);
@@ -189,3 +320,4 @@ export async function classifyUnstructuredItems(
     errors,
   };
 }
+
