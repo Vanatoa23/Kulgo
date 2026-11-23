@@ -52,6 +52,7 @@ flowchart TD
    - `docs/research/FINANCIAL_RISK_METHODOLOGY.md` (Sub-Project 2 — includes Contract derivation, pro-rata period overlap, renewal cliff -> TTS/TTR rules, and partial-coverage HHI)
    - `docs/research/ESG_FACTOR_MATRIX_AND_COMPLIANCE.md` (Sub-Project 3 — includes GHG Protocol Category 1 PCF & economic intensity attribution)
    - `docs/research/LIVE_DISRUPTION_FEEDS_AND_ARCHITECTURE.md` (Sub-Project 1)
+   - `docs/research/AI_ORCHESTRATION_AND_KNOWLEDGE_SYNTHESIS.md` (Synthesis of Issues #61–#64, UTF-8/Multilingual Intelligence Hardening #65–#68 & Internal Model Training Data Vault #69)
    - `docs/research/BUSINESS_REGISTRY_AND_CATALOGUE_TAXONOMY.md` (Sub-Project 5)
 
 #### Wave 2 — Core Quantitative Engines (Pure `@kulgo/engine` + Dashboard Tabs)
