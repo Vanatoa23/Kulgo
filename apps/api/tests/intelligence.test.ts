@@ -1,3 +1,7 @@
+import { IntelligenceRunner } from "../src/intelligence/runner.js";
+import { InMemoryInvitationRepository } from "../src/invites/repository.js";
+import { InMemoryWorkspaceRepository } from "../src/workspace/repository.js";
+import { buildOrgSlug, InMemoryAuthRepository } from "../src/auth/repository.js";
 import { matchFacilityRiskSignals } from "@kulgo/engine";
 import { RiskSignalSchema } from "@kulgo/shared";
 import { describe, expect, it } from "vitest";
@@ -7,6 +11,7 @@ import { createTestApp } from "../src/app.js";
 import { InMemoryAlertRepository } from "../src/intelligence/alert-repository.js";
 import {
   areSignalsSameEvent,
+  buildTrigrams,
   computeCanonicalDedupeKey,
   extractSourceDomain,
   trigramJaccardSimilarity,
@@ -582,6 +587,175 @@ describe("AI API Centre (LlmRouter) & Stage 2 classification", () => {
     // Day 14: past eventEndAt (Nov 13) -> NOW resolves
     expect(await repo.resolveExpired("2026-11-14T00:00:00Z")).toBe(1);
     expect(await repo.listActive()).toHaveLength(0);
+  });
+  it("preserves UTF-8 diacritics in trigrams, matches multilingual Baltic/EU headlines & compounds, transliterates org slugs, and deduplicates across sweeps", async () => {
+    // 1. UTF-8 / Unicode trigrams preserve Estonian/Nordic characters instead of splitting into spaces
+    const estonianTrigrams = buildTrigrams("Tööseisak Pärnu sadamas");
+    expect(estonianTrigrams.has("töö")).toBe(true);
+    expect(estonianTrigrams.has("öös")).toBe(true);
+    expect(estonianTrigrams.has("pär")).toBe(true);
+
+    // Distinct words with different diacritics should not collapse to identical empty/stripped strings
+    expect(trigramJaccardSimilarity("töö", "tää")).toBe(0);
+    // Composed (NFC) vs decomposed (NFD) Unicode strings normalize identically via NFKC
+    expect(
+      trigramJaccardSimilarity(
+        "Tööseisak Pärnu sadamas".normalize("NFC"),
+        "Tööseisak Pärnu sadamas".normalize("NFD"),
+      ),
+    ).toBe(1);
+
+    // 2. Multilingual Stage 2 pre-filter accepts Estonian, Finnish, Swedish, German, French, Polish, Latvian, Lithuanian headlines & compounds
+    const multilingualBatch = [
+      {
+        title: "Tööseisak ja tarneraskused Pärnu sadamas",
+        summary: "Ulatuslik elektrikatkestus ning torm häirivad laevaliiklust",
+        sourceUrl: "https://err.ee/parnu-sadam-tooseisak",
+        publishedAt: "2026-11-21T06:00:00Z",
+      },
+      {
+        // Near-duplicate Estonian headline with punctuation difference -> dropped by trigram Jaccard
+        title: "Tööseisak ja tarneraskused Pärnu sadamas!",
+        summary: "Kordusuudis",
+        sourceUrl: "https://postimees.ee/parnu-sadam-tooseisak",
+        publishedAt: "2026-11-21T06:05:00Z",
+      },
+      {
+        title: "Satamalakko pysäyttää Vuosaaren konttiliikenteen ja aiheuttaa toimitushäiriöitä",
+        summary: "AKT:n lakko ja alihankkijan konkurssi vaikuttavat vientiin",
+        sourceUrl: "https://yle.fi/vuosaari-satamalakko",
+        publishedAt: "2026-11-21T06:10:00Z",
+      },
+      {
+        title: "Hamnstrejk i Göteborg och plötslig konkurs hos underleverantör",
+        summary: "Omfattande leveransstörningar i Västra Götaland",
+        sourceUrl: "https://svt.se/goteborg-hamnstrejk",
+        publishedAt: "2026-11-21T06:15:00Z",
+      },
+      {
+        title: "Warnstreik und Stromausfall legen Hamburger Hafen lahm",
+        summary: "Zulieferer meldet Insolvenz nach Hochwasser an",
+        sourceUrl: "https://ndr.de/hamburg-warnstreik-hafen",
+        publishedAt: "2026-11-21T06:20:00Z",
+      },
+      {
+        title: "Grève des dockers au port du Havre et faillite d'un transporteur",
+        summary: "Blocage logistique majeur",
+        sourceUrl: "https://lemonde.fr/le-havre-greve",
+        publishedAt: "2026-11-21T06:25:00Z",
+      },
+      {
+        title: "Strajk w porcie Gdańsk oraz upadłość operatora kolejowego",
+        summary: "Poważny przestój w terminalu kontenerowym",
+        sourceUrl: "https://pap.pl/gdansk-strajk-port",
+        publishedAt: "2026-11-21T06:30:00Z",
+      },
+      {
+        title: "Rīgas ostā streiks un spēcīga vētra kavē kravu pārvadājumus",
+        summary: "Loģistikas pārtraukums",
+        sourceUrl: "https://lsm.lv/rigas-osta-streiks",
+        publishedAt: "2026-11-21T06:35:00Z",
+      },
+      {
+        title: "Klaipėdos uoste streikas ir tiekimo sutrikimai dėl audros",
+        summary: "Geležinkelio pervežimai sustabdyti",
+        sourceUrl: "https://lrt.lt/klaipedos-uostas-streikas",
+        publishedAt: "2026-11-21T06:40:00Z",
+      },
+    ];
+
+    const filteredMultilingual = preFilterUnstructuredItems(multilingualBatch);
+    expect(filteredMultilingual).toHaveLength(8);
+    expect(
+      filteredMultilingual.some(
+        (i) => i.sourceUrl === "https://postimees.ee/parnu-sadam-tooseisak",
+      ),
+    ).toBe(false);
+
+    // 3. Diacritic-safe organization slugs
+    expect(buildOrgSlug("Pärnu Tööstus OÜ")).toMatch(
+      /^parnu-toostus-ou-[0-9a-f]{8}$/,
+    );
+    expect(buildOrgSlug("Øresund & Ærø Straßentransport Łódź")).toMatch(
+      /^oresund-aero-strassentransport-lodz-[0-9a-f]{8}$/,
+    );
+
+    // 4. Cross-sweep 72h URL & title deduplication in IntelligenceRunner.runSweep()
+    let llmCallCount = 0;
+    let updated = false;
+    const countingRouter = new LlmRouter([
+      {
+        name: "gemini",
+        model: "gemini-2.5-flash-lite",
+        async completeJson(req) {
+          llmCallCount++;
+          const article = JSON.parse(req.userPrompt)[0];
+          return JSON.stringify({
+            signals: [
+              {
+                articleId: article.articleId,
+                evidenceQuote: article.title,
+                kind: "LABOR_INDUSTRIAL",
+                severity: "RED",
+                title: "Tööseisak ja tarneraskused Pärnu sadamas",
+                description: "Pärnu sadama töö on peatatud.",
+                affectedCountryCodes: ["EE"],
+                affectedChokepoints: ["BALTIC_SEA"],
+                affectedSectors: ["Logistics"],
+                lifecycle: updated ? "RESOLVED" : "ACTIVE",
+                confidence: 0.9,
+              },
+            ],
+          });
+        },
+      },
+    ]);
+
+    const authRepo = new InMemoryAuthRepository();
+    const workspaceRepo = new InMemoryWorkspaceRepository();
+    const riskSignalRepo = new InMemoryRiskSignalRepository([]);
+    const runner = new IntelligenceRunner({
+      authRepo,
+      workspaceRepo,
+      inviteRepo: new InMemoryInvitationRepository({ authRepo, workspaceRepo }),
+      riskSignalRepo,
+      alertRepo: new InMemoryAlertRepository(),
+      llmRouter: countingRouter,
+      fromEmail: "alerts@kulgo.eu",
+      fetchStage1: async () => ({ signals: [], errors: [] }),
+      fetchStage2Raw: async () => [
+        {
+          title: "Tööseisak ja tarneraskused Pärnu sadamas",
+          summary: updated ? "Tööseisak lõppes Pärnu sadamas" : "Ulatuslik tööseisak Pärnu sadamas",
+          sourceUrl: "https://err.ee/parnu-sadam-tooseisak",
+          publishedAt: "2026-11-21T06:00:00Z",
+        },
+        {
+          // Near-duplicate headline from a second URL on subsequent sweep
+          title: "Tööseisak ja tarneraskused Pärnu sadamas!",
+          summary: "Kordusuudis teisest portaalist",
+          sourceUrl: "https://delfi.ee/parnu-sadam-tooseisak",
+          publishedAt: "2026-11-21T12:00:00Z",
+        },
+      ],
+    });
+
+    // 06:00 UTC sweep classifies the new article once
+    const sweep1 = await runner.runSweep({ nowIso: "2026-11-21T06:00:00Z" });
+    expect(sweep1.stage2Classified).toBe(1);
+    expect(sweep1.upsertedNew).toBe(1);
+    expect(llmCallCount).toBe(1);
+
+    // 12:00 UTC sweep sees the active signal's URL & title from 06:00 UTC and skips LLM invocation altogether
+    const sweep2 = await runner.runSweep({ nowIso: "2026-11-21T12:00:00Z" });
+    expect(sweep2.stage2Classified).toBe(0);
+    expect(llmCallCount).toBe(1);
+
+    updated = true;
+    const sweep3 = await runner.runSweep({ nowIso: "2026-11-21T13:00:00Z" });
+    expect(sweep3.stage2Classified).toBe(1);
+    expect(llmCallCount).toBe(2);
+    expect(await riskSignalRepo.listActive()).toHaveLength(0);
   });
 });
 

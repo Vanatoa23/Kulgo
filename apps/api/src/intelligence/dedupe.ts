@@ -710,7 +710,7 @@ export function mergeRiskSignals(
   };
 }
 
-function buildTrigrams(text: string): Set<string> {
+export function buildTrigrams(text: string): Set<string> {
   const normalized = text
     .normalize("NFKC")
     .toLowerCase()
