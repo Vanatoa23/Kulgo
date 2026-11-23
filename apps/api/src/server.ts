@@ -48,6 +48,8 @@ async function startServer() {
       groqApiKey: config.GROQ_API_KEY,
       openaiApiKey: config.OPENAI_API_KEY,
       openrouterApiKey: config.OPENROUTER_API_KEY,
+      maxDailyRequests: config.LLM_MAX_DAILY_REQUESTS,
+      maxDailyTokens: config.LLM_MAX_DAILY_TOKENS,
     }),
     redEmailProvider: config.RESEND_API_KEY
       ? createResendEmailProvider(config.RESEND_API_KEY)
@@ -69,16 +71,24 @@ async function startServer() {
   }, SESSION_CLEANUP_INTERVAL_MS).unref();
 
   if (config.INTELLIGENCE_SWEEP_ENABLED) {
-    startIntelligenceScheduler(async () => {
+    startIntelligenceScheduler(async ({ slotKey }) => {
       const orgRows = await db.query<{ orgId: string }>(
         "sql",
         "SELECT orgId FROM Organization",
       );
       const result = await intelligenceRunner.runSweep({
         orgIds: orgRows.map((r) => r.orgId),
+        leaseKey: slotKey,
+        preventRerunAfterComplete: true,
       });
+      if (result.skipped) {
+        console.log(
+          `[kulgo-intelligence] Sweep skipped for ${slotKey} (lease already active or completed)`,
+        );
+        return;
+      }
       console.log(
-        `[kulgo-intelligence] Sweep complete: new=${result.upsertedNew} merged=${result.upsertedMerged} resolved=${result.resolvedExpired} emails=${result.dispatch.emailsSent} webhooks=${result.dispatch.webhooksSent}`,
+        `[kulgo-intelligence] Sweep complete (${slotKey}): new=${result.upsertedNew} merged=${result.upsertedMerged} resolved=${result.resolvedExpired} emails=${result.dispatch.emailsSent} webhooks=${result.dispatch.webhooksSent}`,
       );
     });
     console.log(

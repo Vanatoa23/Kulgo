@@ -1,4 +1,4 @@
-import { createHmac } from "node:crypto";
+import { createHash, createHmac } from "node:crypto";
 import type {
   AnonymizedPartnerRegionAlert,
   FacilitySignalMatch,
@@ -17,6 +17,7 @@ export interface OutboundEmailMessage {
   subject: string;
   text: string;
   html: string;
+  idempotencyKey?: string;
 }
 
 export interface EmailProvider {
@@ -36,6 +37,7 @@ export function createResendEmailProvider(
         headers: {
           "Content-Type": "application/json",
           Authorization: `Bearer ${apiKey}`,
+          ...(message.idempotencyKey ? { "Idempotency-Key": message.idempotencyKey } : {}),
         },
         body: JSON.stringify({
           from: message.from,
@@ -196,18 +198,20 @@ export async function dispatchInstantRedAlerts(
       matchedChokepoints: a.matchedChokepoints,
     }));
 
-    // 1. Instant RED Email
+    // 1. Instant RED Email (atomic outbox claim before provider call)
     if (
       storedPref.preference.instantRedEmailEnabled &&
       storedPref.preference.emailRecipients.length > 0 &&
       deps.redEmailProvider
     ) {
-      const alreadySent = await deps.alertRepo.hasDelivered(
+      const claimed = await deps.alertRepo.claimDelivery({
         orgId,
-        signal.signalId,
-        "EMAIL_RED",
-      );
-      if (alreadySent) {
+        signalId: signal.signalId,
+        channel: "EMAIL_RED",
+        provider: deps.redEmailProvider.name,
+        claimedAt: nowIso,
+      });
+      if (!claimed) {
         summary.skippedDuplicate++;
       } else {
         const subject = `[Kulgo RED Alert] ${signal.title}`;
@@ -232,6 +236,7 @@ export async function dispatchInstantRedAlerts(
 
         try {
           await deps.redEmailProvider.send({
+            idempotencyKey: createHash("sha256").update(JSON.stringify([orgId, signal.signalId, "EMAIL_RED"])).digest("hex"),
             from: deps.fromEmail,
             to: storedPref.preference.emailRecipients,
             subject,
@@ -246,6 +251,7 @@ export async function dispatchInstantRedAlerts(
             provider: deps.redEmailProvider.name,
             errorMessage: null,
             deliveredAt: nowIso,
+            claimTimestamp: nowIso,
           });
           summary.emailsSent++;
         } catch (err) {
@@ -257,19 +263,22 @@ export async function dispatchInstantRedAlerts(
             provider: deps.redEmailProvider.name,
             errorMessage: err instanceof Error ? err.message : String(err),
             deliveredAt: nowIso,
+            claimTimestamp: nowIso,
           });
         }
       }
     }
 
-    // 2. Signed Webhook
+    // 2. Signed Webhook (atomic outbox claim before network call)
     if (storedPref.preference.webhookUrl) {
-      const alreadySent = await deps.alertRepo.hasDelivered(
+      const claimed = await deps.alertRepo.claimDelivery({
         orgId,
-        signal.signalId,
-        "WEBHOOK",
-      );
-      if (alreadySent) {
+        signalId: signal.signalId,
+        channel: "WEBHOOK",
+        provider: "webhook",
+        claimedAt: nowIso,
+      });
+      if (!claimed) {
         summary.skippedDuplicate++;
       } else {
         const payloadObj: WebhookAlertPayload = {
@@ -291,6 +300,7 @@ export async function dispatchInstantRedAlerts(
         const headers: Record<string, string> = {
           "Content-Type": "application/json",
           "X-Kulgo-Event": "kulgo.risk_signal.red",
+          "Idempotency-Key": createHash("sha256").update(JSON.stringify([orgId, signal.signalId, "WEBHOOK"])).digest("hex"),
         };
         if (storedPref.webhookSecret) {
           headers["X-Kulgo-Signature-256"] = signWebhookPayload(
@@ -315,6 +325,7 @@ export async function dispatchInstantRedAlerts(
             provider: "webhook",
             errorMessage: null,
             deliveredAt: nowIso,
+            claimTimestamp: nowIso,
           });
           summary.webhooksSent++;
         } catch (err) {
@@ -327,6 +338,7 @@ export async function dispatchInstantRedAlerts(
             provider: "webhook",
             errorMessage: rawMessage.slice(0, 500),
             deliveredAt: nowIso,
+            claimTimestamp: nowIso,
           });
         }
       }

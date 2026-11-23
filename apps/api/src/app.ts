@@ -114,6 +114,8 @@ export function createApp({
       groqApiKey: config.GROQ_API_KEY,
       openaiApiKey: config.OPENAI_API_KEY,
       openrouterApiKey: config.OPENROUTER_API_KEY,
+      maxDailyRequests: config.LLM_MAX_DAILY_REQUESTS,
+      maxDailyTokens: config.LLM_MAX_DAILY_TOKENS,
     }),
     redEmailProvider: config.RESEND_API_KEY
       ? createResendEmailProvider(config.RESEND_API_KEY)
