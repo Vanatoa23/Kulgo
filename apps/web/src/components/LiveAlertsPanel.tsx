@@ -300,7 +300,7 @@ export function LiveAlertsPanel({
                         void onAcknowledge(
                           signal.signalId,
                           "ACKNOWLEDGED",
-                          reasonBySignal[signal.signalId] || null,
+                          (reasonBySignal[signal.signalId] ?? ackBySignalId.get(signal.signalId)?.reason) || null,
                         )
                       }
                       className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-medium transition ${
@@ -318,7 +318,7 @@ export function LiveAlertsPanel({
                         void onAcknowledge(
                           signal.signalId,
                           "MUTED",
-                          reasonBySignal[signal.signalId] || null,
+                          (reasonBySignal[signal.signalId] ?? ackBySignalId.get(signal.signalId)?.reason) || null,
                         )
                       }
                       className={`inline-flex items-center gap-1 rounded-md border px-2 py-0.5 text-[10px] font-medium transition ${
