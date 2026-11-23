@@ -6,38 +6,47 @@ import {
   RiskSignalSchema,
   RiskStatusSchema,
   type RiskSignal,
+  type RiskSignalLifecycle,
 } from "@kulgo/shared";
 import { z } from "zod";
 import {
+  buildEventDiscriminator,
   computeCanonicalDedupeKey,
   trigramJaccardSimilarity,
 } from "../dedupe.js";
 import type { LlmRouter } from "../llm-router.js";
 
 export interface UnstructuredFeedItem {
+  articleId?: string;
   title: string;
   summary: string;
   sourceUrl: string;
   publishedAt: string;
 }
 
-const ExtractedSignalItemSchema = z.object({
-  kind: RiskSignalKindSchema,
-  severity: RiskStatusSchema,
-  title: z.string().min(1).max(200),
-  description: z.string().max(1000).nullable().default(null),
-  affectedCountryCodes: z.array(z.string().length(2)).default([]),
-  affectedChokepoints: z.array(ChokepointCodeSchema).default([]),
-  affectedSectors: z.array(z.string().max(100)).default([]),
-  lifecycle: RiskSignalLifecycleSchema.default("ACTIVE"),
-  sourceUrl: z.string().url(),
-  publishedAt: z.string().datetime().nullable().default(null),
-  confidence: z.number().min(0).max(1).default(0.7),
-});
+export const ExtractedSignalItemSchema = z
+  .object({
+    articleId: z.string().trim().min(1).max(64),
+    evidenceQuote: z.string().trim().min(6).max(400),
+    kind: RiskSignalKindSchema,
+    severity: RiskStatusSchema,
+    title: z.string().min(1).max(200),
+    description: z.string().max(1000).nullable().default(null),
+    affectedCountryCodes: z.array(z.string().length(2)).default([]),
+    affectedChokepoints: z.array(ChokepointCodeSchema).default([]),
+    affectedSectors: z.array(z.string().max(100)).default([]),
+    lifecycle: RiskSignalLifecycleSchema.default("ACTIVE"),
+    eventStartAt: z.string().datetime().nullable().optional().default(null),
+    eventEndAt: z.string().datetime().nullable().optional().default(null),
+    confidence: z.number().min(0).max(1).default(0.7),
+  })
+  .strict();
 
-export const Stage2ExtractionBatchSchema = z.object({
-  signals: z.array(ExtractedSignalItemSchema),
-});
+export const Stage2ExtractionBatchSchema = z
+  .object({
+    signals: z.array(ExtractedSignalItemSchema),
+  })
+  .strict();
 
 export const DISRUPTION_KEYWORD_PATTERN = new RegExp(
   [
@@ -212,26 +221,82 @@ export function preFilterUnstructuredItems(
 const STAGE2_SYSTEM_PROMPT = `You are Kulgo's Supply Chain Disruption Intelligence classifier.
 Extract ONLY real, operational supply-chain disruptions (sanctions, maritime chokepoints, port congestion, extreme weather, labor strikes, factory/grid outages, logistics cyberattacks, or corporate insolvencies).
 Ignore routine market commentary, opinion pieces, or unrelated news.
-Return strict JSON matching: { "signals": [ { "kind", "severity", "title", "description", "affectedCountryCodes", "affectedChokepoints", "affectedSectors", "lifecycle", "sourceUrl", "publishedAt", "confidence" } ] }.
+Each input article includes an explicit "articleId".
+For every extracted disruption, you MUST return the matching "articleId" and a verbatim "evidenceQuote" substring copied directly from that input article's title or summary.
+Do NOT invent or return "sourceUrl", "publishedAt", or any extra fields.
+Return strict JSON matching: { "signals": [ { "articleId", "evidenceQuote", "kind", "severity", "title", "description", "affectedCountryCodes", "affectedChokepoints", "affectedSectors", "lifecycle", "eventStartAt", "eventEndAt", "confidence" } ] }.
 Valid kind: SANCTIONS | GEOPOLITICAL | MARITIME_CHOKEPOINT | PORT_CONGESTION | CLIMATE | LABOR_INDUSTRIAL | CYBER_FINANCIAL.
 Valid severity: GREEN | YELLOW | RED.
-Valid lifecycle: PLANNED | ACTIVE | RESOLVED.`;
+Valid lifecycle: PLANNED | ACTIVE | RESOLVED.
+Set eventStartAt / eventEndAt to ISO-8601 UTC datetimes only when the article states when the disruption starts or ends; otherwise null.`;
 
-function resolveFallbackPolygonWkt(
+function normalizeForQuoteMatch(text: string): string {
+  return text.normalize("NFKC").replace(/\s+/g, " ").trim().toLowerCase();
+}
+
+/**
+ * Verifies that an LLM-returned evidenceQuote appears verbatim (modulo
+ * Unicode NFKC & whitespace normalization) in the matched input article.
+ */
+export function isVerbatimEvidenceQuote(
+  quote: string,
+  article: Pick<UnstructuredFeedItem, "title" | "summary">,
+): boolean {
+  const normalizedQuote = normalizeForQuoteMatch(quote);
+  if (normalizedQuote.length < 6) {
+    return false;
+  }
+  const normalizedTitle = normalizeForQuoteMatch(article.title);
+  const normalizedSummary = normalizeForQuoteMatch(article.summary);
+  const combined = `${normalizedTitle} ${normalizedSummary}`.trim();
+  return (
+    normalizedTitle.includes(normalizedQuote) ||
+    normalizedSummary.includes(normalizedQuote) ||
+    combined.includes(normalizedQuote)
+  );
+}
+
+function resolveSignalPolygonWkt(
   chokepoints: readonly (keyof typeof CHOKEPOINT_REGISTRY)[],
 ): string {
   const first = chokepoints[0];
   if (first && CHOKEPOINT_REGISTRY[first]) {
     return CHOKEPOINT_REGISTRY[first].polygonWkt;
   }
-  // Coarse EU/Baltic fallback polygon when an unstructured article only specifies country/sector
-  return "POLYGON ((10.0 46.0, 29.0 46.0, 29.0 60.5, 10.0 60.5, 10.0 46.0))";
+  // Keep country/sector-only signals free of fabricated continental polygons so
+  // Layer 1 matches them strictly at the COUNTRY / REGION / SECTOR level.
+  return "POLYGON EMPTY";
+}
+
+function resolveLifecycleFromEventWindow(
+  extractedLifecycle: RiskSignalLifecycle,
+  eventStartAt: string | null,
+  eventEndAt: string | null,
+  nowMs: number,
+): RiskSignalLifecycle {
+  if (extractedLifecycle === "RESOLVED") {
+    return "RESOLVED";
+  }
+  if (eventEndAt) {
+    const endMs = Date.parse(eventEndAt);
+    if (!Number.isNaN(endMs) && endMs <= nowMs) {
+      return "RESOLVED";
+    }
+  }
+  if (eventStartAt) {
+    const startMs = Date.parse(eventStartAt);
+    if (!Number.isNaN(startMs) && startMs > nowMs) {
+      return "PLANNED";
+    }
+  }
+  return extractedLifecycle;
 }
 
 /**
  * Classifies pre-filtered unstructured feed items in batches of 10-15 via the
  * AI API Centre (`LlmRouter`). Single-source unstructured detections are marked
- * `ALLEGED` until corroborated by a second independent source domain on merge.
+ * `ALLEGED` until corroborated by a second independent non-syndicated source
+ * domain on merge.
  */
 export async function classifyUnstructuredItems(
   items: readonly UnstructuredFeedItem[],
@@ -247,9 +312,35 @@ export async function classifyUnstructuredItems(
     return { signals, providersUsed: [], errors };
   }
 
+  const nowMs = Date.parse(nowIso);
+
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize);
-    const userPrompt = JSON.stringify(batch);
+    const articleById = new Map<string, UnstructuredFeedItem>();
+    const promptBatch: Array<{
+      articleId: string;
+      title: string;
+      summary: string;
+      publishedAt: string;
+    }> = [];
+
+    for (let idx = 0; idx < batch.length; idx++) {
+      const article = batch[idx]!;
+      const preferredId = article.articleId?.trim();
+      const articleId =
+        preferredId && !articleById.has(preferredId)
+          ? preferredId
+          : `art-${i + idx + 1}`;
+      articleById.set(articleId, article);
+      promptBatch.push({
+        articleId,
+        title: article.title,
+        summary: article.summary,
+        publishedAt: article.publishedAt,
+      });
+    }
+
+    const userPrompt = JSON.stringify(promptBatch);
 
     try {
       const result = await llmRouter.generateStructured(
@@ -262,19 +353,51 @@ export async function classifyUnstructuredItems(
       providersUsed.add(`${result.provider}:${result.model}`);
 
       for (const item of result.data.signals) {
+        const matchedArticle = articleById.get(item.articleId);
+        if (!matchedArticle) {
+          errors.push(
+            `Stage2 batch ${i}: rejected extraction with unknown articleId "${item.articleId}"`,
+          );
+          continue;
+        }
+        if (!isVerbatimEvidenceQuote(item.evidenceQuote, matchedArticle)) {
+          errors.push(
+            `Stage2 batch ${i}: rejected extraction for "${item.articleId}" with non-verbatim evidenceQuote`,
+          );
+          continue;
+        }
         if (item.severity === "GREEN") continue;
-        const publishedAt = item.publishedAt ?? nowIso;
+
+        const parsedPublishedMs = Date.parse(matchedArticle.publishedAt);
+        const publishedAt = !Number.isNaN(parsedPublishedMs)
+          ? new Date(parsedPublishedMs).toISOString()
+          : nowIso;
+        const eventStartAt = item.eventStartAt ?? null;
+        const eventEndAt = item.eventEndAt ?? null;
+        const lifecycle = resolveLifecycleFromEventWindow(
+          item.lifecycle,
+          eventStartAt,
+          eventEndAt,
+          nowMs,
+        );
+
         const canonicalLocation =
           item.affectedChokepoints[0] ??
-          item.affectedCountryCodes[0] ??
+          item.affectedCountryCodes[0]?.toUpperCase() ??
           item.title.slice(0, 40);
+        const eventDiscriminator = buildEventDiscriminator(item.title);
         const dedupeKey = computeCanonicalDedupeKey(
           item.kind,
           canonicalLocation,
           publishedAt,
+          eventDiscriminator,
         );
+
+        const startMs = eventStartAt ? Date.parse(eventStartAt) : Number.NaN;
+        const stalenessAnchorMs =
+          !Number.isNaN(startMs) && startMs > nowMs ? startMs : nowMs;
         const expiresAt = new Date(
-          Date.parse(nowIso) + 7 * 86_400_000,
+          stalenessAnchorMs + 7 * 86_400_000,
         ).toISOString();
 
         signals.push(
@@ -286,24 +409,27 @@ export async function classifyUnstructuredItems(
             description: item.description,
             regionCode:
               item.affectedChokepoints[0] ??
-              item.affectedCountryCodes[0] ??
+              item.affectedCountryCodes[0]?.toUpperCase() ??
               null,
             affectedCountryCodes: item.affectedCountryCodes.map((c) =>
               c.toUpperCase(),
             ),
             affectedChokepoints: item.affectedChokepoints,
             affectedSectors: item.affectedSectors,
-            polygonWkt: resolveFallbackPolygonWkt(item.affectedChokepoints),
-            sourceUrls: [item.sourceUrl],
+            polygonWkt: resolveSignalPolygonWkt(item.affectedChokepoints),
+            sourceUrls: [matchedArticle.sourceUrl],
+            evidenceQuotes: [item.evidenceQuote.trim()],
             publishedAt,
             lastSeenAt: nowIso,
+            eventStartAt,
+            eventEndAt,
             expiresAt,
-            resolvedAt: null,
+            resolvedAt: lifecycle === "RESOLVED" ? (eventEndAt ?? nowIso) : null,
             dedupeKey,
             confidence: item.confidence,
             verificationStatus: "ALLEGED",
-            lifecycle: item.lifecycle,
-            active: item.lifecycle !== "RESOLVED",
+            lifecycle,
+            active: lifecycle !== "RESOLVED",
           }),
         );
       }

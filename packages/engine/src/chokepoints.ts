@@ -271,12 +271,47 @@ export function inferLaneChokepoints(
   return Array.from(tags);
 }
 
+/**
+ * Determines whether a RiskSignal has expired as of `nowIso`, separating the
+ * actual disruption validity window (`eventStartAt` / `eventEndAt`) from the
+ * feed ingestion staleness TTL (`expiresAt`).
+ */
+export function isSignalExpired(signal: RiskSignal, nowIso: string): boolean {
+  const nowMs = Date.parse(nowIso);
+  if (Number.isNaN(nowMs)) {
+    return false;
+  }
+
+  if (signal.eventEndAt) {
+    const eventEndMs = Date.parse(signal.eventEndAt);
+    if (!Number.isNaN(eventEndMs)) {
+      return eventEndMs <= nowMs;
+    }
+  }
+
+  if (signal.eventStartAt) {
+    const eventStartMs = Date.parse(signal.eventStartAt);
+    if (!Number.isNaN(eventStartMs) && eventStartMs > nowMs) {
+      return false;
+    }
+  }
+
+  if (signal.expiresAt) {
+    const expiresMs = Date.parse(signal.expiresAt);
+    if (!Number.isNaN(expiresMs)) {
+      return expiresMs <= nowMs;
+    }
+  }
+
+  return false;
+}
+
 export function isSignalActive(signal: RiskSignal, nowIso?: string): boolean {
   if (!signal.active || signal.lifecycle === "RESOLVED") {
     return false;
   }
-  if (signal.expiresAt && nowIso) {
-    return Date.parse(signal.expiresAt) > Date.parse(nowIso);
+  if (nowIso) {
+    return !isSignalExpired(signal, nowIso);
   }
   return true;
 }
