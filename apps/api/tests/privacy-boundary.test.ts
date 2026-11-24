@@ -1063,11 +1063,12 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(orgBImportRes.status).toBe(200);
 
     // Org B also updates its own org profile
-    await app.request("/api/v1/auth/organization", {
+    const orgBPatchRes = await app.request("/api/v1/auth/organization", {
       method: "PATCH",
       headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
       body: JSON.stringify({ scope1Tco2e: 888, scope2Tco2e: 444 }),
     });
+    expect(orgBPatchRes.status).toBe(200);
 
     // Org A exports its CSRD report (triggers hidden Tier-2+ traversal server-side)
     const reportARes = await app.request("/api/v1/analytics/report", {
@@ -1115,6 +1116,14 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         }
       }
     }
+    
+    // Whole-serialized-response scan for Org B's string secrets (immune to UUID false-positives)
+    const auditAString = JSON.stringify(auditA);
+    expect(auditAString).not.toContain(orgB.orgId);
+    expect(auditAString).not.toContain(secretTier2Name);
+    expect(auditAString).not.toContain("55.7558");
+    expect(auditAString).not.toContain("37.6173");
+    expect(auditAString).not.toContain(inviteToken);
 
     // Fetch Org B's audit log -> strictly scoped to Org B, zero Org A events
     const auditBRes = await app.request("/api/v1/auth/audit-log", {
