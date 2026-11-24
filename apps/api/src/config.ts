@@ -85,6 +85,15 @@ const RawEnvSchema = z.object({
   RESEND_API_KEY: optionalIntegrationKey,
   BREVO_API_KEY: optionalIntegrationKey,
   ALERT_FROM_EMAIL: z.string().email().default("alerts@kulgo.eu"),
+  // --- Company registry snapshots (issue #29) ---
+  // Local Estonian e-Business Register basic-data CSV (CC BY 4.0), untracked.
+  // Relative paths resolve against the process working directory (apps/api
+  // for pnpm dev/test; use an absolute path in containers). See docs/REGISTRY_SNAPSHOTS.md.
+  EE_REGISTRY_SNAPSHOT_PATH: z
+    .string()
+    .trim()
+    .min(1)
+    .default("data/ettevotja_rekvisiidid__lihtandmed.csv"),
 });
 
 const EnvSchema = RawEnvSchema.superRefine((data, ctx) => {

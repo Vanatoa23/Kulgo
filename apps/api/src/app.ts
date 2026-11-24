@@ -52,6 +52,11 @@ import {
   createRequestLogger,
   type RequestLogEntry,
 } from "./middleware/security.js";
+import { createCompanyRegistryRoutes } from "./registry/routes.js";
+import {
+  createEeCompanyRegistrySearchService,
+  type CompanyRegistrySearchService,
+} from "./registry/service.js";
 import {
   ArcadeDbWorkspaceRepository,
   InMemoryWorkspaceRepository,
@@ -69,6 +74,7 @@ export interface AppDependencies {
   directoryRepo?: DirectoryRepository;
   analyticsRepo?: AnalyticsRepository;
   alertRepo?: AlertRepository;
+  registrySearch?: CompanyRegistrySearchService;
   intelligenceRunner?: IntelligenceRunner;
   webhookDnsLookup?: WebhookDnsLookup;
   webhookValidationTimeoutMs?: number;
@@ -101,6 +107,9 @@ export function createApp({
     }),
   }),
   alertRepo = new ArcadeDbAlertRepository(db),
+  registrySearch = createEeCompanyRegistrySearchService(
+    config.EE_REGISTRY_SNAPSHOT_PATH,
+  ),
   webhookDnsLookup,
   webhookValidationTimeoutMs,
   intelligenceRunner = new IntelligenceRunner({
@@ -228,6 +237,10 @@ export function createApp({
     createWorkspaceRoutes({ authRepo, workspaceRepo, riskSignalRepo }),
   );
   app.route(
+    "/api/v1/workspace/company-registry",
+    createCompanyRegistryRoutes({ authRepo, registrySearch }),
+  );
+  app.route(
     "/api/v1/analytics",
     createAnalyticsRoutes({ authRepo, analyticsRepo }),
   );
@@ -265,6 +278,7 @@ export interface CreateTestAppOptions {
   webhookDnsLookup?: WebhookDnsLookup;
   webhookValidationTimeoutMs?: number;
   fetchFn?: typeof fetch;
+  registrySearch?: CompanyRegistrySearchService;
 }
 
 const DEFAULT_TEST_WEBHOOK_DNS_LOOKUP: WebhookDnsLookup = async () => [
@@ -346,6 +360,9 @@ export function createTestApp(
     directoryRepo,
     analyticsRepo,
     alertRepo,
+    registrySearch:
+      options.registrySearch ??
+      createEeCompanyRegistrySearchService(config.EE_REGISTRY_SNAPSHOT_PATH),
     intelligenceRunner,
     webhookDnsLookup,
     webhookValidationTimeoutMs: options.webhookValidationTimeoutMs,

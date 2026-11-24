@@ -26,3 +26,6 @@ coverage/
 test-results/
 playwright-report/
 
+
+# Local company-registry snapshots (public open data, never commit)
+apps/api/data/
