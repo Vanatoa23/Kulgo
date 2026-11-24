@@ -389,6 +389,7 @@ export function App() {
     setLoadingAlerts(false);
     setLoadingAnalytics(false);
     setSweepingAlerts(false);
+    setBusy(false);
   };
 
   const handleAuthenticated = (me: AuthMeResponse) => {
@@ -666,6 +667,12 @@ export function App() {
     try {
       const created = await createRelationshipDeclaration(input);
       if (!sessionTicket.isCurrent()) return false;
+      // Any list GET still in flight predates this write, so its response can
+      // no longer be trusted to describe the list. Supersede its ticket: a
+      // late (stale) success must not drop the just-saved row, and a late
+      // failure must not flip the load status back to "error". The next
+      // loadDeclarations() begins a fresh ticket and re-syncs from the server.
+      declarationsGuard.begin();
       setDeclarations((prev) => [created, ...prev]);
       setDeclarationsLoadStatus("ready");
       return true;
@@ -683,7 +690,10 @@ export function App() {
       setBannerError(message);
       return false;
     } finally {
-      setBusy(false);
+      // Only the session that started the save may clear its busy flag; a
+      // stale save settling after a logout/login must not change the new
+      // session's busy status (resetTenantState clears it on tenant change).
+      if (sessionTicket.isCurrent()) setBusy(false);
     }
   };
 

@@ -84,12 +84,18 @@ export function CompanyDeclarationsSection({
     setDraft((prev) => ({ ...prev, ...patch }));
   };
 
-  // Move focus into the form when it opens; back to the entry action on cancel
-  // or after a successful save so keyboard focus stays predictable.
+  // Move focus into the form when it opens. The Add company button only exists
+  // once the form is closed, so focus is restored to it after the closing
+  // render (cancel or successful save); calling focus() directly in the event
+  // handler would hit a null ref while the button is still unmounted.
+  const formWasOpenRef = useRef(false);
   useEffect(() => {
     if (showForm) {
       nameInputRef.current?.focus();
+    } else if (formWasOpenRef.current) {
+      addButtonRef.current?.focus();
     }
+    formWasOpenRef.current = showForm;
   }, [showForm]);
 
   // Announce and focus form errors after a failed save; the draft stays put.
@@ -107,7 +113,6 @@ export function CompanyDeclarationsSection({
   const handleCancel = () => {
     setShowForm(false);
     setStatusMessage(null);
-    addButtonRef.current?.focus();
   };
 
   const handleSubmit = async (e: FormEvent) => {
@@ -141,7 +146,6 @@ export function CompanyDeclarationsSection({
       setStatusMessage(
         `Saved ${name} as ${roleLabel.toLowerCase()} in your private network.`,
       );
-      addButtonRef.current?.focus();
     } finally {
       setSaving(false);
     }

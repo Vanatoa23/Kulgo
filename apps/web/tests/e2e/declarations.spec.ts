@@ -137,4 +137,122 @@ test.describe("Issue #29 — private company declarations in the Network Hub", (
     await expect(item).toContainText("Supplier");
     await expect(item).toContainText("ops@draft-preserved.example.ee");
   });
+
+  test("keeps the just-saved company visible when a stale list response resolves after the save", async ({
+    page,
+  }) => {
+    const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+
+    // Hold the first declarations list GET (issued right after registration)
+    // until the save has completed, then answer it with the pre-save list.
+    // The POST passes through to the real API, so the save is persisted.
+    let releaseHeldGet: (() => void) | null = null;
+    let heldGet = false;
+    await page.route(
+      "**/api/v1/workspace/relationship-declarations",
+      async (route) => {
+        if (route.request().method() === "GET" && !heldGet) {
+          heldGet = true;
+          await new Promise<void>((resolve) => {
+            releaseHeldGet = resolve;
+          });
+          await route.fulfill({
+            status: 200,
+            contentType: "application/json",
+            body: JSON.stringify({ declarations: [] }),
+          });
+          return;
+        }
+        await route.continue();
+      },
+    );
+
+    await registerWorkspace(
+      page,
+      `decl-race-${suffix}@estonia-mfg.ee`,
+      "Estonia Decl Race OU",
+    );
+
+    const section = page.getByTestId("company-declarations-section");
+    // The list GET is still held in flight; the form can be opened and saved
+    // while it is pending.
+    await section.getByRole("button", { name: "Add company" }).click();
+    await section.getByLabel("Company name").fill("Stale List Survivor SIA");
+    await section.getByRole("button", { name: "Save company" }).click();
+
+    // The save (POST) completes first and the saved row renders.
+    const item = section.getByTestId(/^declaration-item-/).first();
+    await expect(item).toContainText("Stale List Survivor SIA", {
+      timeout: 10_000,
+    });
+    await expect(item).toContainText("Supplier");
+    await expect(item).toContainText("Unconfirmed");
+
+    // Now the stale GET resolves with the pre-save (empty) list: the saved
+    // row must stay and the section must not flip back to loading/error.
+    const staleGet = page.waitForResponse(
+      (resp) =>
+        resp.request().method() === "GET" &&
+        resp.url().includes("/api/v1/workspace/relationship-declarations"),
+    );
+    releaseHeldGet?.();
+    await staleGet;
+    await page.waitForTimeout(500);
+    await expect(section.getByTestId(/^declaration-item-/)).toHaveCount(1);
+    await expect(item).toContainText("Stale List Survivor SIA");
+    await expect(section.getByTestId("declarations-list")).toBeVisible();
+    await expect(section.getByTestId("declarations-loading")).toHaveCount(0);
+    await expect(section.getByTestId("declarations-error")).toHaveCount(0);
+
+    // Reload: the server-backed list still contains the saved declaration.
+    await page.reload();
+    await expect(page.getByText("Estonia Decl Race OU")).toBeVisible({
+      timeout: 15_000,
+    });
+    const reloadedItem = section.getByTestId(/^declaration-item-/).first();
+    await expect(reloadedItem).toContainText("Stale List Survivor SIA", {
+      timeout: 15_000,
+    });
+  });
+
+  test("restores keyboard focus to Add company when the form closes via cancel and via save", async ({
+    page,
+  }) => {
+    const suffix = `${Date.now()}-${Math.floor(Math.random() * 10000)}`;
+    await registerWorkspace(
+      page,
+      `decl-focus-${suffix}@estonia-mfg.ee`,
+      "Estonia Decl Focus OU",
+    );
+
+    const section = page.getByTestId("company-declarations-section");
+    await expect(section.getByTestId("declarations-empty")).toBeVisible({
+      timeout: 15_000,
+    });
+    const addButton = section.getByTestId("add-company-btn");
+
+    // Open the form by keyboard; focus moves into the name field.
+    await addButton.focus();
+    await page.keyboard.press("Enter");
+    await expect(section.getByLabel("Company name")).toBeFocused();
+
+    // Close by keyboard (Cancel): focus returns to the Add company button.
+    await section.getByRole("button", { name: "Cancel" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(addButton).toBeFocused();
+
+    // Re-open by keyboard and save by keyboard: focus returns again.
+    await page.keyboard.press("Enter");
+    await expect(section.getByLabel("Company name")).toBeFocused();
+    await section.getByLabel("Company name").fill("Keyboard Focus Oy");
+    await section.getByRole("button", { name: "Save company" }).focus();
+    await page.keyboard.press("Enter");
+    await expect(section.getByRole("status")).toContainText(
+      "Saved Keyboard Focus Oy",
+      { timeout: 10_000 },
+    );
+    await expect(addButton).toBeFocused();
+    const item = section.getByTestId(/^declaration-item-/).first();
+    await expect(item).toContainText("Keyboard Focus Oy", { timeout: 10_000 });
+  });
 });
