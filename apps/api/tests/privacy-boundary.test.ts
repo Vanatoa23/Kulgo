@@ -3,6 +3,7 @@ import {
   AnonymizedRiskAlertSchema,
   EsgLedgerResponseSchema,
   ExecutiveReportSchema,
+  ListAuditEventsResponseSchema,
   SimulateAnalyticsResponseSchema,
   WorkspaceExportJsonSchema,
   WorkspaceNetworkResponseSchema,
@@ -1062,11 +1063,12 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     expect(orgBImportRes.status).toBe(200);
 
     // Org B also updates its own org profile
-    await app.request("/api/v1/auth/organization", {
+    const orgBPatchRes = await app.request("/api/v1/auth/organization", {
       method: "PATCH",
       headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
       body: JSON.stringify({ scope1Tco2e: 888, scope2Tco2e: 444 }),
     });
+    expect(orgBPatchRes.status).toBe(200);
 
     // Org A exports its CSRD report (triggers hidden Tier-2+ traversal server-side)
     const reportARes = await app.request("/api/v1/analytics/report", {
@@ -1079,22 +1081,40 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
       headers: { Cookie: orgA.cookie },
     });
     expect(auditARes.status).toBe(200);
-    const auditA = (await auditARes.json()) as {
-      events: Array<{ orgId: string; action: string }>;
-    };
+    const auditA = ListAuditEventsResponseSchema.parse(await auditARes.json());
     expect(auditA.events.length).toBeGreaterThanOrEqual(2);
     expect(auditA.events.every((e) => e.orgId === orgA.orgId)).toBe(true);
     expect(auditA.events.some((e) => e.action === "CSRD_REPORT_EXPORTED")).toBe(
       true,
     );
 
-    const serializedA = JSON.stringify(auditA);
-    expect(serializedA).not.toContain(orgB.orgId);
-    expect(serializedA).not.toContain(secretTier2Name);
-    expect(serializedA).not.toContain("55.7558");
-    expect(serializedA).not.toContain("37.6173");
-    expect(serializedA).not.toContain(inviteToken);
-    expect(serializedA).not.toContain("888");
+    // Use parsed response to verify Org B's private fixture data is absent.
+    // Check each event's fields to ensure no leakage from Org B.
+    for (const event of auditA.events) {
+      // Org ID must be Org A's
+      expect(event.orgId).toBe(orgA.orgId);
+      // Check summary doesn't contain Org B's Scope 1 value with its actual field label
+      // and numeric boundary so UUIDs containing 888 and values like 8880 are accepted
+      expect(event.summary).not.toMatch(/Scope 1: 888(?!\d)/);
+      // Check metadata doesn't contain Org B's scope1Tco2e value (888)
+      for (const [key, value] of Object.entries(event.metadata)) {
+        // Distinguish the private numeric value 888 from digits inside generated identifiers:
+        // only reject if the value is exactly 888 as a number, or the string is exactly "888"
+        if (typeof value === "number") {
+          expect(value).not.toBe(888);
+        } else if (typeof value === "string") {
+          expect(value).not.toBe("888");
+        }
+      }
+    }
+
+    // Whole-serialized-response scan for Org B's string secrets (immune to UUID false-positives)
+    const auditAString = JSON.stringify(auditA);
+    expect(auditAString).not.toContain(orgB.orgId);
+    expect(auditAString).not.toContain(secretTier2Name);
+    expect(auditAString).not.toContain("55.7558");
+    expect(auditAString).not.toContain("37.6173");
+    expect(auditAString).not.toContain(inviteToken);
 
     // Fetch Org B's audit log -> strictly scoped to Org B, zero Org A events
     const auditBRes = await app.request("/api/v1/auth/audit-log", {
