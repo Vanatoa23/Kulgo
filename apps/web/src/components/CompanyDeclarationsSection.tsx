@@ -365,7 +365,10 @@ export function CompanyDeclarationsSection({
           </div>
         )}
 
-        {loadStatus === "ready" && declarations.length > 0 && (
+        {/* Rows render in every list state: a saved company must stay visible
+            while a later list read is loading or has failed (the retryable
+            error below still offers recovery). */}
+        {declarations.length > 0 && (
           <ul data-testid="declarations-list" className="space-y-2">
             {declarations.map((d) => (
               <li

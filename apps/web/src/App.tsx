@@ -96,6 +96,21 @@ function writePageToLocation(page: AppPage): void {
   window.history.pushState({ page }, "", url.toString());
 }
 
+// Reconcile a server list response with the rows already held locally (e.g. a
+// declaration saved while the request was in flight). Server rows win for
+// shared ids so status updates land; locally held rows the response predates
+// are kept, deduplicated by declarationId, so a stale list response can never
+// hide a confirmed save and a fresh one can never duplicate it. Extras go
+// first, matching the prepend-on-save order.
+function mergeDeclarations(
+  serverList: readonly RelationshipDeclaration[],
+  current: readonly RelationshipDeclaration[],
+): RelationshipDeclaration[] {
+  const serverIds = new Set(serverList.map((d) => d.declarationId));
+  const extras = current.filter((d) => !serverIds.has(d.declarationId));
+  return [...extras, ...serverList];
+}
+
 export function App() {
   const [bootstrapping, setBootstrapping] = useState(true);
   const [session, setSession] = useState<AuthMeResponse | null>(null);
@@ -234,7 +249,12 @@ export function App() {
     try {
       const list = await listRelationshipDeclarations();
       if (!ticket.isCurrent()) return false;
-      setDeclarations(list);
+      // Merge instead of replace: a response that predates a successful save
+      // must add its older rows without dropping the just-saved one, and one
+      // that already includes it must not duplicate it (keyed by
+      // declarationId). An invalidated ticket (tenant change) still discards
+      // the response entirely, preserving session isolation.
+      setDeclarations((prev) => mergeDeclarations(list, prev));
       setDeclarationsLoadStatus("ready");
       return true;
     } catch (err) {
@@ -667,13 +687,15 @@ export function App() {
     try {
       const created = await createRelationshipDeclaration(input);
       if (!sessionTicket.isCurrent()) return false;
-      // Any list GET still in flight predates this write, so its response can
-      // no longer be trusted to describe the list. Supersede its ticket: a
-      // late (stale) success must not drop the just-saved row, and a late
-      // failure must not flip the load status back to "error". The next
-      // loadDeclarations() begins a fresh ticket and re-syncs from the server.
-      declarationsGuard.begin();
-      setDeclarations((prev) => [created, ...prev]);
+      // The list guard is deliberately left alone: a list GET still in flight
+      // keeps its ticket and is reconciled by mergeDeclarations when it
+      // resolves, so a pre-save response cannot drop this row and a post-save
+      // response dedupes by declarationId. Session isolation is unchanged —
+      // resetTenantState() invalidates the guard on login/logout.
+      setDeclarations((prev) => [
+        created,
+        ...prev.filter((d) => d.declarationId !== created.declarationId),
+      ]);
       setDeclarationsLoadStatus("ready");
       return true;
     } catch (err) {
