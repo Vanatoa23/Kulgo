@@ -39,7 +39,7 @@ export function createCompanyRegistryRoutes({
       await next();
       return;
     }
-    await requireAuth(c, next);
+    return await requireAuth(c, next);
   });
 
   routes.post("/search", async (c) => {

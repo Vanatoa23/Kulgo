@@ -4,6 +4,8 @@ import {
   EE_COMPANY_REGISTRY_SOURCE,
 } from "@kulgo/shared";
 
+import { Hono } from "hono";
+
 import { mkdtemp, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import path from "node:path";
@@ -12,12 +14,19 @@ import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 
 import { createApp, createTestApp } from "../src/app.js";
+import { withSessionSecret } from "../src/auth/middleware.js";
 import {
   InMemoryAuthRepository,
   type AuthRepository,
 } from "../src/auth/repository.js";
+import {
+  computeSessionExpiryIso,
+  generateSessionToken,
+  hashSessionToken,
+} from "../src/auth/session.js";
 import { loadConfig } from "../src/config.js";
 import type { ArcadeDbClient } from "../src/db/client.js";
+import { createCompanyRegistryRoutes } from "../src/registry/routes.js";
 import {
   createEeCompanyRegistrySearchService,
   type CompanyRegistrySearchService,
@@ -671,5 +680,93 @@ describe("Company registry search API (/api/v1/workspace/company-registry/search
     });
     expect(bad.status).toBe(401);
     expect(counts.findSessionByTokenHash).toBe(1);
+  });
+});
+
+describe("Company registry router mounted standalone (no enclosing workspace auth)", () => {
+  it("preserves the requireAuth denial: anonymous and invalid-session get 401, a valid session gets 200 with one lookup", async () => {
+    const sessionSecret = "kulgo-test-session-secret-0123456789abcdef";
+    const inner = new InMemoryAuthRepository();
+    const counts: Record<string, number> = {
+      findSessionByTokenHash: 0,
+      findUserById: 0,
+      findOrganizationById: 0,
+    };
+    const authRepo: AuthRepository = new Proxy(inner, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (typeof prop === "string" && prop in counts && typeof value === "function") {
+          return async (...args: unknown[]) => {
+            counts[prop] = (counts[prop] ?? 0) + 1;
+            return Reflect.apply(value as (...a: unknown[]) => unknown, target, args);
+          };
+        }
+        return value;
+      },
+    });
+
+    // Standalone mount: nothing authenticates in front of the registry
+    // router, so its own middleware is the only auth check on the request.
+    const app = new Hono();
+    app.use("*", async (_c, next) => withSessionSecret(sessionSecret, next));
+    app.route(
+      "/registry",
+      createCompanyRegistryRoutes({
+        authRepo,
+        registrySearch: createEeCompanyRegistrySearchService(OFFICIAL_FIXTURE),
+      }),
+    );
+    const STANDALONE_SEARCH_PATH = "/registry/search";
+    const post = (cookie?: string) =>
+      app.request(STANDALONE_SEARCH_PATH, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          ...(cookie ? { Cookie: cookie } : {}),
+        },
+        body: JSON.stringify({ name: "Nordic Alloys OÜ", countryCode: "EE" }),
+      });
+    const resetCounts = () => {
+      for (const key of Object.keys(counts)) counts[key] = 0;
+    };
+
+    const { user, organization } = await authRepo.createOrganizationAndOwner({
+      email: "reg-standalone@kulgo.ee",
+      passwordHash: "standalone-test-hash",
+      organizationName: "Registry Standalone OU",
+      countryCode: "EE",
+      sector: "Electronics",
+    });
+    const token = generateSessionToken();
+    await authRepo.createSession({
+      userId: user.userId,
+      orgId: organization.orgId,
+      tokenHash: hashSessionToken(token, sessionSecret),
+      expiresAt: computeSessionExpiryIso(),
+    });
+
+    // Anonymous: the 401 returned by requireAuth must reach the client, with no session lookup.
+    resetCounts();
+    const anon = await post();
+    expect(anon.status).toBe(401);
+    expect(await anon.json()).toEqual({ error: "Unauthorized" });
+    expect(counts.findSessionByTokenHash).toBe(0);
+
+    // Invalid session token: 401 after exactly one session lookup.
+    resetCounts();
+    const bad = await post("kulgo_session=not-a-real-token");
+    expect(bad.status).toBe(401);
+    expect(await bad.json()).toEqual({ error: "Unauthorized" });
+    expect(counts.findSessionByTokenHash).toBe(1);
+
+    // Valid session: 200 with exactly one session/user/org lookup.
+    resetCounts();
+    const ok = await post(`kulgo_session=${token}`);
+    expect(ok.status).toBe(200);
+    const body = CompanyRegistrySearchResponseSchema.parse(await ok.json());
+    expect(body.outcome).toBe("CONCLUSIVE_MATCH");
+    expect(counts.findSessionByTokenHash).toBe(1);
+    expect(counts.findUserById).toBe(1);
+    expect(counts.findOrganizationById).toBe(1);
   });
 });
