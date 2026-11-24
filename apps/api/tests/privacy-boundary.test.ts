@@ -1,9 +1,11 @@
 import {
   AnalyticsSummarySchema,
   AnonymizedRiskAlertSchema,
+  CreateRelationshipDeclarationResponseSchema,
   EsgLedgerResponseSchema,
   ExecutiveReportSchema,
   ListAuditEventsResponseSchema,
+  ListRelationshipDeclarationsResponseSchema,
   SimulateAnalyticsResponseSchema,
   WorkspaceExportJsonSchema,
   WorkspaceNetworkResponseSchema,
@@ -3047,6 +3049,103 @@ describe("Privacy Boundary Contract (Transitive Facility-Scoped Reconciliation)"
     // Plant 2 gets 50 + 40% of 100 = 90 tCO2e (intensity 0.00009 tCO2e/EUR, cap 90)
     // Total attributed across both reconciled plants = 200 tCO2e (NOT 150 + 150 = 300 tCO2e!)
     expect(summary.esg.upstreamScope3Tco2e).toBe(200);
+  });
+});
+
+describe("Privacy Boundary Contract (Relationship Declarations)", () => {
+  it("enforces 401 anonymous denial and strict two-org isolation on /api/v1/workspace/relationship-declarations", async () => {
+    const app = createTestApp();
+    const path = "/api/v1/workspace/relationship-declarations";
+
+    // Anonymous create and list are denied.
+    expect((await app.request(path)).status).toBe(401);
+    expect(
+      (
+        await app.request(path, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ name: "Anon Supplier", role: "SUPPLIER" }),
+        })
+      ).status,
+    ).toBe(401);
+
+    const orgA = await registerOrg(app, "decl-priv-a@org-a.ee", "Decl Privacy Alpha OU");
+    const orgB = await registerOrg(app, "decl-priv-b@org-b.ee", "Decl Privacy Beta OU");
+
+    const secretName = "TOP_SECRET_DECLARED_PARTNER_7Q2Z";
+    const secretEmail = "hidden-contact@decl-priv-a.ee";
+    const secretRegistry = "SECRET-REG-998877";
+
+    // Org A saves a supplier declaration with private contact details.
+    const createRes = await app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: secretName,
+        role: "SUPPLIER",
+        contactEmail: secretEmail,
+        registryId: secretRegistry,
+        countryCode: "EE",
+      }),
+    });
+    expect(createRes.status).toBe(201);
+    const created = CreateRelationshipDeclarationResponseSchema.parse(
+      await createRes.json(),
+    );
+    expect(created.declaration.ownerOrgId).toBe(orgA.orgId);
+    // A supplied registry ID is still only a client declaration.
+    expect(created.declaration.status).toBe("DECLARED");
+
+    // The request never takes its owner organization from client input:
+    // the strict input contract rejects an ownerOrgId field outright.
+    const spoofRes = await app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgA.cookie },
+      body: JSON.stringify({
+        name: "Spoof Attempt",
+        role: "CLIENT",
+        ownerOrgId: orgB.orgId,
+      }),
+    });
+    expect(spoofRes.status).toBe(400);
+
+    // Org B saves its own declaration.
+    const bCreateRes = await app.request(path, {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: orgB.cookie },
+      body: JSON.stringify({ name: "Org B Partner", role: "CLIENT" }),
+    });
+    expect(bCreateRes.status).toBe(201);
+
+    // Org B's list contains only its own declaration — zero Org A leakage.
+    const listBRes = await app.request(path, { headers: { Cookie: orgB.cookie } });
+    expect(listBRes.status).toBe(200);
+    const listBText = await listBRes.text();
+    const listB = ListRelationshipDeclarationsResponseSchema.parse(
+      JSON.parse(listBText),
+    );
+    expect(listB.declarations).toHaveLength(1);
+    expect(listB.declarations[0]!.ownerOrgId).toBe(orgB.orgId);
+    for (const secret of [secretName, secretEmail, secretRegistry, orgA.orgId]) {
+      expect(listBText).not.toContain(secret);
+    }
+
+    // Org A's list contains its own declaration.
+    const listARes = await app.request(path, { headers: { Cookie: orgA.cookie } });
+    expect(listARes.status).toBe(200);
+    const listA = ListRelationshipDeclarationsResponseSchema.parse(
+      await listARes.json(),
+    );
+    expect(listA.declarations).toHaveLength(1);
+    expect(listA.declarations[0]!.name).toBe(secretName);
+
+    // Strict response DTO rejects any injected cross-tenant field.
+    expect(() =>
+      ListRelationshipDeclarationsResponseSchema.parse({
+        declarations: listA.declarations,
+        otherOrgDeclaration: { name: "leak" },
+      }),
+    ).toThrow();
   });
 });
 

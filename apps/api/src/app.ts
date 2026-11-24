@@ -53,6 +53,14 @@ import {
   type RequestLogEntry,
 } from "./middleware/security.js";
 import {
+  ArcadeDbRelationshipDeclarationRepository,
+  InMemoryRelationshipDeclarationRepository,
+  type RelationshipDeclarationRepository,
+} from "./declarations/repository.js";
+
+import { createDeclarationRoutes } from "./declarations/routes.js";
+
+import {
   ArcadeDbWorkspaceRepository,
   InMemoryWorkspaceRepository,
   type WorkspaceRepository,
@@ -64,6 +72,7 @@ export interface AppDependencies {
   db: ArcadeDbClient;
   authRepo?: AuthRepository;
   workspaceRepo?: WorkspaceRepository;
+  declarationRepo?: RelationshipDeclarationRepository;
   riskSignalRepo?: RiskSignalRepository;
   inviteRepo?: InvitationRepository;
   directoryRepo?: DirectoryRepository;
@@ -80,6 +89,7 @@ export function createApp({
   db,
   authRepo = new ArcadeDbAuthRepository(db),
   workspaceRepo = new ArcadeDbWorkspaceRepository(db),
+  declarationRepo = new ArcadeDbRelationshipDeclarationRepository(db),
   riskSignalRepo = new ArcadeDbRiskSignalRepository(db),
   inviteRepo = new ArcadeDbInvitationRepository(db, {
     authRepo,
@@ -228,6 +238,10 @@ export function createApp({
     createWorkspaceRoutes({ authRepo, workspaceRepo, riskSignalRepo }),
   );
   app.route(
+    "/api/v1/workspace/relationship-declarations",
+    createDeclarationRoutes({ authRepo, declarationRepo }),
+  );
+  app.route(
     "/api/v1/analytics",
     createAnalyticsRoutes({ authRepo, analyticsRepo }),
   );
@@ -300,6 +314,7 @@ export function createTestApp(
 
   const authRepo = new InMemoryAuthRepository();
   const workspaceRepo = new InMemoryWorkspaceRepository();
+  const declarationRepo = new InMemoryRelationshipDeclarationRepository();
   const riskSignalRepo = new InMemoryRiskSignalRepository();
   const alertRepo = new InMemoryAlertRepository();
   const inviteRepo = new InMemoryInvitationRepository({
@@ -341,6 +356,7 @@ export function createTestApp(
     db: mockDb,
     authRepo,
     workspaceRepo,
+    declarationRepo,
     riskSignalRepo,
     inviteRepo,
     directoryRepo,
