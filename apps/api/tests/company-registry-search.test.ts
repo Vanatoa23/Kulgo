@@ -11,12 +11,19 @@ import { fileURLToPath } from "node:url";
 
 import { describe, expect, it } from "vitest";
 
-import { createTestApp } from "../src/app.js";
+import { createApp, createTestApp } from "../src/app.js";
+import {
+  InMemoryAuthRepository,
+  type AuthRepository,
+} from "../src/auth/repository.js";
+import { loadConfig } from "../src/config.js";
+import type { ArcadeDbClient } from "../src/db/client.js";
 import {
   createEeCompanyRegistrySearchService,
   type CompanyRegistrySearchService,
 } from "../src/registry/service.js";
 import { parseRegistryCsv } from "../src/registry/snapshot.js";
+import { InMemoryWorkspaceRepository } from "../src/workspace/repository.js";
 
 const SEARCH_PATH = "/api/v1/workspace/company-registry/search";
 const FIXTURES_DIR = fileURLToPath(new URL("./fixtures/registry/", import.meta.url));
@@ -571,5 +578,98 @@ describe("Company registry search API (/api/v1/workspace/company-registry/search
     expect(() => parseRegistryCsv(corruptText)).toThrow();
     expect(() => parseRegistryCsv("")).toThrow();
     expect(() => parseRegistryCsv("foo;bar\n1;2\n")).toThrow();
+  });
+
+  it("authenticates each request exactly once through the real createApp wiring", async () => {
+    // Counting proxy around the in-memory session repository, wired through
+    // the actual createApp mount order (/api/v1/workspace wildcard first,
+    // then the /api/v1/workspace/company-registry sub-router).
+    const inner = new InMemoryAuthRepository();
+    const counts: Record<string, number> = {
+      findSessionByTokenHash: 0,
+      findUserById: 0,
+      findOrganizationById: 0,
+    };
+    const authRepo: AuthRepository = new Proxy(inner, {
+      get(target, prop) {
+        const value = Reflect.get(target, prop);
+        if (typeof prop === "string" && prop in counts && typeof value === "function") {
+          return async (...args: unknown[]) => {
+            counts[prop] = (counts[prop] ?? 0) + 1;
+            return Reflect.apply(value as (...a: unknown[]) => unknown, target, args);
+          };
+        }
+        return value;
+      },
+    });
+    const mockDb: ArcadeDbClient = {
+      async healthCheck() {
+        return { connected: true, latencyMs: 1 };
+      },
+      async ensureDatabase() {},
+      async query() {
+        return [];
+      },
+      async command() {
+        return [];
+      },
+    };
+    const app = createApp({
+      config: loadConfig({ NODE_ENV: "test" }),
+      db: mockDb,
+      authRepo,
+      workspaceRepo: new InMemoryWorkspaceRepository(),
+      registrySearch: createEeCompanyRegistrySearchService(OFFICIAL_FIXTURE),
+    });
+    const org = await registerOrg(app, "reg-authonce@kulgo.ee", "Registry AuthOnce OU");
+    const resetCounts = () => {
+      for (const key of Object.keys(counts)) counts[key] = 0;
+    };
+
+    // Registry request: authenticated once -> exactly one session lookup.
+    resetCounts();
+    const res = await search(app, org.cookie, {
+      name: "Nordic Alloys OÜ",
+      countryCode: "EE",
+    });
+    expect(res.status).toBe(200);
+    const body = CompanyRegistrySearchResponseSchema.parse(await res.json());
+    expect(body.outcome).toBe("CONCLUSIVE_MATCH");
+    expect(counts.findSessionByTokenHash).toBe(1);
+    expect(counts.findUserById).toBe(1);
+    expect(counts.findOrganizationById).toBe(1);
+
+    // Current workspace request: also exactly one session lookup.
+    resetCounts();
+    const net = await app.request("/api/v1/workspace/network", {
+      headers: { Cookie: org.cookie },
+    });
+    expect(net.status).toBe(200);
+    expect(counts.findSessionByTokenHash).toBe(1);
+    expect(counts.findUserById).toBe(1);
+    expect(counts.findOrganizationById).toBe(1);
+
+    // Anonymous registry request: a single 401, no session lookup at all.
+    resetCounts();
+    const anon = await app.request(SEARCH_PATH, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ name: "Nordic Alloys OÜ" }),
+    });
+    expect(anon.status).toBe(401);
+    expect(counts.findSessionByTokenHash).toBe(0);
+
+    // Invalid token: a single 401 after exactly one session lookup.
+    resetCounts();
+    const bad = await app.request(SEARCH_PATH, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        Cookie: "kulgo_session=not-a-real-token",
+      },
+      body: JSON.stringify({ name: "Nordic Alloys OÜ" }),
+    });
+    expect(bad.status).toBe(401);
+    expect(counts.findSessionByTokenHash).toBe(1);
   });
 });

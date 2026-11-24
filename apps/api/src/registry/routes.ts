@@ -21,6 +21,11 @@ export interface CompanyRegistryRoutesDependencies {
  * /api/v1/workspace/company-registry. The only endpoint is POST /search.
  * The search terms come from the request body; the caller's organization is
  * taken from the session and is never forwarded to the registry service.
+ *
+ * Mounted under /api/v1/workspace, the workspace wildcard auth middleware
+ * (registered first in createApp) has already authenticated the request, so
+ * this middleware skips its own session/user/org lookups to authenticate each
+ * valid request exactly once. A standalone mount still authenticates here.
  */
 export function createCompanyRegistryRoutes({
   authRepo,
@@ -29,7 +34,13 @@ export function createCompanyRegistryRoutes({
   const routes = new Hono<{ Variables: AuthVariables }>();
   const requireAuth = createRequireAuth(authRepo);
 
-  routes.use("*", requireAuth);
+  routes.use("*", async (c, next) => {
+    if (c.get("auth")) {
+      await next();
+      return;
+    }
+    await requireAuth(c, next);
+  });
 
   routes.post("/search", async (c) => {
     let body: unknown;
