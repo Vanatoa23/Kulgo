@@ -1093,20 +1093,11 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
     for (const event of auditA.events) {
       // Org ID must be Org A's
       expect(event.orgId).toBe(orgA.orgId);
-      // Check summary doesn't contain Org B's secrets
-      expect(event.summary).not.toContain(orgB.orgId);
-      expect(event.summary).not.toContain(secretTier2Name);
-      expect(event.summary).not.toContain("55.7558");
-      expect(event.summary).not.toContain("37.6173");
-      expect(event.summary).not.toContain(inviteToken);
-      // Check metadata doesn't contain Org B's scope1Tco2e value (888) or secrets
+      // Check summary doesn't contain Org B's Scope 1 value with its actual field label
+      // and numeric boundary so UUIDs containing 888 and values like 8880 are accepted
+      expect(event.summary).not.toMatch(/Scope 1: 888(?!\d)/);
+      // Check metadata doesn't contain Org B's scope1Tco2e value (888)
       for (const [key, value] of Object.entries(event.metadata)) {
-        const stringValue = String(value);
-        expect(stringValue).not.toContain(orgB.orgId);
-        expect(stringValue).not.toContain(secretTier2Name);
-        expect(stringValue).not.toContain("55.7558");
-        expect(stringValue).not.toContain("37.6173");
-        expect(stringValue).not.toContain(inviteToken);
         // Distinguish the private numeric value 888 from digits inside generated identifiers:
         // only reject if the value is exactly 888 as a number, or the string is exactly "888"
         if (typeof value === "number") {
@@ -1116,7 +1107,7 @@ describe("Privacy Boundary Contract (Two-Org Workspace Isolation)", () => {
         }
       }
     }
-    
+
     // Whole-serialized-response scan for Org B's string secrets (immune to UUID false-positives)
     const auditAString = JSON.stringify(auditA);
     expect(auditAString).not.toContain(orgB.orgId);
