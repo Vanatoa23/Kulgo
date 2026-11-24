@@ -401,7 +401,7 @@ export type WorkspaceNetworkResponse = z.infer<
 
 // --- M1 CRUD & Refinement Input Schemas ---
 
-const CountryCodeInputSchema = z
+export const CountryCodeInputSchema = z
   .string()
   .trim()
   .length(2)

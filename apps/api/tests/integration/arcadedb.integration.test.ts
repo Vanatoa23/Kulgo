@@ -1,6 +1,8 @@
 import { commercialRegressionCases } from "../helpers/commercial-regressions.js";
 import { createInvitationFixture, invitationConcurrencyCases } from "../invitation-concurrency-cases.js";
 import { ArcadeDbInvitationRepository } from "../../src/invites/repository.js";
+
+import { ArcadeDbRelationshipDeclarationRepository } from "../../src/declarations/repository.js";
 import { randomUUID } from "node:crypto";
 import { verifyConcurrentOwnerRemoval } from "../helpers/member-removal.js";
 import { memberRemovalCases } from "../helpers/member-removal-cases.js";
@@ -11,7 +13,9 @@ import {
   AuthMeResponseSchema,
   BulkImportSummarySchema,
   CreateInviteResponseSchema,
+  CreateRelationshipDeclarationResponseSchema,
   ExecutiveReportSchema,
+  ListRelationshipDeclarationsResponseSchema,
   UpdateOrganizationProfileResponseSchema,
   WorkspaceExportJsonSchema,
   WorkspaceNetworkResponseSchema,
@@ -780,6 +784,115 @@ describeWithArcadeDb("Live ArcadeDB Integration Tests", () => {
     const summary = AnalyticsSummarySchema.parse(await summaryRes.json());
     expect(summary.financialRisk).toBeDefined();
     expect(summary.financialRisk?.totalActiveSpendEur).toBeGreaterThan(0);
+  });
+
+  it("persists private relationship declarations in ArcadeDB with owner-scoped storage and filtering on the live API", async () => {
+    const path = "/api/v1/workspace/relationship-declarations";
+
+    // Anonymous requests are denied on the live app too.
+    expect((await app.request(path)).status).toBe(401);
+
+    const register = async (prefix: string, orgName: string) => {
+      const res = await app.request("/api/v1/auth/register", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          email: `${prefix}-${runId}@kulgo-ci.test`,
+          password: "LiveArcadeDbPassword2026!",
+          organizationName: `${orgName} ${runId}`,
+          countryCode: "EE",
+          sector: "Manufacturing",
+        }),
+      });
+      expect(res.status).toBe(201);
+      const body = AuthMeResponseSchema.parse(await res.json());
+      return { cookie: extractCookie(res), orgId: body.organization.orgId };
+    };
+    const orgA = await register("decl-a", "Live Declarations A");
+    const orgB = await register("decl-b", "Live Declarations B");
+
+    const createDecl = async (
+      cookie: string,
+      payload: Record<string, unknown>,
+    ) => {
+      const res = await app.request(path, {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify(payload),
+      });
+      expect(res.status).toBe(201);
+      return CreateRelationshipDeclarationResponseSchema.parse(await res.json())
+        .declaration;
+    };
+
+    // Org A saves a full declaration (name trimmed, country uppercased,
+    // email normalized, registry ID present but still a client declaration).
+    const declA1 = await createDecl(orgA.cookie, {
+      name: "  Live Secret Supplier AS  ",
+      role: "SUPPLIER",
+      countryCode: "ee",
+      registryId: `LIVE-REG-${runId}`,
+      contactEmail: "OPS@LIVESECRET.EE",
+    });
+    expect(declA1.name).toBe("Live Secret Supplier AS");
+    expect(declA1.countryCode).toBe("EE");
+    expect(declA1.contactEmail).toBe("ops@livesecret.ee");
+    expect(declA1.status).toBe("DECLARED");
+    expect(declA1.ownerOrgId).toBe(orgA.orgId);
+    const declA2 = await createDecl(orgA.cookie, { name: "Live Buyer OU", role: "CLIENT" });
+    const declB1 = await createDecl(orgB.cookie, { name: "Org B Supplier", role: "SUPPLIER" });
+
+    // Owner-scoped list through the live API.
+    const listARes = await app.request(path, { headers: { Cookie: orgA.cookie } });
+    expect(listARes.status).toBe(200);
+    const listA = ListRelationshipDeclarationsResponseSchema.parse(await listARes.json());
+    expect(listA.declarations).toHaveLength(2);
+    expect(listA.declarations.every((d) => d.ownerOrgId === orgA.orgId)).toBe(true);
+    expect(listA.declarations.map((d) => d.declarationId).sort()).toEqual(
+      [declA1.declarationId, declA2.declarationId].sort(),
+    );
+
+    // Org B sees only its own declaration — no cross-tenant leakage.
+    const listBRes = await app.request(path, { headers: { Cookie: orgB.cookie } });
+    expect(listBRes.status).toBe(200);
+    const listBText = await listBRes.text();
+    const listB = ListRelationshipDeclarationsResponseSchema.parse(JSON.parse(listBText));
+    expect(listB.declarations).toHaveLength(1);
+    expect(listB.declarations[0]).toEqual(declB1);
+    expect(listBText).not.toContain("Live Secret Supplier");
+    expect(listBText).not.toContain(`LIVE-REG-${runId}`);
+    expect(listBText).not.toContain(orgA.orgId);
+
+    // The production ArcadeDB repository filters by owner as well.
+    const declarationRepo = new ArcadeDbRelationshipDeclarationRepository(db);
+    const repoListA = await declarationRepo.listDeclarations(orgA.orgId);
+    expect(repoListA.map((d) => d.declarationId).sort()).toEqual(
+      listA.declarations.map((d) => d.declarationId).sort(),
+    );
+    const repoListB = await declarationRepo.listDeclarations(orgB.orgId);
+    expect(repoListB).toHaveLength(1);
+    expect(repoListB[0]!.declarationId).toBe(declB1.declarationId);
+
+    // Raw parameterized queries confirm the records physically live in
+    // ArcadeDB and that the owner filter excludes cross-tenant rows.
+    const filteredRows = await db.query<Record<string, unknown>>(
+      "sql",
+      `SELECT declarationId FROM RelationshipDeclaration WHERE ownerOrgId = :ownerOrgId`,
+      { ownerOrgId: orgA.orgId },
+    );
+    expect(filteredRows.map((r) => r.declarationId).sort()).toEqual(
+      [declA1.declarationId, declA2.declarationId].sort(),
+    );
+    const allRows = await db.query<Record<string, unknown>>(
+      "sql",
+      `SELECT declarationId, ownerOrgId FROM RelationshipDeclaration`,
+    );
+    const allIds = allRows.map((r) => String(r.declarationId));
+    expect(allIds).toContain(declB1.declarationId);
+    expect(allIds).not.toContain("non-existent");
+    expect(
+      allRows.find((r) => r.declarationId === declB1.declarationId)?.ownerOrgId,
+    ).toBe(orgB.orgId);
   });
 });
 

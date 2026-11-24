@@ -4,6 +4,7 @@ import type { ArcadeDbClient } from "./client.js";
  * Idempotent ArcadeDB schema definition for Kulgo Phase 1.
  * Models Organizations, Users, Products, SupplyInputs (Materials A-F),
  * Facilities (with GEOSPATIAL WKT index), Invitations, RiskSignals,
+ * RelationshipDeclarations (private supplier/buyer declarations),
  * SUPPLIES_LANE edges, and VERIFIED_PARTNER_LINK edges.
  */
 export const KULGO_SCHEMA_STATEMENTS: readonly string[] = [
@@ -248,6 +249,20 @@ export const KULGO_SCHEMA_STATEMENTS: readonly string[] = [
   "CREATE INDEX IF NOT EXISTS ON ContractLine (contractId) NOTUNIQUE",
   "CREATE INDEX IF NOT EXISTS ON ContractLine (laneId) NOTUNIQUE",
   "CREATE INDEX IF NOT EXISTS ON ContractLine (ownerOrgId) NOTUNIQUE",
+
+  "CREATE VERTEX TYPE RelationshipDeclaration IF NOT EXISTS",
+  "CREATE PROPERTY RelationshipDeclaration.declarationId IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.ownerOrgId IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.name IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.role IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.countryCode IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.registryId IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.contactEmail IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.status IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.createdAt IF NOT EXISTS STRING",
+  "CREATE PROPERTY RelationshipDeclaration.updatedAt IF NOT EXISTS STRING",
+  "CREATE INDEX IF NOT EXISTS ON RelationshipDeclaration (declarationId) UNIQUE",
+  "CREATE INDEX IF NOT EXISTS ON RelationshipDeclaration (ownerOrgId) NOTUNIQUE",
 
   // --- Edge Types ---
   "CREATE EDGE TYPE SUPPLIES_LANE IF NOT EXISTS",
