@@ -297,6 +297,58 @@ describe("Company registry search API (/api/v1/workspace/company-registry/search
     expect(idOnly.candidates).toEqual([]);
   });
 
+  it("offers the name/country record as a choice when the supplied registry ID is missing from the snapshot", async () => {
+    const app = appWithSnapshot(OFFICIAL_FIXTURE);
+    const org = await registerOrg(app, "reg-missingid@kulgo.ee", "Registry MissingId OU");
+
+    // Missing ID + exact unique name + EE country: the record is a choice, not conclusive.
+    const missingId = await searchOk(app, org.cookie, {
+      name: "Nordic Alloys OÜ",
+      countryCode: "EE",
+      registryId: "00000000",
+    });
+    expect(missingId.outcome).toBe("CANDIDATES");
+    expect(missingId.candidates).toHaveLength(1);
+    expect(missingId.candidates[0]?.registryId).toBe("10137319");
+    expect(missingId.candidates[0]?.legalName).toBe("Nordic Alloys OÜ");
+
+    // Without any ID, the same name/country query stays conclusive.
+    const noId = await searchOk(app, org.cookie, {
+      name: "Nordic Alloys OÜ",
+      countryCode: "EE",
+    });
+    expect(noId.outcome).toBe("CONCLUSIVE_MATCH");
+    expect(noId.candidates.map((c) => c.registryId)).toEqual(["10137319"]);
+
+    // Missing ID without country still goes to user choice (unchanged).
+    const missingIdNoCountry = await searchOk(app, org.cookie, {
+      name: "Nordic Alloys OÜ",
+      registryId: "00000000",
+    });
+    expect(missingIdNoCountry.outcome).toBe("CANDIDATES");
+    expect(missingIdNoCountry.candidates.map((c) => c.registryId)).toEqual(["10137319"]);
+
+    // Missing ID + ambiguous exact names still offers all of them as choices.
+    const appAmb = appWithSnapshot(AMBIGUOUS_FIXTURE);
+    const orgAmb = await registerOrg(appAmb, "reg-missingid-amb@kulgo.ee", "Registry MissingId Amb OU");
+    const amb = await searchOk(appAmb, orgAmb.cookie, {
+      name: "Dup Name OÜ",
+      countryCode: "EE",
+      registryId: "00000000",
+    });
+    expect(amb.outcome).toBe("CANDIDATES");
+    expect(amb.candidates.map((c) => c.registryId).sort()).toEqual(["20000001", "20000002"]);
+
+    // Missing ID and no plausible name match at all is still NO_MATCH.
+    const none = await searchOk(app, org.cookie, {
+      name: "Totally Unknown Company Xyz",
+      countryCode: "EE",
+      registryId: "00000000",
+    });
+    expect(none.outcome).toBe("NO_MATCH");
+    expect(none.candidates).toEqual([]);
+  });
+
   it("sends multiple plausible matches to user choice; a consistent ID disambiguates", async () => {
     const app = appWithSnapshot(AMBIGUOUS_FIXTURE);
     const org = await registerOrg(app, "reg-ambiguous@kulgo.ee", "Registry Ambiguous OU");

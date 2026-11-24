@@ -70,6 +70,10 @@ function isPlausibleMatch(queryNormalized: string, candidateNormalized: string):
  * - CONCLUSIVE_MATCH requires a genuinely exact, unique name plus matching
  *   country, or a consistent registry ID. An exact Estonia-only hit without
  *   country or ID is offered as a single CANDIDATE for user choice.
+ * - A supplied registry ID that is missing from the snapshot downgrades an
+ *   otherwise conclusive name+country hit to CANDIDATES: the name/country
+ *   record is a different record than the supplied ID, so it is offered as a
+ *   choice and never attached.
  * - Multiple plausible matches always go to user choice (CANDIDATES).
  * - Fuzzy fallback never produces a conclusive match.
  */
@@ -92,6 +96,9 @@ export function matchRegistry(
     ? index.byRegistryId.get(normalizeRegistryId(query.registryId.trim()))
     : undefined;
 
+  const idMissingFromSnapshot =
+    Boolean(query.registryId?.trim()) && idEntry === undefined;
+
   const idConflictsWithName =
     idEntry !== undefined && normalizeEntityName(idEntry.legalName) !== normalized;
   const idConsistentWithName =
@@ -104,6 +111,11 @@ export function matchRegistry(
 
   const onlyExact = exact.length === 1 ? exact[0] : undefined;
   if (onlyExact && !idConflictsWithName && countryCode === SUPPORTED_COUNTRY) {
+    // A supplied ID missing from the snapshot cannot verify this name/country
+    // hit (it is a different record), so offer it as a choice, not conclusive.
+    if (idMissingFromSnapshot) {
+      return { outcome: "CANDIDATES", candidates: [toCandidate(onlyExact)] };
+    }
     return { outcome: "CONCLUSIVE_MATCH", candidates: [toCandidate(onlyExact)] };
   }
 

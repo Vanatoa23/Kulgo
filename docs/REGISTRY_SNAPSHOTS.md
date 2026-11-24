@@ -86,6 +86,9 @@ CC BY 4.0 licence link). Candidates are bounded (max 10).
 Matching is conservative: a client-supplied registry ID never verifies
 anything by itself; an ID/name conflict never silently attaches another
 company; multiple plausible matches go to user choice; a genuinely exact,
-unique name with matching country or a consistent ID is conclusive; an exact
-Estonia-only hit without country or ID is offered as a candidate. Registry
-matching, publication, and relationship confirmation remain separate facts.
+unique name with matching country (and no registry ID supplied) or a
+consistent ID is conclusive; an exact Estonia-only hit without country or ID
+is offered as a candidate; a supplied registry ID that is missing from the
+snapshot downgrades the name/country hit to a candidate choice, since the
+input and the registry do not agree. Registry matching, publication, and
+relationship confirmation remain separate facts.

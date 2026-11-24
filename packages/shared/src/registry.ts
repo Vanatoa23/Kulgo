@@ -69,8 +69,10 @@ export type CompanyRegistryCandidate = z.infer<typeof CompanyRegistryCandidateSc
 
 /**
  * Search outcome:
- * - CONCLUSIVE_MATCH: a genuinely exact, unique name with matching country or a consistent registry ID.
- * - CANDIDATES: multiple plausible matches (or an exact Estonia-only hit without country/ID) go to user choice.
+ * - CONCLUSIVE_MATCH: a genuinely exact, unique name with matching country (when no registry ID was
+ *   supplied) or a consistent registry ID.
+ * - CANDIDATES: multiple plausible matches go to user choice, as does an exact Estonia-only hit
+ *   without country/ID or with a supplied registry ID that is missing from the snapshot.
  * - NO_MATCH: nothing plausible in the snapshot.
  * - UNSUPPORTED_COUNTRY: only Estonia (EE) is supported in this slice.
  * - SNAPSHOT_UNAVAILABLE: no usable local snapshot (missing or corrupt); ordinary workspace operations are unaffected.
