@@ -20,7 +20,7 @@ import {
 const MAX_IMPORT_FACILITIES = 500;
 const MAX_IMPORT_LANES = 1000;
 export const MAX_CSV_ROWS = 1505;
-const FORMULA_PREFIX_RE = /^[=+\-@\t\r]/;
+const FORMULA_PREFIX_RE = /^\s*[=+\-@]|^[\t\r\n]/;
 const FINITE_NUMBER_RE = /^-?\d+(?:\.\d+)?(?:[eE][+-]?\d+)?$/;
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 
@@ -108,11 +108,27 @@ function neutralizeCsvFormula(str: string): string {
   return `'${str}`;
 }
 
-function stripFormulaGuardOnImport(str: string): string {
+export function stripFormulaGuardOnImport(str: string): string {
   if (str.length >= 2 && str.startsWith("'") && FORMULA_PREFIX_RE.test(str.slice(1))) {
     return str.slice(1);
   }
   return str;
+}
+
+export function normalizeSpreadsheetDate(raw: string | undefined): string | null {
+  if (raw === undefined) return null;
+  const trimmed = raw.trim();
+  if (trimmed.length === 0) return null;
+  if (/^\d{4}-\d{2}-\d{2}$/.test(trimmed)) {
+    return trimmed;
+  }
+  if (/^\d{5}$/.test(trimmed)) {
+    const serial = Number(trimmed);
+    if (!Number.isNaN(serial) && serial >= 25569 && serial <= 80000) {
+      return new Date((serial - 25569) * 86400_000).toISOString().slice(0, 10);
+    }
+  }
+  return trimmed;
 }
 
 export function escapeCsvCell(value: unknown): string {
@@ -237,11 +253,24 @@ export interface SupplierOutreachHint {
   email: string;
 }
 
+export interface OnboardingContractItem {
+  rowNumber: number;
+  fromFacilityRef: string;
+  materialCategory: string;
+  annualVolume: number | null;
+  volumeUnit: string;
+  annualSpendEur: number | null;
+  currency: string;
+  contractType: string | null;
+  contractEndDate: string | null;
+}
+
 export interface ParsedCsvPayload {
   facilities: Array<{ rowNumber: number; raw: Record<string, unknown> }>;
   lanes: Array<{ rowNumber: number; raw: Record<string, unknown> }>;
   errors: BulkImportError[];
   outreachHints: SupplierOutreachHint[];
+  onboardingContracts?: OnboardingContractItem[];
 }
 
 export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
@@ -262,6 +291,7 @@ export function parseBulkImportMatrix(matrix: string[][]): ParsedCsvPayload {
         },
       ],
       outreachHints: [],
+      onboardingContracts: [],
     };
   }
 
@@ -277,7 +307,8 @@ export function parseBulkImportMatrix(matrix: string[][]): ParsedCsvPayload {
     [];
   const lanes: Array<{ rowNumber: number; raw: Record<string, unknown> }> = [];
   const errors: BulkImportError[] = [];
-  const outreachHints: SupplierOutreachHint[] = [];
+  const rawOutreachHints: SupplierOutreachHint[] = [];
+  const onboardingContracts: OnboardingContractItem[] = [];
 
   for (let i = 1; i < matrix.length; i += 1) {
     const rowNumber = i + 1;
@@ -338,10 +369,14 @@ export function parseBulkImportMatrix(matrix: string[][]): ParsedCsvPayload {
       });
 
       if (record.email && record.email.includes("@")) {
-        outreachHints.push({ supplierName, email: record.email });
+        rawOutreachHints.push({ supplierName, email: record.email });
       }
 
-      if (record.materialcategory) {
+      const annualVol = parseOptionalNumber(record.annualvolume) ?? null;
+      const annualSpd = parseOptionalNumber(record.annualspendeur) ?? null;
+      const materialCat = record.materialcategory || null;
+
+      if (materialCat || annualVol !== null || annualSpd !== null) {
         const splitPct = parseOptionalNumber(record.warehousesplit);
         lanes.push({
           rowNumber,
@@ -349,17 +384,31 @@ export function parseBulkImportMatrix(matrix: string[][]): ParsedCsvPayload {
             fromFacilityRef: refKey,
             toFacilityRef: "__OWN_PRIMARY__",
             direction: "UPSTREAM",
-            materialCategory: record.materialcategory,
+            materialCategory: materialCat || "General Materials",
             transportMode: (record.transportmode || "ROAD").toUpperCase(),
             volumeSharePct: splitPct ?? 100,
             allocationSplitPct: splitPct ?? null,
-            annualVolume: parseOptionalNumber(record.annualvolume) ?? null,
+            annualVolume: annualVol,
             volumeUnit: (record.baseunit || record.volumeunit || "TONNES").toUpperCase(),
-            annualSpendEur: parseOptionalNumber(record.annualspendeur) ?? null,
-            contractEndDate: record.contractenddate || null,
+            annualSpendEur: annualSpd,
+            contractEndDate: normalizeSpreadsheetDate(record.contractenddate),
             contractTerms: record.contracttype || null,
             riskStatus: "GREEN",
           },
+        });
+      }
+
+      if (annualVol !== null || annualSpd !== null) {
+        onboardingContracts.push({
+          rowNumber,
+          fromFacilityRef: refKey,
+          materialCategory: materialCat || "General Materials",
+          annualVolume: annualVol,
+          volumeUnit: (record.baseunit || record.volumeunit || "TONNES").toUpperCase(),
+          annualSpendEur: annualSpd,
+          currency: (record.currency || "EUR").toUpperCase(),
+          contractType: record.contracttype || null,
+          contractEndDate: normalizeSpreadsheetDate(record.contractenddate),
         });
       }
       continue;
@@ -448,7 +497,7 @@ export function parseBulkImportMatrix(matrix: string[][]): ParsedCsvPayload {
           annualVolume: parseOptionalNumber(record.annualvolume) ?? null,
           volumeUnit: (record.volumeunit || "TONNES").toUpperCase(),
           annualSpendEur: parseOptionalNumber(record.annualspendeur) ?? null,
-          contractEndDate: record.contractenddate || null,
+          contractEndDate: normalizeSpreadsheetDate(record.contractenddate),
           contractTerms: record.contractterms || null,
           leadTimeDays: parseOptionalNumber(record.leadtimedays) ?? null,
           safetyStockDays: parseOptionalNumber(record.safetystockdays),
@@ -478,7 +527,17 @@ export function parseBulkImportMatrix(matrix: string[][]): ParsedCsvPayload {
     }
   }
 
-  return { facilities, lanes, errors, outreachHints };
+  // Deduplicate outreachHints by email.trim().toLowerCase()
+  const outreachHintsMap = new Map<string, SupplierOutreachHint>();
+  for (const hint of rawOutreachHints) {
+    const emailKey = hint.email.trim().toLowerCase();
+    if (!outreachHintsMap.has(emailKey)) {
+      outreachHintsMap.set(emailKey, hint);
+    }
+  }
+  const outreachHints = [...outreachHintsMap.values()];
+
+  return { facilities, lanes, errors, outreachHints, onboardingContracts };
 }
 
 function facilityDedupeKey(input: {
@@ -498,6 +557,8 @@ export async function executeBulkImport(
     initialErrors?: BulkImportError[];
     products?: Array<{ rowNumber: number; raw: unknown }>;
     inputs?: Array<{ rowNumber: number; raw: unknown }>;
+    orgDefaults?: { name?: string; countryCode?: string };
+    onboardingContracts?: OnboardingContractItem[];
   },
 ): Promise<BulkImportSummary> {
   const errors: BulkImportError[] = [...(payload.initialErrors ?? [])];
@@ -632,10 +693,38 @@ export async function executeBulkImport(
     }
   }
 
-  const ownFacilitiesNow = (await workspaceRepo.listFacilities(orgId)).filter(
+  let ownFacilitiesNow = (await workspaceRepo.listFacilities(orgId)).filter(
     (f) => f.isOwnFacility,
   );
-  const primaryOwnFacilityId = ownFacilitiesNow[0]?.facilityId ?? null;
+  let primaryOwnFacilityId = ownFacilitiesNow[0]?.facilityId ?? null;
+
+  if (primaryOwnFacilityId === null && payload.lanes.some((item) => {
+    const raw = item.raw as Record<string, unknown> | null;
+    return raw?.toFacilityRef === "__OWN_PRIMARY__" || raw?.toFacilityId === "__OWN_PRIMARY__";
+  })) {
+    const countryCode = payload.orgDefaults?.countryCode ?? "EE";
+    const centroid = IMPORT_COUNTRY_CENTROIDS[countryCode] ?? [59.437, 24.7536];
+    const hqName = payload.orgDefaults?.name ? `${payload.orgDefaults.name} HQ` : "Primary Operations HQ";
+    try {
+      const createdOwn = await workspaceRepo.createFacility(orgId, {
+        name: hqName,
+        kind: "HQ",
+        locationPrecision: "HQ_ESTIMATED",
+        countryCode,
+        regionCode: null,
+        lat: centroid[0],
+        lng: centroid[1],
+        isOwnFacility: true,
+        relationshipRole: "OWN",
+        sector: null,
+      });
+      primaryOwnFacilityId = createdOwn.facilityId;
+      createdFacilities += 1;
+      registerFacilityRef(createdOwn.facilityId, createdOwn.name);
+    } catch (err) {
+      // non-fatal if creation fails here
+    }
+  }
 
   const resolveFacilityRef = (
     explicitId: string | undefined,
@@ -715,7 +804,7 @@ export async function executeBulkImport(
     const stableLaneId = row.laneId ? importedEntityId(orgId, "lane", row.laneId) : undefined;
     if (row.laneId && (existingLaneIds.has(row.laneId) || (stableLaneId && existingLaneIds.has(stableLaneId)))) continue;
     try {
-      await workspaceRepo.createLane(orgId, {
+      const createdLane = await workspaceRepo.createLane(orgId, {
         fromFacilityId,
         toFacilityId,
         direction: row.direction,
@@ -747,6 +836,68 @@ export async function executeBulkImport(
       }, stableLaneId);
       if (stableLaneId) existingLaneIds.add(stableLaneId);
       createdLanes += 1;
+
+      // Create Level-1 ESTIMATE / FRAMEWORK commercial Contract + ContractLine when onboarding row provides volume or spend
+      if (payload.onboardingContracts) {
+        const rawItem = item.raw as Record<string, unknown> | null;
+        const matchingContract = payload.onboardingContracts.find(
+          (c) =>
+            c.rowNumber === item.rowNumber ||
+            (rawItem && c.fromFacilityRef === rawItem.fromFacilityRef),
+        );
+        if (
+          matchingContract &&
+          ((matchingContract.annualVolume ?? 0) > 0 ||
+            (matchingContract.annualSpendEur ?? 0) > 0)
+        ) {
+          try {
+            const rawType = matchingContract.contractType?.toUpperCase();
+            const contractType =
+              rawType === "FRAMEWORK"
+                ? "FRAMEWORK"
+                : rawType === "SPOT_PO"
+                  ? "SPOT_PO"
+                  : "ESTIMATE";
+            const startDate = new Date().toISOString().slice(0, 10);
+            const endDate = matchingContract.contractEndDate || null;
+            const currency =
+              matchingContract.currency &&
+              /^[A-Z]{3}$/.test(matchingContract.currency.toUpperCase())
+                ? matchingContract.currency.toUpperCase()
+                : "EUR";
+
+            await workspaceRepo.createContractWithLinesAtomic(orgId, {
+              contract: {
+                supplierFacilityId: fromFacilityId,
+                title: `${matchingContract.materialCategory} Supply Contract`,
+                contractType,
+                pricingModel: "FIXED",
+                expiryBehavior: "HOLDOVER",
+                confidence: contractType === "ESTIMATE" ? "ESTIMATED" : "CONTRACTED",
+                startDate,
+                endDate,
+                noticePeriodDays: 0,
+                nonRenewalNoticeGiven: false,
+                incoterms: null,
+                notes: `Imported from supplier onboarding row ${matchingContract.rowNumber}`,
+              },
+              lines: [
+                {
+                  laneId: createdLane.laneId,
+                  committedVolume: matchingContract.annualVolume ?? null,
+                  unit: matchingContract.volumeUnit,
+                  committedSpend: matchingContract.annualSpendEur ?? null,
+                  currency,
+                  cadence: "PER_YEAR",
+                  unitPrice: null,
+                },
+              ],
+            });
+          } catch {
+            // Non-fatal fallback if optional contract metadata fails validation
+          }
+        }
+      }
     } catch (err) {
       errors.push({
         row: item.rowNumber,

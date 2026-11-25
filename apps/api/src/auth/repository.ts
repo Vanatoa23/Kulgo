@@ -356,7 +356,7 @@ export class ArcadeDbAuthRepository implements AuthRepository {
   async findOrganizationById(orgId: string): Promise<Organization | null> {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, scope2MarketTco2e, annualRevenueEur, targetMarkets, enabledCompliancePacks, openToNewBuyers, capabilities, createdAt FROM Organization WHERE orgId = :orgId LIMIT 1",
+      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, scope2MarketTco2e, annualRevenueEur, targetMarkets, enabledCompliancePacks, openToNewBuyers, capabilities, registryCode, createdAt FROM Organization WHERE orgId = :orgId LIMIT 1",
       { orgId },
     );
     const row = rows[0];
@@ -464,7 +464,7 @@ export class ArcadeDbAuthRepository implements AuthRepository {
     // Privacy invariant: NEVER select annualRevenueEur for cross-org directory listings
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, openToNewBuyers, capabilities, createdAt FROM Organization WHERE openToNewBuyers = true",
+      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, openToNewBuyers, capabilities, registryCode, createdAt FROM Organization WHERE openToNewBuyers = true",
     );
     return rows.map(mapOrganizationRow);
   }

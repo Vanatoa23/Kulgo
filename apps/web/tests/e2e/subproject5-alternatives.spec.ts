@@ -180,11 +180,21 @@ test("Sub-Project 5 E2E: supplier catalogue upload → See alternatives (1) → 
   ).toBeVisible();
 
   // 1-Click Test in What-If Simulator
+  const simulateRespP = buyerPage.waitForResponse(
+    (r) =>
+      r.request().method() === "POST" &&
+      r.url().includes("/api/v1/analytics/simulate") &&
+      r.ok(),
+  );
   await dialog
     .getByRole("button", { name: "Test in What-If Simulator" })
     .click();
+  const simResp = await simulateRespP;
+  const simJson = (await simResp.json()) as { appliedChangesCount: number };
+  expect(simJson.appliedChangesCount).toBeGreaterThanOrEqual(1);
+
   await expect(
-    buyerPage.getByText(/What-If/i).first(),
+    buyerPage.locator('[data-testid="whatif-alt-switch-banner"]').or(buyerPage.getByText(supplierOrgName)).first(),
   ).toBeVisible({ timeout: 10_000 });
 
   await buyerCtx.close();

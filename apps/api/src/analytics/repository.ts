@@ -658,7 +658,63 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     const commercialChangedLaneIds = new Set<string>();
     let appliedChangesCount = 0;
 
-    const simulatedLanesWithContractBase = network.lanes.map((lane) => {
+    let virtualFacility: Facility | undefined = undefined;
+    const altSwitch = request.alternativeSwitch;
+    if (altSwitch) {
+      const incumbent = network.facilities.find(
+        (f) => f.facilityId === altSwitch.fromFacilityId && !f.isOwnFacility,
+      );
+      if (!incumbent) {
+        throw new AnalyticsValidationError(
+          "Referenced fromFacilityId does not exist in this organization's visible network",
+        );
+      }
+      virtualFacility = {
+        facilityId: "00000000-0000-4000-8000-00000000a175",
+        ownerOrgId: safeOrgId,
+        name: altSwitch.alternativeName,
+        kind: "FACTORY",
+        locationPrecision: "HQ_ESTIMATED",
+        countryCode: altSwitch.countryCode,
+        regionCode: null,
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: false,
+        relationshipRole: "SUPPLIER",
+        isPartnerVerified: false,
+        sector: incumbent.sector,
+        esgBadges: [],
+        estimatedScope12Tco2e: null,
+      };
+
+      for (const lane of network.lanes) {
+        if (
+          lane.fromFacilityId === altSwitch.fromFacilityId &&
+          lane.volumeSharePct > 0
+        ) {
+          if (!changesByLaneId.has(lane.laneId)) {
+            const adjustedShare = Math.max(
+              0,
+              Math.round(
+                lane.volumeSharePct *
+                  (1 - altSwitch.switchPct / 100) *
+                  100,
+              ) / 100,
+            );
+            changesByLaneId.set(lane.laneId, {
+              laneId: lane.laneId,
+              volumeSharePct: adjustedShare,
+            });
+          }
+        }
+      }
+    }
+
+    const simulatedFacilities = virtualFacility
+      ? [...network.facilities, virtualFacility]
+      : network.facilities;
+
+    const baseSimulatedLanesWithContractBase = network.lanes.map((lane) => {
       const change = changesByLaneId.get(lane.laneId);
       if (!change) {
         return lane;
@@ -808,12 +864,80 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       };
     });
 
+    const simulatedLanesWithContractBase = [...baseSimulatedLanesWithContractBase];
+    if (altSwitch && virtualFacility) {
+      network.lanes.forEach((lane, idx) => {
+        if (
+          lane.fromFacilityId === altSwitch.fromFacilityId &&
+          lane.volumeSharePct > 0
+        ) {
+          const simLane =
+            baseSimulatedLanesWithContractBase.find(
+              (l) => l.laneId === lane.laneId,
+            ) ?? lane;
+          const switchedSharePct = Math.max(
+            0,
+            lane.volumeSharePct - simLane.volumeSharePct,
+          );
+          if (switchedSharePct > 0) {
+            appliedChangesCount += 1;
+            const switchedRatio =
+              lane.volumeSharePct > 0 ? switchedSharePct / lane.volumeSharePct : 0;
+            const baseComm = baselineSourceCommercials.laneSummaries.get(lane.laneId);
+            const baseVol =
+              baseComm?.activeVolume != null
+                ? baselineScale > 0
+                  ? baseComm.activeVolume / baselineScale
+                  : baseComm.activeVolume
+                : lane.annualVolume;
+            const baseSpend =
+              baseComm?.activeSpendEur != null
+                ? baselineScale > 0
+                  ? baseComm.activeSpendEur / baselineScale
+                  : baseComm.activeSpendEur
+                : lane.annualSpendEur;
+
+            simulatedLanesWithContractBase.push({
+              laneId: `00000000-0000-4000-8000-${String(idx + 1).padStart(12, "0")}`,
+              ownerOrgId: safeOrgId,
+              fromFacilityId: virtualFacility.facilityId,
+              toFacilityId: lane.toFacilityId,
+              direction: "UPSTREAM",
+              allocationSplitPct: null,
+              inputId: lane.inputId,
+              materialCategory: lane.materialCategory,
+              transportMode: lane.transportMode,
+              volumeSharePct: switchedSharePct,
+              annualVolume: baseVol !== null ? baseVol * switchedRatio : null,
+              volumeUnit: (baseComm?.baseUnit as SupplyLane["volumeUnit"]) ?? simLane.volumeUnit,
+              annualSpendEur: baseSpend !== null ? baseSpend * switchedRatio : null,
+              contractEndDate: null,
+              contractTerms: null,
+              leadTimeDays: lane.leadTimeDays,
+              distanceKm: altSwitch.estimatedDistanceKm ?? lane.distanceKm,
+              estimatedLaneCo2e: null,
+              riskStatus: altSwitch.riskStatus,
+              riskReason: null,
+              safetyStockDays: lane.safetyStockDays,
+              defectRatePct: lane.defectRatePct,
+              carryingCostPct: lane.carryingCostPct,
+              productEmissionFactorTco2ePerUnit:
+                altSwitch.productEmissionFactorTco2ePerUnit !== undefined
+                  ? altSwitch.productEmissionFactorTco2ePerUnit
+                  : lane.productEmissionFactorTco2ePerUnit,
+              pcfVerified: altSwitch.pcfVerified ?? false,
+            });
+          }
+        }
+      });
+    }
+
     const [baselinePartnerHiddenSummaries, simulatedPartnerHiddenSummaries] =
       this.resolvePartnerHiddenSummaries
         ? await Promise.all([
             this.resolvePartnerHiddenSummaries(safeOrgId, network),
             this.resolvePartnerHiddenSummaries(safeOrgId, {
-              facilities: network.facilities,
+              facilities: simulatedFacilities,
               lanes: simulatedLanesWithContractBase,
             }),
           ])
@@ -844,7 +968,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
 
     const simulatedSourcingLanes = filterSourcingLanes(
       simulatedLanesWithContractBase,
-      network.facilities,
+      simulatedFacilities,
     );
     const simulatedCommercials = deriveNetworkCommercials(
       simulatedSourcingLanes,
@@ -852,17 +976,21 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
       network.contracts ?? [],
       simulatedContractLines,
       {
-        asOfDate: isoDate, viewMode, facilities: network.facilities,
-        annualSpendEurOverrides: new Map(request.laneChanges
-          .filter((change) => change.annualSpendEur !== undefined)
-          .map((change) => [change.laneId, change.annualSpendEur!])),
+        asOfDate: isoDate,
+        viewMode,
+        facilities: simulatedFacilities,
+        annualSpendEurOverrides: new Map(
+          request.laneChanges
+            .filter((change) => change.annualSpendEur !== undefined)
+            .map((change) => [change.laneId, change.annualSpendEur!]),
+        ),
       },
     );
 
     const simulatedFinancialRisk = computeFinancialRiskSummary({
       products: network.products,
       inputs: network.inputs,
-      facilities: network.facilities,
+      facilities: simulatedFacilities,
       lanes: simulatedLanesWithContractBase,
       contracts: network.contracts,
       contractLines: simulatedContractLines,
@@ -905,7 +1033,7 @@ export class OrgScopedAnalyticsRepository implements AnalyticsRepository {
     const simulatedSummary = evaluateNetworkAnalytics({
       organization: orgContext,
       inputs: network.inputs,
-      facilities: network.facilities,
+      facilities: simulatedFacilities,
       lanes: simulatedLanesWithContractBase,
       riskSignals,
       partnerHiddenSummaries: simulatedPartnerHiddenSummaries,

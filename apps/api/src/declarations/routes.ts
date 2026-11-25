@@ -12,11 +12,13 @@ import type { AuthRepository } from "../auth/repository.js";
 import type { OutreachService } from "../outreach/service.js";
 
 import type { RelationshipDeclarationRepository } from "./repository.js";
+import type { CompanyRegistrySearchService } from "../registry/service.js";
 
 export interface DeclarationRoutesDependencies {
   authRepo: AuthRepository;
   declarationRepo: RelationshipDeclarationRepository;
   outreachService?: OutreachService;
+  registrySearch?: CompanyRegistrySearchService;
 }
 
 /**

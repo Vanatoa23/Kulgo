@@ -47,7 +47,7 @@ function tokenSet(normalized: string): Set<string> {
 }
 
 function isPlausibleMatch(queryNormalized: string, candidateNormalized: string): boolean {
-  if (queryNormalized.length < MIN_FUZZY_QUERY_LENGTH) return false;
+  if (queryNormalized.length < MIN_FUZZY_QUERY_LENGTH || candidateNormalized.length < MIN_FUZZY_QUERY_LENGTH) return false;
   if (candidateNormalized.includes(queryNormalized)) return true;
   if (queryNormalized.includes(candidateNormalized)) return true;
   const queryTokens = tokenSet(queryNormalized);

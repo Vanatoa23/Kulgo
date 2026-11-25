@@ -136,11 +136,15 @@ export class ArcadeDbEmailSuppressionRepository
       });
     }
     const createdAt = new Date().toISOString();
-    await this.db.command(
-      "sql",
-      "CREATE VERTEX EmailSuppression SET emailHash = :emailHash, reason = :reason, createdAt = :createdAt",
-      { emailHash, reason, createdAt },
-    );
+    try {
+      await this.db.command(
+        "sql",
+        "CREATE VERTEX EmailSuppression SET emailHash = :emailHash, reason = :reason, createdAt = :createdAt",
+        { emailHash, reason, createdAt },
+      );
+    } catch {
+      // Handle concurrent unique constraint violation / race
+    }
     return EmailSuppressionSchema.parse({ emailHash, reason, createdAt });
   }
 
@@ -176,20 +180,24 @@ export class ArcadeDbEmailSuppressionRepository
   }): Promise<void> {
     const exists = await this.hasOutreachBeenDispatched(params.dedupeKey);
     if (exists) return;
-    await this.db.command(
-      "sql",
-      `CREATE VERTEX OutreachDispatchLog SET
-        dedupeKey = :dedupeKey,
-        fromOrgId = :fromOrgId,
-        kind = :kind,
-        recipientEmailHash = :recipientEmailHash,
-        status = :status,
-        dispatchedAt = :dispatchedAt`,
-      {
-        ...params,
-        dispatchedAt: new Date().toISOString(),
-      },
-    );
+    try {
+      await this.db.command(
+        "sql",
+        `CREATE VERTEX OutreachDispatchLog SET
+          dedupeKey = :dedupeKey,
+          fromOrgId = :fromOrgId,
+          kind = :kind,
+          recipientEmailHash = :recipientEmailHash,
+          status = :status,
+          dispatchedAt = :dispatchedAt`,
+        {
+          ...params,
+          dispatchedAt: new Date().toISOString(),
+        },
+      );
+    } catch {
+      // Handle concurrent unique constraint violation / race
+    }
   }
 
   async countRecentDispatches(
@@ -246,9 +254,10 @@ export interface IntroDispatchResult {
 export class OutreachService {
   private readonly maxOrgEmailsPerHour: number;
   private readonly maxGlobalEmailsPerHour: number;
+  private readonly inflightDedupeKeys = new Set<string>();
 
   constructor(private readonly deps: OutreachServiceDeps) {
-    this.maxOrgEmailsPerHour = deps.maxOrgEmailsPerHour ?? 50;
+    this.maxOrgEmailsPerHour = deps.maxOrgEmailsPerHour ?? 25;
     this.maxGlobalEmailsPerHour = deps.maxGlobalEmailsPerHour ?? 500;
   }
 
@@ -309,87 +318,104 @@ export class OutreachService {
     inviteLink?: string;
     referenceId?: string;
   }): Promise<AutoOutreachResult> {
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(params.recipientEmail.trim())) {
+      throw new Error("Invalid recipient email format");
+    }
+
     const recipientHash = hashEmailForPrivacy(params.recipientEmail);
     const dedupeKey = `SUPPLIER_INVITE:${params.fromOrgId}:${recipientHash}`;
 
-    // 1. Strict deduplication: never email the same supplier twice for the same buyer org
-    if (await this.deps.suppressionRepo.hasOutreachBeenDispatched(dedupeKey)) {
+    if (this.inflightDedupeKeys.has(dedupeKey)) {
       return { status: "SKIPPED_DUPLICATE" };
     }
 
-    // 2. Global suppression / unsubscribe check
-    if (await this.deps.suppressionRepo.isSuppressed(params.recipientEmail)) {
-      return { status: "SKIPPED_SUPPRESSED" };
-    }
+    this.inflightDedupeKeys.add(dedupeKey);
+    try {
+      // 1. Strict deduplication: never email the same supplier twice for the same buyer org
+      if (await this.deps.suppressionRepo.hasOutreachBeenDispatched(dedupeKey)) {
+        return { status: "SKIPPED_DUPLICATE" };
+      }
 
-    // 3. Per-org and global hourly rate limits
-    const oneHourAgo = new Date(Date.now() - 3600_000).toISOString();
-    const [orgCount, globalCount] = await Promise.all([
-      this.deps.suppressionRepo.countRecentDispatches(params.fromOrgId, oneHourAgo),
-      this.deps.suppressionRepo.countRecentDispatches(null, oneHourAgo),
-    ]);
-    if (
-      orgCount >= this.maxOrgEmailsPerHour ||
-      globalCount >= this.maxGlobalEmailsPerHour
-    ) {
-      return { status: "RATE_LIMITED" };
-    }
+      // 2. Global suppression / unsubscribe check
+      if (await this.deps.suppressionRepo.isSuppressed(params.recipientEmail)) {
+        return { status: "SKIPPED_SUPPRESSED" };
+      }
 
-    const unsubToken = this.createUnsubscribeToken(params.recipientEmail);
-    const unsubUrl = `${this.deps.webOrigin.replace(/\/$/, "")}/api/v1/outreach/unsubscribe?token=${encodeURIComponent(unsubToken)}`;
-    const joinUrl = params.inviteLink ?? this.deps.webOrigin;
+      // 3. Per-org and global hourly rate limits
+      const oneHourAgo = new Date(Date.now() - 3600_000).toISOString();
+      const [orgCount, globalCount] = await Promise.all([
+        this.deps.suppressionRepo.countRecentDispatches(params.fromOrgId, oneHourAgo),
+        this.deps.suppressionRepo.countRecentDispatches(null, oneHourAgo),
+      ]);
+      if (
+        orgCount >= this.maxOrgEmailsPerHour ||
+        globalCount >= this.maxGlobalEmailsPerHour
+      ) {
+        return { status: "RATE_LIMITED" };
+      }
 
-    let status: "SENT" | "RECORDED" = "RECORDED";
-    if (this.deps.emailProvider) {
-      const subject = `${params.fromOrgName} invited ${params.supplierName} to verify your supply relationship on Kulgo`;
-      const text = [
-        `Hello ${params.supplierName},`,
-        "",
-        `${params.fromOrgName} listed your organization as a supply partner on Kulgo.`,
-        "You can join Kulgo for free to:",
-        "1. Confirm the supply relationship and reconcile your fulfilling facility.",
-        "2. Receive free disruption risk monitoring for your operations.",
-        "3. Optionally publish your Product Catalogue to become discoverable to new buyers.",
-        "",
-        `Accept or review invitation: ${joinUrl}`,
-        "",
-        `Do not want to receive Kulgo invitations? Unsubscribe with 1 click: ${unsubUrl}`,
-      ].join("\n");
-      const html = `<p>${text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br/>")}</p>`;
+      const unsubToken = this.createUnsubscribeToken(params.recipientEmail);
+      const unsubUrl = `${this.deps.webOrigin.replace(/\/$/, "")}/api/v1/outreach/unsubscribe?token=${encodeURIComponent(unsubToken)}`;
+      const joinUrl = params.inviteLink ?? this.deps.webOrigin;
 
-      await this.deps.emailProvider.send({
-        from: this.deps.fromEmail,
-        to: [params.recipientEmail.trim().toLowerCase()],
-        subject,
-        text,
-        html,
-        idempotencyKey: createHash("sha256").update(dedupeKey).digest("hex"),
+      let status: "SENT" | "RECORDED" = "RECORDED";
+      if (this.deps.emailProvider) {
+        const subject = `${params.fromOrgName} invited ${params.supplierName} to verify your supply relationship on Kulgo`;
+        const text = [
+          `Hello ${params.supplierName},`,
+          "",
+          `${params.fromOrgName} listed your organization as a supply partner on Kulgo.`,
+          "You can join Kulgo for free to:",
+          "1. Confirm the supply relationship and reconcile your fulfilling facility.",
+          "2. Receive free disruption risk monitoring for your operations.",
+          "3. Optionally publish your Product Catalogue to become discoverable to new buyers.",
+          "",
+          `Accept or review invitation: ${joinUrl}`,
+          "",
+          `Do not want to receive Kulgo invitations? Unsubscribe with 1 click: ${unsubUrl}`,
+        ].join("\n");
+        const html = `<p>${text.replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/\n/g, "<br/>")}</p>`;
+
+        await this.deps.emailProvider.send({
+          from: this.deps.fromEmail,
+          to: [params.recipientEmail.trim().toLowerCase()],
+          subject,
+          text,
+          html,
+          headers: {
+            "List-Unsubscribe": `<${unsubUrl}>`,
+            "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+          },
+          idempotencyKey: createHash("sha256").update(dedupeKey).digest("hex"),
+        });
+        status = "SENT";
+      }
+
+      await this.deps.suppressionRepo.recordOutreachDispatch({
+        dedupeKey,
+        fromOrgId: params.fromOrgId,
+        kind: "SUPPLIER_INVITE",
+        recipientEmailHash: recipientHash,
+        status,
       });
-      status = "SENT";
+
+      await this.deps.authRepo.recordAuditEvent({
+        orgId: params.fromOrgId,
+        actorUserId: params.actorUserId,
+        actorEmail: params.actorEmail,
+        action: "INVITE_CREATED",
+        summary: `Automated outreach ${status.toLowerCase()} for ${params.supplierName}`,
+        metadata: {
+          outreachStatus: status,
+          recipientEmailHash: recipientHash.slice(0, 16),
+          ...(params.referenceId ? { referenceId: params.referenceId } : {}),
+        },
+      });
+
+      return { status };
+    } finally {
+      this.inflightDedupeKeys.delete(dedupeKey);
     }
-
-    await this.deps.suppressionRepo.recordOutreachDispatch({
-      dedupeKey,
-      fromOrgId: params.fromOrgId,
-      kind: "SUPPLIER_INVITE",
-      recipientEmailHash: recipientHash,
-      status,
-    });
-
-    await this.deps.authRepo.recordAuditEvent({
-      orgId: params.fromOrgId,
-      actorUserId: params.actorUserId,
-      actorEmail: params.actorEmail,
-      action: "INVITE_CREATED",
-      summary: `Automated outreach ${status.toLowerCase()} for ${params.supplierName}`,
-      metadata: {
-        outreachStatus: status,
-        recipientEmailHash: recipientHash.slice(0, 16),
-        ...(params.referenceId ? { referenceId: params.referenceId } : {}),
-      },
-    });
-
-    return { status };
   }
 
   async dispatchIntroRequest(params: {
@@ -406,6 +432,10 @@ export class OutreachService {
     unit?: string;
     note?: string;
   }): Promise<IntroDispatchResult> {
+    if (params.targetContactEmail && !/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(params.targetContactEmail.trim())) {
+      throw new Error("Invalid target contact email format");
+    }
+
     const requestId = randomUUID();
     const sentAt = new Date().toISOString();
     const recipientHash = params.targetContactEmail
@@ -457,6 +487,10 @@ export class OutreachService {
         subject,
         text,
         html,
+        headers: {
+          "List-Unsubscribe": `<${unsubUrl}>`,
+          "List-Unsubscribe-Post": "List-Unsubscribe=One-Click",
+        },
         idempotencyKey: requestId,
       });
       status = "SENT";

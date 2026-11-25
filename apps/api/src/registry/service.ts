@@ -20,6 +20,7 @@ export type { RegistrySnapshotError, SnapshotState };
  */
 export interface CompanyRegistrySearchService {
   search(input: CompanyRegistrySearchInput): Promise<CompanyRegistrySearchResponse>;
+  searchByName?: (name: string, countryCode?: string) => Promise<readonly { registryCode: string; name: string; vatNumber?: string | null; address?: string | null }[]>;
   /** Current snapshot state, for operators and tests. */
   snapshotState(): Promise<SnapshotState>;
 }
@@ -47,6 +48,21 @@ export function createEeCompanyRegistrySearchService(
         registryId: input.registryId ?? null,
       });
       return { ...result, source: EE_COMPANY_REGISTRY_SOURCE };
+    },
+    async searchByName(name, countryCode) {
+      const snapshot = await store.getSnapshot();
+      if (snapshot.kind !== "ok") {
+        return [];
+      }
+      const result: RegistrySearchResult = matchRegistry(snapshot.index, {
+        name,
+        countryCode: countryCode ?? null,
+        registryId: null,
+      });
+      return result.candidates.map((c) => ({
+        registryCode: c.registryId,
+        name: c.legalName,
+      }));
     },
   };
 }

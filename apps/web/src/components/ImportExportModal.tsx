@@ -15,7 +15,7 @@ import {
   Upload,
   X,
 } from "lucide-react";
-import { useMemo, useState, type ChangeEvent } from "react";
+import { useEffect, useMemo, useState, type ChangeEvent } from "react";
 import {
   bulkImportWorkspace,
   downloadAuthenticatedTemplate,
@@ -175,7 +175,10 @@ export function ImportExportModal({
 
   const handleFileChange = (e: ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
-    if (!file) return;
+    if (!file) {
+      e.target.value = "";
+      return;
+    }
     setFileName(file.name);
     setImportResult(null);
     setImportError(null);
@@ -203,7 +206,20 @@ export function ImportExportModal({
       };
       reader.readAsText(file);
     }
+    e.target.value = "";
   };
+
+  // Escape key handler
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
 
   const handleDownloadSupplierTemplate = async (format: "xlsx" | "csv") => {
     setDownloadingTemplate(format);

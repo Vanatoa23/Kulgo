@@ -246,6 +246,7 @@ export interface DirectoryRepositoryDeps {
   riskSignalRepo: RiskSignalRepository;
   workspaceRepo?: WorkspaceRepository;
   catalogueRepo?: CatalogueRepository;
+  inviteRepo?: any;
 }
 
 /**
@@ -261,12 +262,14 @@ export class KulgoDirectoryRepository implements DirectoryRepository {
   private readonly riskSignalRepo: RiskSignalRepository;
   private readonly workspaceRepo?: WorkspaceRepository;
   private readonly catalogueRepo?: CatalogueRepository;
+  private readonly inviteRepo?: any;
 
   constructor(deps: DirectoryRepositoryDeps) {
     this.authRepo = deps.authRepo;
     this.riskSignalRepo = deps.riskSignalRepo;
     this.workspaceRepo = deps.workspaceRepo;
     this.catalogueRepo = deps.catalogueRepo;
+    this.inviteRepo = deps.inviteRepo;
   }
 
   async listAlternatives(
@@ -476,11 +479,39 @@ export class KulgoDirectoryRepository implements DirectoryRepository {
     // Also exclude by exact normalized name match with the current supplier
     const currentSupplierNameLower = facility.name.trim().toLowerCase();
 
-    const eligibleOptInOrgs = optInOrgs.filter(
-      (org) =>
-        !excludedOrgIds.has(org.orgId) &&
-        org.name.trim().toLowerCase() !== currentSupplierNameLower,
-    );
+    if (this.inviteRepo && typeof this.inviteRepo.listAcceptedForFacility === "function") {
+      try {
+        const accepted = await this.inviteRepo.listAcceptedForFacility(facilityId);
+        if (Array.isArray(accepted)) {
+          for (const invite of accepted) {
+            const email = typeof invite === "string" ? invite : invite?.inviteeEmail;
+            if (typeof email === "string" && email.trim().length > 0) {
+              const user = await this.authRepo.findUserByEmail(email.trim());
+              if (user?.orgId) {
+                excludedOrgIds.add(user.orgId);
+              }
+            }
+          }
+        }
+      } catch {
+        // ignore if inviteRepo method fails
+      }
+    }
+
+    const facilityRegistryCodeNorm = facility.registryCode
+      ? facility.registryCode.trim().toLowerCase()
+      : null;
+
+    const eligibleOptInOrgs = optInOrgs.filter((org) => {
+      if (excludedOrgIds.has(org.orgId)) return false;
+      if (org.name.trim().toLowerCase() === currentSupplierNameLower) return false;
+      if (facilityRegistryCodeNorm && org.registryCode) {
+        if (org.registryCode.trim().toLowerCase() === facilityRegistryCodeNorm) {
+          return false;
+        }
+      }
+      return true;
+    });
 
     const catalogueItems = this.catalogueRepo
       ? await this.catalogueRepo.listByOrgIds(

@@ -24,6 +24,7 @@ import { createRequireAuth, type AuthVariables } from "../auth/middleware.js";
 import type { AuthRepository } from "../auth/repository.js";
 import type { RiskSignalRepository } from "../analytics/risk-signals.js";
 import type { OutreachService } from "../outreach/service.js";
+import type { CompanyRegistrySearchService } from "../registry/service.js";
 import {
   buildWorkspaceExportJson,
   executeBulkImport,
@@ -45,6 +46,7 @@ export interface WorkspaceRoutesDependencies {
   workspaceRepo: WorkspaceRepository;
   riskSignalRepo?: RiskSignalRepository;
   outreachService?: OutreachService;
+  registrySearch?: CompanyRegistrySearchService;
 }
 
 const NetworkQuerySchema = z.object({
@@ -57,6 +59,7 @@ export function createWorkspaceRoutes({
   workspaceRepo,
   riskSignalRepo,
   outreachService,
+  registrySearch,
 }: WorkspaceRoutesDependencies): Hono<{ Variables: AuthVariables }> {
   const routes = new Hono<{ Variables: AuthVariables }>();
   const requireAuth = createRequireAuth(authRepo);
@@ -207,6 +210,11 @@ export function createWorkspaceRoutes({
           facilities: parsedXlsx.facilities,
           lanes: parsedXlsx.lanes,
           initialErrors: parsedXlsx.errors,
+          onboardingContracts: parsedXlsx.onboardingContracts,
+          orgDefaults: {
+            name: auth.organization.name,
+            countryCode: auth.organization.countryCode,
+          },
         });
         triggerOutreachHints(parsedXlsx.outreachHints);
         await recordBulkImportAudit("xlsx", summary);
@@ -226,6 +234,11 @@ export function createWorkspaceRoutes({
           facilities: parsedCsv.facilities,
           lanes: parsedCsv.lanes,
           initialErrors: parsedCsv.errors,
+          onboardingContracts: parsedCsv.onboardingContracts,
+          orgDefaults: {
+            name: auth.organization.name,
+            countryCode: auth.organization.countryCode,
+          },
         });
         triggerOutreachHints(parsedCsv.outreachHints);
         await recordBulkImportAudit("csv", summary);
@@ -264,6 +277,11 @@ export function createWorkspaceRoutes({
           facilities: parsedXlsx.facilities,
           lanes: parsedXlsx.lanes,
           initialErrors: parsedXlsx.errors,
+          onboardingContracts: parsedXlsx.onboardingContracts,
+          orgDefaults: {
+            name: auth.organization.name,
+            countryCode: auth.organization.countryCode,
+          },
         });
         triggerOutreachHints(parsedXlsx.outreachHints);
         await recordBulkImportAudit("xlsx", summary);
@@ -276,6 +294,11 @@ export function createWorkspaceRoutes({
           facilities: parsedCsv.facilities,
           lanes: parsedCsv.lanes,
           initialErrors: parsedCsv.errors,
+          onboardingContracts: parsedCsv.onboardingContracts,
+          orgDefaults: {
+            name: auth.organization.name,
+            countryCode: auth.organization.countryCode,
+          },
         });
         triggerOutreachHints(parsedCsv.outreachHints);
         await recordBulkImportAudit("csv", summary);
@@ -525,6 +548,25 @@ export function createWorkspaceRoutes({
     }
 
     const facility = await workspaceRepo.createFacility(orgId, parsed.data);
+
+    if (
+      registrySearch &&
+      !facility.isOwnFacility &&
+      facility.countryCode === "EE" &&
+      !facility.registryCode
+    ) {
+      void registrySearch
+        .search({ name: facility.name, countryCode: "EE" })
+        .then(async (res) => {
+          if (res.outcome === "CONCLUSIVE_MATCH" && res.candidates[0]) {
+            await workspaceRepo.updateFacility(orgId, facility.facilityId, {
+              registryCode: res.candidates[0].registryId,
+            });
+          }
+        })
+        .catch(() => {});
+    }
+
     return c.json({ facility }, 201);
   });
 

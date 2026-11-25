@@ -175,6 +175,7 @@ export class FileRegistrySnapshotStore {
   private readonly filePath: string;
   private stamp: { mtimeMs: number; size: number } | null = null;
   private index: RegistrySnapshotIndex | null = null;
+  private inflight: Promise<SnapshotState> | null = null;
 
   constructor(filePath: string) {
     this.filePath = path.resolve(filePath);
@@ -185,6 +186,16 @@ export class FileRegistrySnapshotStore {
   }
 
   async getSnapshot(): Promise<SnapshotState> {
+    if (this.inflight) {
+      return this.inflight;
+    }
+    this.inflight = this.loadSnapshotInternal().finally(() => {
+      this.inflight = null;
+    });
+    return this.inflight;
+  }
+
+  private async loadSnapshotInternal(): Promise<SnapshotState> {
     let stat: Awaited<ReturnType<typeof fs.stat>>;
     try {
       stat = await fs.stat(this.filePath);

@@ -71,7 +71,6 @@ export const KULGO_MATERIAL_TAXONOMY: readonly TaxonomyCategoryDefinition[] = [
       "housings",
       "profile",
       "profiles",
-      "al",
     ],
   },
   {
@@ -487,8 +486,8 @@ export function matchStandardizedCategories(
           }
         } else if (tokens.has(kw)) {
           score = Math.max(score, 75);
-        } else if (normalized.includes(kw) && kw.length >= 4) {
-          score = Math.max(score, 60);
+        } else if (kw.length >= 5 && Array.from(tokens).some((t) => t.startsWith(kw) && t.length <= kw.length + 4)) {
+          score = Math.max(score, 62);
         }
       }
       // Bonus for multiple keyword hits
@@ -583,7 +582,23 @@ export const CreateCatalogueItemInputSchema = z
       .max(20)
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((val, ctx) => {
+    if (val.baseUnit && val.unitFamily && val.unitFamily !== inferUnitFamilyFromVolumeUnit(val.baseUnit)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["unitFamily"],
+        message: "Incompatible baseUnit and unitFamily",
+      });
+    }
+    if (val.pcfVerified === true && (val.productEmissionFactorTco2ePerUnit === undefined || val.productEmissionFactorTco2ePerUnit === null)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pcfVerified"],
+        message: "pcfVerified requires productEmissionFactorTco2ePerUnit",
+      });
+    }
+  });
 export type CreateCatalogueItemInput = z.infer<
   typeof CreateCatalogueItemInputSchema
 >;
@@ -611,7 +626,24 @@ export const UpdateCatalogueItemInputSchema = z
       .max(20)
       .optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((val, ctx) => {
+    if (val.baseUnit && val.unitFamily && val.unitFamily !== inferUnitFamilyFromVolumeUnit(val.baseUnit)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["unitFamily"],
+        message: "Incompatible baseUnit and unitFamily",
+      });
+    }
+    if (val.pcfVerified === true && val.productEmissionFactorTco2ePerUnit === null) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["pcfVerified"],
+        message: "pcfVerified cannot be true when productEmissionFactorTco2ePerUnit is null",
+      });
+    }
+  });
+
 export type UpdateCatalogueItemInput = z.infer<
   typeof UpdateCatalogueItemInputSchema
 >;

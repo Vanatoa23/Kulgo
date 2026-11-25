@@ -28,6 +28,7 @@ import { ImportExportModal } from "./components/ImportExportModal.js";
 import { LiveAlertsPanel } from "./components/LiveAlertsPanel.js";
 import { LogicalGraphView } from "./components/LogicalGraphView.js";
 import { NetworkHubPage } from "./components/NetworkHubPage.js";
+import { NodeInspectorDrawer } from "./components/NodeInspectorDrawer.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { SupplyMap } from "./components/SupplyMap.js";
 import { TopContextBar } from "./components/TopContextBar.js";
@@ -868,6 +869,7 @@ export function App() {
                 setDirectoryFacilityContext({ facilityId, facilityName });
                 setDirectoryOpen(true);
               }}
+              onOpenImportExport={() => setImportExportOpen(true)}
               onSeedDemo={() => void handleSeedDemo()}
               onCreateFacility={handleCreateFacility}
               onUpdateFacility={handleUpdateFacility}
@@ -887,38 +889,87 @@ export function App() {
           {activePage === "map" && (
             <div className="relative flex-1 flex min-h-0 overflow-hidden">
               {mapViewMode === "map" ? (
-                <SupplyMap
-                  facilities={filtered.facilities}
-                  lanes={filtered.lanes}
-                  inputs={network.inputs}
-                  riskSignals={network.riskSignals}
-                  analytics={analytics}
-                  selectedFacilityId={selectedFacilityId}
-                  selectedLaneId={selectedLaneId}
-                  mapMode={mapMode}
-                  refiningFacilityName={null}
-                  fitTrigger={fitTrigger}
-                  onSelectFacility={(facilityId) => {
-                    setSelectedFacilityId(facilityId);
-                    setSelectedLaneId(null);
-                  }}
-                  onSelectLane={(laneId) => {
-                    setSelectedLaneId(laneId);
-                    setSelectedFacilityId(null);
-                  }}
-                  onMapPickCoordinates={() => {
-                    setMapMode("inspect");
-                  }}
-                  onCancelMapMode={() => setMapMode("inspect")}
-                  onAcknowledgeSignal={handleAcknowledgeAlert}
-                  onToggleLogicalGraph={() => setMapViewMode("graph")}
-                  onOpenSimulator={() => setSimulatorOpen(true)}
-                  onInspectLaneInHub={(lane) => {
-                    setSelectedFacilityId(lane.fromFacilityId);
-                    setSelectedLaneId(lane.laneId);
-                    navigateToPage("hub");
-                  }}
-                />
+                <>
+                  <SupplyMap
+                    facilities={filtered.facilities}
+                    lanes={filtered.lanes}
+                    inputs={network.inputs}
+                    riskSignals={network.riskSignals}
+                    analytics={analytics}
+                    selectedFacilityId={selectedFacilityId}
+                    selectedLaneId={selectedLaneId}
+                    mapMode={mapMode}
+                    refiningFacilityName={null}
+                    fitTrigger={fitTrigger}
+                    onSelectFacility={(facilityId) => {
+                      setSelectedFacilityId(facilityId);
+                      setSelectedLaneId(null);
+                    }}
+                    onSelectLane={(laneId) => {
+                      setSelectedLaneId(laneId);
+                      setSelectedFacilityId(null);
+                    }}
+                    onMapPickCoordinates={() => {
+                      setMapMode("inspect");
+                    }}
+                    onCancelMapMode={() => setMapMode("inspect")}
+                    onAcknowledgeSignal={handleAcknowledgeAlert}
+                    onToggleLogicalGraph={() => setMapViewMode("graph")}
+                    onOpenSimulator={() => setSimulatorOpen(true)}
+                    onInspectLaneInHub={(lane) => {
+                      setSelectedFacilityId(lane.fromFacilityId);
+                      setSelectedLaneId(lane.laneId);
+                      navigateToPage("hub");
+                    }}
+                  />
+                  {(() => {
+                    const selectedMapFacility = selectedFacilityId
+                      ? filtered.facilities.find(
+                          (f) => f.facilityId === selectedFacilityId,
+                        ) ?? null
+                      : null;
+                    return selectedMapFacility ? (
+                      <NodeInspectorDrawer
+                        facility={selectedMapFacility}
+                        allFacilities={filtered.facilities}
+                        lanes={filtered.lanes}
+                        inputs={filtered.inputs}
+                        contracts={network.contracts ?? []}
+                        contractLines={network.contractLines ?? []}
+                        invitations={invitations}
+                        analytics={analytics}
+                        userRole={session.user.role}
+                        busy={busy}
+                        initialLaneId={selectedLaneId}
+                        onClose={() => setSelectedFacilityId(null)}
+                        onViewOnMap={(facilityId) => {
+                          setSelectedFacilityId(facilityId);
+                          setFitTrigger((n) => n + 1);
+                        }}
+                        onOpenDirectory={(cap) => {
+                          setDirectoryFacilityContext(null);
+                          setDirectoryInitialCapability(cap ?? "");
+                          setDirectoryOpen(true);
+                        }}
+                        onOpenFacilityAlternatives={(facilityId, facilityName) => {
+                          setDirectoryFacilityContext({
+                            facilityId,
+                            facilityName,
+                          });
+                          setDirectoryOpen(true);
+                        }}
+                        onUpdateFacility={handleUpdateFacility}
+                        onDeleteFacility={handleDeleteFacility}
+                        onCreateLane={handleCreateLane}
+                        onUpdateLane={handleUpdateLane}
+                        onApplyAllocationSplits={handleApplyAllocationSplits}
+                        onDeleteLane={handleDeleteLane}
+                        onCreateInvite={handleCreateInvite}
+                        onContractsChanged={() => loadWorkspaceNetwork(false)}
+                      />
+                    ) : null;
+                  })()}
+                </>
               ) : (
                 <div className="relative flex-1 flex min-h-0">
                   <LogicalGraphView

@@ -104,4 +104,35 @@ describe("Sub-Project 5 — Catalogue & Taxonomy shared contracts", () => {
       }),
     ).toThrow();
   });
+
+  it("verifies negative category matching rules", () => {
+    const checkNoMatch = (text: string, category: any) => {
+      const matches = matchStandardizedCategories(text);
+      const found = matches.find((m) => m.code === category);
+      return !found || found.score < 60;
+    };
+    expect(checkNoMatch("Corrugated cardboard", "PCB_ASSEMBLY")).toBe(true);
+    expect(checkNoMatch("Woodchips", "SEMICONDUCTOR_SUBSTRATES")).toBe(true);
+    expect(checkNoMatch("Cellulose", "LITHIUM_ION_CELLS")).toBe(true);
+  });
+
+  it("rejects invalid unitFamily and pcfVerified inputs in CreateCatalogueItemInputSchema", () => {
+    const res1 = CreateCatalogueItemInputSchema.safeParse({
+      standardizedCategory: "ALUMINUM_EXTRUSIONS",
+      productTitle: "Test",
+      baseUnit: "TONNES",
+      unitFamily: "COUNT",
+    });
+    expect(res1.success).toBe(false);
+
+    const res2 = CreateCatalogueItemInputSchema.safeParse({
+      standardizedCategory: "ALUMINUM_EXTRUSIONS",
+      productTitle: "Test",
+      baseUnit: "TONNES",
+      unitFamily: "MASS",
+      pcfVerified: true,
+      productEmissionFactorTco2ePerUnit: null,
+    });
+    expect(res2.success).toBe(false);
+  });
 });

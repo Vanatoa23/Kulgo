@@ -16,10 +16,10 @@ import {
 } from "@kulgo/shared";
 import { Hono } from "hono";
 import { z } from "zod";
-import { createRequireAuth, type AuthVariables } from "../auth/middleware.js";
+import { createRequireAuth, requireOwner, type AuthVariables } from "../auth/middleware.js";
 import type { AuthRepository } from "../auth/repository.js";
 import type { OutreachService } from "../outreach/service.js";
-import { parseCsvRecords } from "../workspace/import-export.js";
+import { parseCsvRecords, MAX_CSV_ROWS, escapeCsvCell, stripFormulaGuardOnImport } from "../workspace/import-export.js";
 import { buildXlsxBuffer, parseXlsxBuffer } from "../workspace/xlsx.js";
 import {
   CatalogueNotFoundError,
@@ -102,7 +102,7 @@ function parsePipeList(raw: string | undefined): string[] {
   if (!raw) return [];
   return raw
     .split(/[|;]/)
-    .map((s) => s.trim())
+    .map((s) => stripFormulaGuardOnImport(s.trim()))
     .filter((s) => s.length > 0);
 }
 
@@ -292,7 +292,7 @@ export function createDirectoryRoutes({
 
   // --- Supplier Product Catalogue CRUD & Bulk Import ---
   routes.get("/catalogue/template.csv", (c) => {
-    const csv = CATALOGUE_TEMPLATE_ROWS.map((row) => row.join(",")).join("\n");
+    const csv = CATALOGUE_TEMPLATE_ROWS.map((row) => row.map(escapeCsvCell).join(",")).join("\n");
     c.header("Content-Type", "text/csv; charset=utf-8");
     c.header(
       "Content-Disposition",
@@ -323,7 +323,7 @@ export function createDirectoryRoutes({
     return c.json(ListCatalogueItemsResponseSchema.parse({ items }), 200);
   });
 
-  routes.post("/catalogue", async (c) => {
+  routes.post("/catalogue", requireOwner, async (c) => {
     if (!catalogueRepo) {
       return c.json({ error: "Catalogue repository not configured" }, 503);
     }
@@ -359,7 +359,7 @@ export function createDirectoryRoutes({
     return c.json(CatalogueItemResponseSchema.parse({ item }), 201);
   });
 
-  routes.patch("/catalogue/:itemId", async (c) => {
+  routes.patch("/catalogue/:itemId", requireOwner, async (c) => {
     if (!catalogueRepo) {
       return c.json({ error: "Catalogue repository not configured" }, 503);
     }
@@ -410,7 +410,7 @@ export function createDirectoryRoutes({
     }
   });
 
-  routes.delete("/catalogue/:itemId", async (c) => {
+  routes.delete("/catalogue/:itemId", requireOwner, async (c) => {
     if (!catalogueRepo) {
       return c.json({ error: "Catalogue repository not configured" }, 503);
     }
@@ -437,7 +437,7 @@ export function createDirectoryRoutes({
     return c.json({ ok: true, deletedItemId: itemId }, 200);
   });
 
-  routes.post("/catalogue/import", async (c) => {
+  routes.post("/catalogue/import", requireOwner, async (c) => {
     if (!catalogueRepo) {
       return c.json({ error: "Catalogue repository not configured" }, 503);
     }

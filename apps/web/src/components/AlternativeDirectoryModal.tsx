@@ -30,7 +30,12 @@ export interface AlternativeDirectoryModalProps {
   onTestInWhatIf?: (params: {
     facilityId: string;
     alternativeName: string;
+    countryCode: string;
+    riskStatus: string;
     switchPct: number;
+    estimatedDistanceKm?: number;
+    productEmissionFactorTco2ePerUnit?: number;
+    pcfVerified?: boolean;
   }) => void;
   onClose: () => void;
 }
@@ -43,6 +48,16 @@ const COUNTRY_OPTIONS = [
   { code: "DE", label: "Germany (DE)" },
   { code: "PL", label: "Poland (PL)" },
   { code: "LT", label: "Lithuania (LT)" },
+  { code: "LV", label: "Latvia (LV)" },
+  { code: "DK", label: "Denmark (DK)" },
+  { code: "NL", label: "Netherlands (NL)" },
+  { code: "BE", label: "Belgium (BE)" },
+  { code: "FR", label: "France (FR)" },
+  { code: "GB", label: "United Kingdom (GB)" },
+  { code: "AT", label: "Austria (AT)" },
+  { code: "IT", label: "Italy (IT)" },
+  { code: "ES", label: "Spain (ES)" },
+  { code: "CZ", label: "Czech Republic (CZ)" },
   { code: "NO", label: "Norway (NO)" },
   { code: "RO", label: "Romania (RO)" },
 ];
@@ -89,6 +104,18 @@ export function AlternativeDirectoryModal({
       setIntroError(null);
     }
   }, [open, initialCapability, facilityId]);
+
+  // Escape key handler
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
 
   useEffect(() => {
     if (!open) return;
@@ -370,13 +397,29 @@ export function AlternativeDirectoryModal({
               </select>
               <button
                 type="button"
-                onClick={() =>
+                onClick={() => {
+                  const firstItem = alt.matchedCatalogueItems[0];
                   onTestInWhatIf({
                     facilityId,
                     alternativeName: alt.name,
+                    countryCode: alt.countryCode,
+                    riskStatus: alt.riskStatus,
                     switchPct,
-                  })
-                }
+                    ...(alt.estimatedDistanceKm !== null
+                      ? { estimatedDistanceKm: alt.estimatedDistanceKm }
+                      : {}),
+                    ...(firstItem?.productEmissionFactorTco2ePerUnit !== undefined &&
+                    firstItem?.productEmissionFactorTco2ePerUnit !== null
+                      ? {
+                          productEmissionFactorTco2ePerUnit:
+                            firstItem.productEmissionFactorTco2ePerUnit,
+                        }
+                      : {}),
+                    ...(firstItem?.pcfVerified !== undefined
+                      ? { pcfVerified: firstItem.pcfVerified }
+                      : {}),
+                  });
+                }}
                 className="inline-flex items-center gap-1.5 rounded-md border border-indigo-500/40 bg-indigo-500/15 hover:bg-indigo-500/25 px-2.5 py-1 text-[11px] font-medium text-indigo-200 cursor-pointer"
               >
                 <SlidersHorizontal className="h-3 w-3" />

@@ -751,7 +751,31 @@ export function SettingsPage({
               </div>
             </form>
 
-            <ProductCatalogueSection organization={organization} />
+            <ProductCatalogueSection
+              organization={organization}
+              isOwner={isOwner}
+              onEnableDirectoryOptIn={async () => {
+                setOpenToNewBuyers(true);
+                try {
+                  const updated = await updateOrganizationProfile({
+                    openToNewBuyers: true,
+                    capabilities: parseCommaList(capabilitiesText),
+                    targetMarkets,
+                    enabledCompliancePacks,
+                    esgBadges,
+                  });
+                  onUpdated(updated);
+                  setOrgSaved(true);
+                  void loadAuditLog();
+                } catch (err) {
+                  setOrgError(
+                    err instanceof Error
+                      ? err.message
+                      : "Failed to enable directory opt-in.",
+                  );
+                }
+              }}
+            />
 
             {/* Alert Channels Card */}
             <form
@@ -951,11 +975,11 @@ export function SettingsPage({
                   <input
                     type="password"
                     required
-                    minLength={8}
+                    minLength={10}
                     aria-label="New member password"
                     value={newMemberPassword}
                     onChange={(e) => setNewMemberPassword(e.target.value)}
-                    placeholder="Temporary password (8+ chars)"
+                    placeholder="Temporary password (10+ chars)"
                     className="rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-white"
                   />
                   <select

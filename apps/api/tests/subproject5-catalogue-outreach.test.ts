@@ -396,4 +396,269 @@ describe("Sub-Project 5 — Product Catalogue, XLSX Onboarding, Alternatives & O
     await new Promise((r) => setTimeout(r, 25));
     expect(emailCapture.sent.length).toBe(2);
   });
+
+  it("handles real-world Excel self-closing <c .../> cells, XML entity edge cases, and blocks sparse-column & deflate DoS", async () => {
+    const { deflateRawSync } = await import("node:zlib");
+    // Build a valid base XLSX and replace sheet1.xml with Excel-style self-closing <c r="B2" s="1"/> + entities
+    const base = buildXlsxBuffer("Sheet1", [
+      ["supplier_name", "registry_code", "country_code"],
+      ["Placeholder", "", "FI"],
+    ]);
+    expect(parseXlsxBuffer(base)[1]).toEqual(["Placeholder", "", "FI"]);
+
+    // Construct custom sheet XML containing self-closing styled cell <c r="B2" s="1"/>, &#38;amp;, and out-of-range &#9999999;
+    const customSheetXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">
+  <sheetData>
+    <row r="1">
+      <c r="A1" t="inlineStr"><is><t>supplier_name</t></is></c>
+      <c r="B1" t="inlineStr"><is><t>registry_code</t></is></c>
+      <c r="C1" t="inlineStr"><is><t>country_code</t></is></c>
+    </row>
+    <row r="2">
+      <c r="A2" t="s"><v>0</v></c>
+      <c r="B2" s="1"/>
+      <c r="C2" t="s"><v>1</v></c>
+    </row>
+  </sheetData>
+</worksheet>`;
+    const customSharedStringsXml = `<?xml version="1.0" encoding="UTF-8" standalone="yes"?>
+<sst xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" count="2" uniqueCount="2">
+  <si><t>Nordic &#38;amp; Co &#9999999;</t><rPh sb="0" eb="2"><t>HIDDEN_RUBY</t></rPh></si>
+  <si><t>FI</t></si>
+</sst>`;
+
+    // Helper to build minimal ZIP for test XML parts
+    const crcTable = new Uint32Array(256);
+    for (let i = 0; i < 256; i++) {
+      let c = i;
+      for (let j = 0; j < 8; j++) c = c & 1 ? 0xedb88320 ^ (c >>> 1) : c >>> 1;
+      crcTable[i] = c >>> 0;
+    }
+    const crc32 = (b: Buffer) => {
+      let c = 0xffffffff;
+      for (let i = 0; i < b.length; i++) c = crcTable[(c ^ b[i]!) & 0xff]! ^ (c >>> 8);
+      return (c ^ 0xffffffff) >>> 0;
+    };
+    const makeZip = (parts: Array<{ name: string; xml: string }>) => {
+      const locals: Buffer[] = [];
+      const centrals: Buffer[] = [];
+      let offset = 0;
+      for (const p of parts) {
+        const nameBuf = Buffer.from(p.name, "utf8");
+        const raw = Buffer.from(p.xml, "utf8");
+        const comp = deflateRawSync(raw);
+        const crc = crc32(raw);
+        const lh = Buffer.alloc(30);
+        lh.writeUInt32LE(0x04034b50, 0);
+        lh.writeUInt16LE(20, 4);
+        lh.writeUInt16LE(8, 8);
+        lh.writeUInt32LE(crc, 14);
+        lh.writeUInt32LE(comp.length, 18);
+        lh.writeUInt32LE(raw.length, 22);
+        lh.writeUInt16LE(nameBuf.length, 26);
+        locals.push(lh, nameBuf, comp);
+        const ch = Buffer.alloc(46);
+        ch.writeUInt32LE(0x02014b50, 0);
+        ch.writeUInt16LE(20, 4);
+        ch.writeUInt16LE(20, 6);
+        ch.writeUInt16LE(8, 10);
+        ch.writeUInt32LE(crc, 16);
+        ch.writeUInt32LE(comp.length, 20);
+        ch.writeUInt32LE(raw.length, 24);
+        ch.writeUInt16LE(nameBuf.length, 28);
+        ch.writeUInt32LE(offset, 42);
+        centrals.push(ch, nameBuf);
+        offset += lh.length + nameBuf.length + comp.length;
+      }
+      const cd = Buffer.concat(centrals);
+      const eocd = Buffer.alloc(22);
+      eocd.writeUInt32LE(0x06054b50, 0);
+      eocd.writeUInt16LE(parts.length, 8);
+      eocd.writeUInt16LE(parts.length, 10);
+      eocd.writeUInt32LE(cd.length, 12);
+      eocd.writeUInt32LE(offset, 16);
+      return Buffer.concat([...locals, cd, eocd]);
+    };
+
+    const excelStyleBuf = makeZip([
+      { name: "xl/sharedStrings.xml", xml: customSharedStringsXml },
+      { name: "xl/worksheets/sheet1.xml", xml: customSheetXml },
+    ]);
+    const parsedRows = parseXlsxBuffer(excelStyleBuf);
+    expect(parsedRows).toEqual([
+      ["supplier_name", "registry_code", "country_code"],
+      ["Nordic &amp; Co \uFFFD", "", "FI"],
+    ]);
+
+    // Sparse column DoS (<c r="ZZZZZZ1">) must throw cleanly instead of hanging
+    const sparseColBuf = makeZip([
+      {
+        name: "xl/worksheets/sheet1.xml",
+        xml: `<worksheet><sheetData><row r="1"><c r="ZZZZZZ1" t="inlineStr"><is><t>x</t></is></c></row></sheetData></worksheet>`,
+      },
+    ]);
+    expect(() => parseXlsxBuffer(sparseColBuf)).toThrow(/column/i);
+  });
+
+  it("persists registryCode, enforces OWNER RBAC on catalogue, auto-creates HQ + Contracts on empty-workspace XLSX import, protects GET unsubscribe from scanners, and simulates What-If alternativeSwitch accurately", async () => {
+    const emailCapture = new InMemoryCaptureEmailProvider();
+    const app = createTestApp({}, { emailProvider: emailCapture });
+
+    // 1. Organization & Facility registryCode persistence + Catalogue OWNER RBAC
+    const owner = await registerOrg(app, {
+      email: "owner@rbac-cat.ee",
+      organizationName: "RBAC Catalogue OÜ",
+      countryCode: "EE",
+    });
+
+    const orgPatchRes = await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: owner.cookie },
+      body: JSON.stringify({ registryCode: "12345678", openToNewBuyers: true }),
+    });
+    expect(orgPatchRes.status).toBe(200);
+    const meRes = await app.request("/api/v1/auth/me", {
+      headers: { Cookie: owner.cookie },
+    });
+    const meBody = (await meRes.json()) as {
+      organization: { registryCode?: string | null };
+    };
+    expect(meBody.organization.registryCode).toBe("12345678");
+
+    // Add a MEMBER user and verify 403 on POST /api/v1/directory/catalogue
+    const addMemberRes = await app.request("/api/v1/auth/members", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: owner.cookie },
+      body: JSON.stringify({
+        email: "member@rbac-cat.ee",
+        password: "MemberSecurePassword123!",
+        role: "MEMBER",
+      }),
+    });
+    expect(addMemberRes.status).toBe(201);
+    const memberLogin = await app.request("/api/v1/auth/login", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        email: "member@rbac-cat.ee",
+        password: "MemberSecurePassword123!",
+      }),
+    });
+    const memberCookie = extractCookie(memberLogin);
+
+    const memberCatPost = await app.request("/api/v1/directory/catalogue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: memberCookie },
+      body: JSON.stringify({
+        standardizedCategory: "ALUMINUM_EXTRUSIONS",
+        productTitle: "Unauthorized Member Item",
+      }),
+    });
+    expect(memberCatPost.status).toBe(403);
+
+    // 2. Fresh empty workspace (0 own facilities!) imports suppliers.xlsx -> auto-creates HQ, lanes, and Contracts
+    const emptyBuyer = await registerOrg(app, {
+      email: "fresh@empty-buyer.ee",
+      organizationName: "Fresh Buyer OÜ",
+      countryCode: "EE",
+    });
+    const tmplRes = await app.request("/api/v1/workspace/templates/suppliers.xlsx", {
+      headers: { Cookie: emptyBuyer.cookie },
+    });
+    const xlsxBuf = Buffer.from(await tmplRes.arrayBuffer());
+
+    const impRes = await app.request("/api/v1/workspace/import", {
+      method: "POST",
+      headers: {
+        "Content-Type":
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        Cookie: emptyBuyer.cookie,
+      },
+      body: xlsxBuf,
+    });
+    expect(impRes.status).toBe(200);
+    const impSummary = (await impRes.json()) as {
+      createdFacilities: number;
+      createdLanes: number;
+      errors: unknown[];
+    };
+    expect(impSummary.errors).toHaveLength(0);
+    expect(impSummary.createdFacilities).toBe(3); // 1 auto-created own HQ + 2 template suppliers
+    expect(impSummary.createdLanes).toBe(2);
+
+    const netRes = await app.request("/api/v1/workspace/network", {
+      headers: { Cookie: emptyBuyer.cookie },
+    });
+    const netBody = (await netRes.json()) as {
+      facilities: Array<{
+        facilityId: string;
+        name: string;
+        isOwnFacility: boolean;
+        registryCode?: string | null;
+      }>;
+      lanes: Array<{ laneId: string; fromFacilityId: string }>;
+      contracts?: Array<{ contractType: string }>;
+    };
+    const importedAlu = netBody.facilities.find(
+      (f) => f.name === "Nordic AluWorks AB",
+    );
+    expect(importedAlu?.registryCode).toBe("556001-1234");
+    expect((netBody.contracts ?? []).length).toBe(2);
+
+    // Wait for background outreach and verify RFC 8058 headers + scanner-safe GET unsubscribe
+    await new Promise((r) => setTimeout(r, 30));
+    expect(emailCapture.sent.length).toBe(2);
+    expect(emailCapture.sent[0]!.headers?.["List-Unsubscribe"]).toContain(
+      "/api/v1/outreach/unsubscribe?token=",
+    );
+    expect(emailCapture.sent[0]!.headers?.["List-Unsubscribe-Post"]).toBe(
+      "List-Unsubscribe=One-Click",
+    );
+
+    const tokenMatch = /token=([^\s>]+)/.exec(
+      emailCapture.sent[0]!.headers?.["List-Unsubscribe"] ?? "",
+    );
+    const unsubToken = decodeURIComponent(tokenMatch![1]!);
+
+    // HTML scanner GET must return confirmation HTML WITHOUT suppressing the email
+    const htmlGetRes = await app.request(
+      `/api/v1/outreach/unsubscribe?token=${encodeURIComponent(unsubToken)}`,
+      { method: "GET", headers: { Accept: "text/html,application/xhtml+xml" } },
+    );
+    expect(htmlGetRes.status).toBe(200);
+    expect(await htmlGetRes.text()).toContain("<form");
+
+    // 3. What-If Simulation with alternativeSwitch (50% switch drops single-source HHI 10000 -> 5000 & clears SPOF)
+    const simRes = await app.request("/api/v1/analytics/simulate", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: emptyBuyer.cookie },
+      body: JSON.stringify({
+        laneChanges: [],
+        alternativeSwitch: {
+          fromFacilityId: importedAlu!.facilityId,
+          alternativeName: "RBAC Catalogue OÜ",
+          countryCode: "EE",
+          riskStatus: "GREEN",
+          switchPct: 50,
+          estimatedDistanceKm: 80,
+          productEmissionFactorTco2ePerUnit: 3.5,
+          pcfVerified: true,
+        },
+      }),
+    });
+    expect(simRes.status).toBe(200);
+    const simBody = (await simRes.json()) as {
+      appliedChangesCount: number;
+      deltas: {
+        avgHhiDelta: number;
+        spofCountDelta: number;
+        resilienceScoreDelta: number;
+      };
+    };
+    expect(simBody.appliedChangesCount).toBeGreaterThanOrEqual(1);
+    expect(simBody.deltas.avgHhiDelta).toBeLessThan(0);
+    expect(simBody.deltas.spofCountDelta).toBeLessThan(0);
+    expect(simBody.deltas.resilienceScoreDelta).toBeGreaterThan(0);
+  });
 });

@@ -136,6 +136,7 @@ export function createApp({
     riskSignalRepo,
     workspaceRepo,
     catalogueRepo,
+    inviteRepo,
   }),
   analyticsRepo = new OrgScopedAnalyticsRepository({
     authRepo,
@@ -256,6 +257,14 @@ export function createApp({
       windowMs: config.RATE_LIMIT_WINDOW_MS,
     }),
   );
+  app.use(
+    "/api/v1/directory/catalogue/import",
+    createRateLimiter({
+      bucket: "directory:catalogue:import",
+      maxRequests: config.RATE_LIMIT_IMPORT_MAX,
+      windowMs: config.RATE_LIMIT_WINDOW_MS,
+    }),
+  );
 
   app.get("/api/v1/health", async (c) => {
     const dbHealth = await db.healthCheck();
@@ -281,6 +290,7 @@ export function createApp({
       workspaceRepo,
       riskSignalRepo,
       outreachService,
+      registrySearch,
     }),
   );
   app.route(
@@ -289,7 +299,7 @@ export function createApp({
   );
   app.route(
     "/api/v1/workspace/relationship-declarations",
-    createDeclarationRoutes({ authRepo, declarationRepo, outreachService }),
+    createDeclarationRoutes({ authRepo, declarationRepo, outreachService, registrySearch }),
   );
   app.route(
     "/api/v1/analytics",

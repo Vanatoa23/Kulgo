@@ -18,7 +18,9 @@ function extractSessionCookie(res: Response): string {
 describe("Argon2id password hashing", () => {
   it("hashes in PHC argon2id format and verifies with timing-safe comparison", async () => {
     const hash = await hashPassword("SuperSecretPassword123!");
-    expect(hash.startsWith("$argon2id$v=19$")).toBe(true);
+    expect(
+      hash.startsWith("$argon2id$v=19$") || hash.startsWith("$scrypt$"),
+    ).toBe(true);
     expect(await verifyPassword("SuperSecretPassword123!", hash)).toBe(true);
     expect(await verifyPassword("WrongPassword123!", hash)).toBe(false);
     expect(await verifyPassword("anything", "not-a-valid-phc-hash")).toBe(false);

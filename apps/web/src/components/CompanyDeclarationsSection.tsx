@@ -90,9 +90,12 @@ export function CompanyDeclarationsSection({
     setDraft((prev) => ({ ...prev, ...patch }));
   };
 
+  const lookupSeqRef = useRef(0);
+
   const handleRegistryLookup = async () => {
     const trimmedName = draft.name.trim();
     if (!trimmedName) return;
+    const seq = ++lookupSeqRef.current;
     setRegistrySearching(true);
     setRegistryError(null);
     setRegistryResult(null);
@@ -104,13 +107,19 @@ export function CompanyDeclarationsSection({
         ...(country.length === 2 ? { countryCode: country } : {}),
         ...(regId.length > 0 ? { registryId: regId } : {}),
       });
-      setRegistryResult(result);
+      if (seq === lookupSeqRef.current) {
+        setRegistryResult(result);
+      }
     } catch (err) {
-      setRegistryError(
-        err instanceof Error ? err.message : "Registry lookup failed.",
-      );
+      if (seq === lookupSeqRef.current) {
+        setRegistryError(
+          err instanceof Error ? err.message : "Registry lookup failed.",
+        );
+      }
     } finally {
-      setRegistrySearching(false);
+      if (seq === lookupSeqRef.current) {
+        setRegistrySearching(false);
+      }
     }
   };
 
@@ -136,19 +145,25 @@ export function CompanyDeclarationsSection({
   }, [saveError, showForm]);
 
   const handleOpenForm = () => {
+    lookupSeqRef.current++;
     setStatusMessage(null);
     setShowForm(true);
   };
 
   const handleCancel = () => {
+    lookupSeqRef.current++;
     setShowForm(false);
     setStatusMessage(null);
+    setRegistryResult(null);
+    setRegistryError(null);
   };
 
   const handleSubmit = async (e: FormEvent) => {
     e.preventDefault();
     if (saving || busy) return; // one active submission for the form
     const name = draft.name.trim();
+    if (!name) return;
+    lookupSeqRef.current++;
     const roleLabel = ROLE_LABELS[draft.role];
     const payload: CreateRelationshipDeclarationInput = {
       name,
@@ -172,6 +187,8 @@ export function CompanyDeclarationsSection({
         return;
       }
       setDraft(EMPTY_DRAFT);
+      setRegistryResult(null);
+      setRegistryError(null);
       setShowForm(false);
       setStatusMessage(
         `Saved ${name} as ${roleLabel.toLowerCase()} in your private network.`,

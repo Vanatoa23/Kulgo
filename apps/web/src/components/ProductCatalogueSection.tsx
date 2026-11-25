@@ -40,6 +40,8 @@ import {
 
 export interface ProductCatalogueSectionProps {
   organization: Organization;
+  isOwner?: boolean;
+  onEnableDirectoryOptIn?: () => Promise<void>;
 }
 
 function parseCommaList(raw: string): string[] {
@@ -65,6 +67,8 @@ function arrayBufferToBase64(buffer: ArrayBuffer): string {
 
 export function ProductCatalogueSection({
   organization,
+  isOwner = false,
+  onEnableDirectoryOptIn,
 }: ProductCatalogueSectionProps) {
   const [items, setItems] = useState<CatalogueItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -277,6 +281,9 @@ export function ProductCatalogueSection({
     reader.onerror = () => {
       setError("Failed to read the selected file.");
       setImportingFile(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
     };
 
     if (isXlsx) {
@@ -311,17 +318,28 @@ export function ProductCatalogueSection({
       {!organization.openToNewBuyers && (
         <div
           role="status"
-          className="rounded-xl border border-amber-500/35 bg-amber-500/10 p-3.5 flex items-start gap-2.5 text-xs text-amber-200"
+          className="rounded-xl border border-amber-500/35 bg-amber-500/10 p-3.5 flex flex-col sm:flex-row sm:items-center justify-between gap-3 text-xs text-amber-200"
         >
-          <Info className="h-4 w-4 shrink-0 mt-0.5 text-amber-300" />
-          <span>
-            Your organization is currently hidden from buyer discovery. Enable{" "}
-            <strong>&ldquo;Open to New Buyers&rdquo;</strong> in the Alternative
-            Supplier Directory section above to make these catalogue items
-            discoverable in buyers&apos;{" "}
-            <strong>&ldquo;See alternatives (x)&rdquo;</strong> views. You can
-            still prepare and manage your items below.
-          </span>
+          <div className="flex items-start gap-2.5">
+            <Info className="h-4 w-4 shrink-0 mt-0.5 text-amber-300" />
+            <span>
+              Your organization is currently hidden from buyer discovery. Enable{" "}
+              <strong>&ldquo;Open to New Buyers&rdquo;</strong> in the Alternative
+              Supplier Directory section above to make these catalogue items
+              discoverable in buyers&apos;{" "}
+              <strong>&ldquo;See alternatives (x)&rdquo;</strong> views. You can
+              still prepare and manage your items below.
+            </span>
+          </div>
+          {isOwner && onEnableDirectoryOptIn && (
+            <button
+              type="button"
+              onClick={() => void onEnableDirectoryOptIn()}
+              className="shrink-0 rounded-lg border border-amber-500/40 bg-amber-500/20 hover:bg-amber-500/30 px-3 py-1.5 text-xs font-semibold text-amber-100 cursor-pointer"
+            >
+              Enable Directory Opt-In
+            </button>
+          )}
         </div>
       )}
 
@@ -514,7 +532,13 @@ export function ProductCatalogueSection({
               step="any"
               min={0}
               value={pcfText}
-              onChange={(e) => setPcfText(e.target.value)}
+              onChange={(e) => {
+                const val = e.target.value;
+                setPcfText(val);
+                if (!val.trim()) {
+                  setPcfVerified(false);
+                }
+              }}
               placeholder="Optional (e.g., 4.2)"
               className="w-full rounded-lg border border-slate-700 bg-slate-900 px-2.5 py-1.5 text-white"
             />

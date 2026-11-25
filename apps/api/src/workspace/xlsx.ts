@@ -31,6 +31,7 @@ function crc32(buf: Buffer): number {
 
 function escapeXml(value: string): string {
   return value
+    .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "")
     .replace(/&/g, "&amp;")
     .replace(/</g, "&lt;")
     .replace(/>/g, "&gt;")
@@ -39,16 +40,49 @@ function escapeXml(value: string): string {
 }
 
 function decodeXmlEntities(value: string): string {
-  return value
-    .replace(/&lt;/g, "<")
-    .replace(/&gt;/g, ">")
-    .replace(/&quot;/g, '"')
-    .replace(/&apos;/g, "'")
-    .replace(/&#(\d+);/g, (_m, dec) => String.fromCodePoint(Number(dec)))
-    .replace(/&#x([0-9a-fA-F]+);/g, (_m, hex) =>
-      String.fromCodePoint(parseInt(hex, 16)),
-    )
-    .replace(/&amp;/g, "&");
+  return value.replace(
+    /&(?:#(\d+)|#x([0-9a-fA-F]+)|lt|gt|quot|apos|amp);/g,
+    (match, dec, hex) => {
+      if (dec !== undefined) {
+        const cp = Number.parseInt(dec, 10);
+        if (
+          Number.isInteger(cp) &&
+          cp >= 0 &&
+          cp <= 0x10ffff &&
+          !(cp >= 0xd800 && cp <= 0xdfff)
+        ) {
+          return String.fromCodePoint(cp);
+        }
+        return "\uFFFD";
+      }
+      if (hex !== undefined) {
+        const cp = Number.parseInt(hex, 16);
+        if (
+          Number.isInteger(cp) &&
+          cp >= 0 &&
+          cp <= 0x10ffff &&
+          !(cp >= 0xd800 && cp <= 0xdfff)
+        ) {
+          return String.fromCodePoint(cp);
+        }
+        return "\uFFFD";
+      }
+      switch (match) {
+        case "&lt;":
+          return "<";
+        case "&gt;":
+          return ">";
+        case "&quot;":
+          return '"';
+        case "&apos;":
+          return "'";
+        case "&amp;":
+          return "&";
+        default:
+          return match;
+      }
+    },
+  );
 }
 
 function columnIndexToLetters(index: number): string {
@@ -138,6 +172,10 @@ function buildZip(entries: readonly ZipEntryInput[]): Buffer {
   return Buffer.concat([...localParts, centralDir, eocd]);
 }
 
+const MAX_ZIP_ENTRIES = 64;
+const MAX_ENTRY_UNCOMPRESSED_BYTES = 10 * 1024 * 1024;
+const MAX_TOTAL_UNCOMPRESSED_BYTES = 16 * 1024 * 1024;
+
 function extractZipEntries(zipBuffer: Buffer): Map<string, Buffer> {
   // Locate End of Central Directory (EOCD)
   let eocdOffset = -1;
@@ -153,8 +191,12 @@ function extractZipEntries(zipBuffer: Buffer): Map<string, Buffer> {
   }
 
   const entryCount = zipBuffer.readUInt16LE(eocdOffset + 10);
+  if (entryCount > MAX_ZIP_ENTRIES) {
+    throw new Error(`Invalid XLSX file: too many ZIP entries (${entryCount})`);
+  }
   const centralOffset = zipBuffer.readUInt32LE(eocdOffset + 16);
   const entries = new Map<string, Buffer>();
+  let totalUncompressed = 0;
 
   let pos = centralOffset;
   for (let i = 0; i < entryCount; i += 1) {
@@ -163,6 +205,7 @@ function extractZipEntries(zipBuffer: Buffer): Map<string, Buffer> {
     }
     const method = zipBuffer.readUInt16LE(pos + 10);
     const compressedSize = zipBuffer.readUInt32LE(pos + 20);
+    const uncompressedSize = zipBuffer.readUInt32LE(pos + 24);
     const nameLen = zipBuffer.readUInt16LE(pos + 28);
     const extraLen = zipBuffer.readUInt16LE(pos + 30);
     const commentLen = zipBuffer.readUInt16LE(pos + 32);
@@ -179,12 +222,39 @@ function extractZipEntries(zipBuffer: Buffer): Map<string, Buffer> {
     const localNameLen = zipBuffer.readUInt16LE(localHeaderOffset + 26);
     const localExtraLen = zipBuffer.readUInt16LE(localHeaderOffset + 28);
     const dataStart = localHeaderOffset + 30 + localNameLen + localExtraLen;
+
+    if (dataStart + compressedSize > zipBuffer.length) {
+      throw new Error("Invalid XLSX file: entry data exceeds buffer length");
+    }
+
+    const isAllowed =
+      name === "xl/sharedStrings.xml" ||
+      name === "xl/workbook.xml" ||
+      name === "xl/_rels/workbook.xml.rels" ||
+      /^xl\/worksheets\/[^/]+\.xml$/i.test(name);
+
+    if (!isAllowed) {
+      continue;
+    }
+
+    if (uncompressedSize > MAX_ENTRY_UNCOMPRESSED_BYTES) {
+      throw new Error(`Invalid XLSX file: entry ${name} exceeds uncompressed size limit`);
+    }
+
+    totalUncompressed += uncompressedSize;
+    if (totalUncompressed > MAX_TOTAL_UNCOMPRESSED_BYTES) {
+      throw new Error("Invalid XLSX file: total uncompressed size limit exceeded");
+    }
+
     const rawData = zipBuffer.subarray(dataStart, dataStart + compressedSize);
 
     if (method === 0) {
       entries.set(name, Buffer.from(rawData));
     } else if (method === 8) {
-      entries.set(name, inflateRawSync(rawData));
+      entries.set(
+        name,
+        inflateRawSync(rawData, { maxOutputLength: MAX_ENTRY_UNCOMPRESSED_BYTES }),
+      );
     } else {
       throw new Error(`Unsupported ZIP compression method ${method} in XLSX`);
     }
@@ -253,16 +323,18 @@ export function buildXlsxBuffer(
 }
 
 function parseSharedStrings(xml: string): string[] {
+  const cleaned = xml.replace(/<rPh\b[\s\S]*?<\/rPh>/g, "");
   const strings: string[] = [];
   const siRe = /<si\b[^>]*>([\s\S]*?)<\/si>/g;
   let siMatch: RegExpExecArray | null;
-  while ((siMatch = siRe.exec(xml)) !== null) {
+  while ((siMatch = siRe.exec(cleaned)) !== null) {
     const inner = siMatch[1] ?? "";
     const parts: string[] = [];
-    const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
+    const tRe = /<t\b([^>]*?)(?:\/>|>([\s\S]*?)<\/t>)/g;
     let tMatch: RegExpExecArray | null;
     while ((tMatch = tRe.exec(inner)) !== null) {
-      parts.push(decodeXmlEntities(tMatch[1] ?? ""));
+      const body = tMatch[2] ?? "";
+      parts.push(decodeXmlEntities(body));
     }
     strings.push(parts.join(""));
   }
@@ -277,12 +349,62 @@ export function parseXlsxBuffer(buffer: Buffer): string[][] {
     ? parseSharedStrings(sharedStringsBuf.toString("utf8"))
     : [];
 
-  // Find first worksheet
+  const workbookBuf = entries.get("xl/workbook.xml");
+  const relsBuf = entries.get("xl/_rels/workbook.xml.rels");
+
+  let sheetPath = "";
+  if (workbookBuf && relsBuf) {
+    const wbXml = workbookBuf.toString("utf8");
+    const relsXml = relsBuf.toString("utf8");
+
+    const relMap = new Map<string, string>();
+    const relRe = /<Relationship\b([^>]*)\/>/g;
+    let relMatch: RegExpExecArray | null;
+    while ((relMatch = relRe.exec(relsXml)) !== null) {
+      const attrs = relMatch[1] ?? "";
+      const idMatch = /\bId="([^"]+)"/.exec(attrs);
+      const targetMatch = /\bTarget="([^"]+)"/.exec(attrs);
+      if (idMatch && targetMatch) {
+        relMap.set(idMatch[1]!, targetMatch[1]!);
+      }
+    }
+
+    const sheetRe = /<sheet\b([^>]*)\/>/g;
+    let sheetMatch: RegExpExecArray | null;
+    let firstRid = "";
+    while ((sheetMatch = sheetRe.exec(wbXml)) !== null) {
+      const attrs = sheetMatch[1] ?? "";
+      const ridMatch = /\br:id="([^"]+)"/.exec(attrs);
+      if (ridMatch) {
+        firstRid = ridMatch[1]!;
+        break;
+      }
+    }
+
+    if (firstRid && relMap.has(firstRid)) {
+      let target = relMap.get(firstRid)!;
+      if (target.startsWith("/")) {
+        sheetPath = target.slice(1);
+      } else if (target.startsWith("worksheets/")) {
+        sheetPath = `xl/${target}`;
+      } else if (target.startsWith("xl/")) {
+        sheetPath = target;
+      } else {
+        sheetPath = `xl/${target}`;
+      }
+    }
+  }
+
   const sheetBuf =
+    (sheetPath ? entries.get(sheetPath) : undefined) ??
     entries.get("xl/worksheets/sheet1.xml") ??
     Array.from(entries.entries())
       .filter(([k]) => /^xl\/worksheets\/sheet\d+\.xml$/i.test(k))
-      .sort(([a], [b]) => a.localeCompare(b))[0]?.[1];
+      .sort(([a], [b]) => {
+        const numA = Number.parseInt(a.replace(/\D/g, ""), 10) || 0;
+        const numB = Number.parseInt(b.replace(/\D/g, ""), 10) || 0;
+        return numA - numB;
+      })[0]?.[1];
 
   if (!sheetBuf) {
     throw new Error("Invalid XLSX file: no worksheet found");
@@ -294,9 +416,12 @@ export function parseXlsxBuffer(buffer: Buffer): string[][] {
   let rowMatch: RegExpExecArray | null;
 
   while ((rowMatch = rowRe.exec(sheetXml)) !== null) {
+    if (rows.length >= 1506) {
+      break;
+    }
     const rowInner = rowMatch[1] ?? "";
     const cells: string[] = [];
-    const cellRe = /<c\b([^>]*)>([\s\S]*?)<\/c>/g;
+    const cellRe = /<c\b([^>]*?)(?:\/>|>([\s\S]*?)<\/c>)/g;
     let cellMatch: RegExpExecArray | null;
 
     while ((cellMatch = cellRe.exec(rowInner)) !== null) {
@@ -304,9 +429,19 @@ export function parseXlsxBuffer(buffer: Buffer): string[][] {
       const body = cellMatch[2] ?? "";
 
       const refMatch = /\br="([A-Z]+)\d+"/i.exec(attrs);
+      if (refMatch && refMatch[1]!.length > 3) {
+        throw new Error(
+          "XLSX column index exceeds maximum supported columns (128)",
+        );
+      }
       const colIdx = refMatch
         ? columnLettersToIndex(refMatch[1]!.toUpperCase())
         : cells.length;
+      if (colIdx >= 128) {
+        throw new Error(
+          "XLSX column index exceeds maximum supported columns (128)",
+        );
+      }
 
       const typeMatch = /\bt="([^"]+)"/.exec(attrs);
       const cellType = typeMatch?.[1] ?? "";
@@ -314,10 +449,11 @@ export function parseXlsxBuffer(buffer: Buffer): string[][] {
       let value = "";
       if (cellType === "inlineStr") {
         const parts: string[] = [];
-        const tRe = /<t\b[^>]*>([\s\S]*?)<\/t>/g;
+        const tRe = /<t\b([^>]*?)(?:\/>|>([\s\S]*?)<\/t>)/g;
         let tMatch: RegExpExecArray | null;
         while ((tMatch = tRe.exec(body)) !== null) {
-          parts.push(decodeXmlEntities(tMatch[1] ?? ""));
+          const tBody = tMatch[2] ?? "";
+          parts.push(decodeXmlEntities(tBody));
         }
         value = parts.join("");
       } else {
@@ -325,7 +461,7 @@ export function parseXlsxBuffer(buffer: Buffer): string[][] {
         const rawV = vMatch ? decodeXmlEntities(vMatch[1] ?? "") : "";
         if (cellType === "s") {
           const idx = Number.parseInt(rawV, 10);
-          value = Number.isFinite(idx) ? (sharedStrings[idx] ?? "") : "";
+          value = Number.isFinite(idx) && idx >= 0 && idx < sharedStrings.length ? (sharedStrings[idx] ?? "") : "";
         } else if (cellType === "b") {
           value = rawV === "1" ? "true" : "false";
         } else {

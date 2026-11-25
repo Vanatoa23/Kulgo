@@ -67,6 +67,7 @@ export interface NetworkHubPageProps {
   onViewFacilityOnMap: (facilityId: string) => void;
   onOpenDirectory: (capability?: string) => void;
   onOpenFacilityAlternatives?: (facilityId: string, facilityName: string) => void;
+  onOpenImportExport?: () => void;
   onSeedDemo: () => void;
   onCreateFacility: (input: CreateFacilityInput) => Promise<boolean>;
   onUpdateFacility: (
@@ -166,6 +167,7 @@ export function NetworkHubPage({
   onViewFacilityOnMap,
   onOpenDirectory,
   onOpenFacilityAlternatives,
+  onOpenImportExport,
   onSeedDemo,
   onCreateFacility,
   onUpdateFacility,
@@ -390,6 +392,16 @@ export function NetworkHubPage({
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            {onOpenImportExport && (
+              <button
+                type="button"
+                data-testid="hub-import-suppliers-btn"
+                onClick={onOpenImportExport}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-950/40 hover:bg-sky-900/50 px-2.5 py-1.5 text-xs font-medium text-sky-200 cursor-pointer shadow-sm"
+              >
+                Import .xlsx / .csv
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
