@@ -52,6 +52,11 @@ import {
   createRequestLogger,
   type RequestLogEntry,
 } from "./middleware/security.js";
+import { createCompanyRegistryRoutes } from "./registry/routes.js";
+import {
+  createEeCompanyRegistrySearchService,
+  type CompanyRegistrySearchService,
+} from "./registry/service.js";
 import {
   ArcadeDbRelationshipDeclarationRepository,
   InMemoryRelationshipDeclarationRepository,
@@ -66,6 +71,19 @@ import {
   type WorkspaceRepository,
 } from "./workspace/repository.js";
 import { createWorkspaceRoutes } from "./workspace/routes.js";
+import {
+  ArcadeDbCatalogueRepository,
+  InMemoryCatalogueRepository,
+  type CatalogueRepository,
+} from "./directory/catalogue-repository.js";
+import {
+  ArcadeDbEmailSuppressionRepository,
+  InMemoryEmailSuppressionRepository,
+  OutreachService,
+  type EmailSuppressionRepository,
+} from "./outreach/service.js";
+import { createOutreachRoutes } from "./outreach/routes.js";
+import type { EmailProvider } from "./intelligence/notifications.js";
 
 export interface AppDependencies {
   config: AppConfig;
@@ -75,9 +93,13 @@ export interface AppDependencies {
   declarationRepo?: RelationshipDeclarationRepository;
   riskSignalRepo?: RiskSignalRepository;
   inviteRepo?: InvitationRepository;
+  catalogueRepo?: CatalogueRepository;
+  suppressionRepo?: EmailSuppressionRepository;
+  outreachService?: OutreachService;
   directoryRepo?: DirectoryRepository;
   analyticsRepo?: AnalyticsRepository;
   alertRepo?: AlertRepository;
+  registrySearch?: CompanyRegistrySearchService;
   intelligenceRunner?: IntelligenceRunner;
   webhookDnsLookup?: WebhookDnsLookup;
   webhookValidationTimeoutMs?: number;
@@ -95,9 +117,26 @@ export function createApp({
     authRepo,
     workspaceRepo,
   }),
+  catalogueRepo = new ArcadeDbCatalogueRepository(db),
+  suppressionRepo = new ArcadeDbEmailSuppressionRepository(db),
+  outreachService = new OutreachService({
+    suppressionRepo,
+    authRepo,
+    emailProvider: config.RESEND_API_KEY
+      ? createResendEmailProvider(config.RESEND_API_KEY)
+      : config.BREVO_API_KEY
+        ? createBrevoEmailProvider(config.BREVO_API_KEY)
+        : null,
+    fromEmail: config.ALERT_FROM_EMAIL,
+    webOrigin: config.WEB_ORIGIN,
+    signingSecret: config.SESSION_SECRET,
+  }),
   directoryRepo = new KulgoDirectoryRepository({
     authRepo,
     riskSignalRepo,
+    workspaceRepo,
+    catalogueRepo,
+    inviteRepo,
   }),
   analyticsRepo = new OrgScopedAnalyticsRepository({
     authRepo,
@@ -111,6 +150,9 @@ export function createApp({
     }),
   }),
   alertRepo = new ArcadeDbAlertRepository(db),
+  registrySearch = createEeCompanyRegistrySearchService(
+    config.EE_REGISTRY_SNAPSHOT_PATH,
+  ),
   webhookDnsLookup,
   webhookValidationTimeoutMs,
   intelligenceRunner = new IntelligenceRunner({
@@ -215,6 +257,14 @@ export function createApp({
       windowMs: config.RATE_LIMIT_WINDOW_MS,
     }),
   );
+  app.use(
+    "/api/v1/directory/catalogue/import",
+    createRateLimiter({
+      bucket: "directory:catalogue:import",
+      maxRequests: config.RATE_LIMIT_IMPORT_MAX,
+      windowMs: config.RATE_LIMIT_WINDOW_MS,
+    }),
+  );
 
   app.get("/api/v1/health", async (c) => {
     const dbHealth = await db.healthCheck();
@@ -235,11 +285,21 @@ export function createApp({
   app.route("/api/v1/auth", createAuthRoutes({ authRepo, config }));
   app.route(
     "/api/v1/workspace",
-    createWorkspaceRoutes({ authRepo, workspaceRepo, riskSignalRepo }),
+    createWorkspaceRoutes({
+      authRepo,
+      workspaceRepo,
+      riskSignalRepo,
+      outreachService,
+      registrySearch,
+    }),
+  );
+  app.route(
+    "/api/v1/workspace/company-registry",
+    createCompanyRegistryRoutes({ authRepo, registrySearch }),
   );
   app.route(
     "/api/v1/workspace/relationship-declarations",
-    createDeclarationRoutes({ authRepo, declarationRepo }),
+    createDeclarationRoutes({ authRepo, declarationRepo, outreachService, registrySearch }),
   );
   app.route(
     "/api/v1/analytics",
@@ -251,7 +311,16 @@ export function createApp({
   );
   app.route(
     "/api/v1/directory",
-    createDirectoryRoutes({ authRepo, directoryRepo }),
+    createDirectoryRoutes({
+      authRepo,
+      directoryRepo,
+      catalogueRepo,
+      outreachService,
+    }),
+  );
+  app.route(
+    "/api/v1/outreach",
+    createOutreachRoutes({ outreachService }),
   );
   app.route(
     "/api/v1/alerts",
@@ -279,6 +348,8 @@ export interface CreateTestAppOptions {
   webhookDnsLookup?: WebhookDnsLookup;
   webhookValidationTimeoutMs?: number;
   fetchFn?: typeof fetch;
+  registrySearch?: CompanyRegistrySearchService;
+  emailProvider?: EmailProvider | null;
 }
 
 const DEFAULT_TEST_WEBHOOK_DNS_LOOKUP: WebhookDnsLookup = async () => [
@@ -321,9 +392,21 @@ export function createTestApp(
     authRepo,
     workspaceRepo,
   });
+  const catalogueRepo = new InMemoryCatalogueRepository();
+  const suppressionRepo = new InMemoryEmailSuppressionRepository();
+  const outreachService = new OutreachService({
+    suppressionRepo,
+    authRepo,
+    emailProvider: options.emailProvider ?? null,
+    fromEmail: config.ALERT_FROM_EMAIL,
+    webOrigin: config.WEB_ORIGIN,
+    signingSecret: config.SESSION_SECRET,
+  });
   const directoryRepo = new KulgoDirectoryRepository({
     authRepo,
     riskSignalRepo,
+    workspaceRepo,
+    catalogueRepo,
   });
   const analyticsRepo = new OrgScopedAnalyticsRepository({
     authRepo,
@@ -359,9 +442,15 @@ export function createTestApp(
     declarationRepo,
     riskSignalRepo,
     inviteRepo,
+    catalogueRepo,
+    suppressionRepo,
+    outreachService,
     directoryRepo,
     analyticsRepo,
     alertRepo,
+    registrySearch:
+      options.registrySearch ??
+      createEeCompanyRegistrySearchService(config.EE_REGISTRY_SNAPSHOT_PATH),
     intelligenceRunner,
     webhookDnsLookup,
     webhookValidationTimeoutMs: options.webhookValidationTimeoutMs,

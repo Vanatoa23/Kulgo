@@ -342,15 +342,46 @@ export const SimulatedLaneChangeSchema = z
   .strict();
 export type SimulatedLaneChange = z.infer<typeof SimulatedLaneChangeSchema>;
 
+export const HypotheticalAlternativeSwitchSchema = z
+  .object({
+    fromFacilityId: z.string().uuid(),
+    alternativeName: z.string().trim().min(1).max(160),
+    countryCode: z.string().trim().length(2).transform((v) => v.toUpperCase()),
+    riskStatus: RiskStatusSchema,
+    switchPct: z.number().finite().min(1).max(100),
+    estimatedDistanceKm: z.number().finite().nonnegative().nullable().optional(),
+    productEmissionFactorTco2ePerUnit: z
+      .number()
+      .finite()
+      .nonnegative()
+      .nullable()
+      .optional(),
+    pcfVerified: z.boolean().optional(),
+  })
+  .strict();
+export type HypotheticalAlternativeSwitch = z.infer<
+  typeof HypotheticalAlternativeSwitchSchema
+>;
+
 export const SimulateAnalyticsRequestSchema = z
   .object({
     productId: z.string().uuid().optional(),
     inputId: z.string().uuid().optional(),
     viewMode: FinancialViewModeSchema.optional(),
-    laneChanges: z.array(SimulatedLaneChangeSchema).min(1).max(100),
+    laneChanges: z.array(SimulatedLaneChangeSchema).min(0).max(100),
+    alternativeSwitch: HypotheticalAlternativeSwitchSchema.optional(),
     oneTimeQualificationEur: z.number().finite().nonnegative().optional(),
   })
-  .strict();
+  .strict()
+  .superRefine((val, ctx) => {
+    if (val.laneChanges.length === 0 && !val.alternativeSwitch) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["laneChanges"],
+        message: "At least one laneChange or alternativeSwitch is required",
+      });
+    }
+  });
 export type SimulateAnalyticsRequest = z.infer<
   typeof SimulateAnalyticsRequestSchema
 >;

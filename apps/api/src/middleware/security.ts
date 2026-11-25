@@ -137,7 +137,7 @@ export function createBodySizeLimitMiddleware({
     }
 
     const maxBytes =
-      c.req.path === "/api/v1/workspace/import" ? maxImportBytes : maxJsonBytes;
+      c.req.path === "/api/v1/workspace/import" || c.req.path === "/api/v1/directory/catalogue/import" ? maxImportBytes : maxJsonBytes;
 
     const contentLengthHeader = c.req.header("content-length");
     if (contentLengthHeader !== undefined) {

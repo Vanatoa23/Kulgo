@@ -18,6 +18,7 @@ export interface OutboundEmailMessage {
   text: string;
   html: string;
   idempotencyKey?: string;
+  headers?: Record<string, string>;
 }
 
 export interface EmailProvider {
@@ -45,6 +46,7 @@ export function createResendEmailProvider(
           subject: message.subject,
           text: message.text,
           html: message.html,
+          ...(message.headers ? { headers: message.headers } : {}),
         }),
       });
       if (!res.ok) {
@@ -73,6 +75,7 @@ export function createBrevoEmailProvider(
           subject: message.subject,
           textContent: message.text,
           htmlContent: message.html,
+          ...(message.headers ? { headers: message.headers } : {}),
         }),
       });
       if (!res.ok) {

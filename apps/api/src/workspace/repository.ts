@@ -484,6 +484,9 @@ function mapFacilityRow(row: Record<string, unknown>): Facility {
     ...(typeof row.annualRevenueEur === "number"
       ? { annualRevenueEur: row.annualRevenueEur }
       : {}),
+    ...(typeof row.registryCode === "string" && row.registryCode.trim().length > 0
+      ? { registryCode: row.registryCode.trim() }
+      : {}),
   });
 }
 
@@ -1034,7 +1037,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
               lat, lng, isOwnFacility, relationshipRole, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
               defaultCarryingCostPct, annualElectricityMwh, renewableElectricityPct,
-              renewableInstrumentsVerified, annualRevenueEur
+              renewableInstrumentsVerified, annualRevenueEur, registryCode
        FROM Facility WHERE ownerOrgId = :orgId`,
       { orgId: safeOrgId },
     );
@@ -1051,7 +1054,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       `SELECT facilityId, ownerOrgId, name, kind, locationPrecision, countryCode, regionCode,
               lat, lng, isOwnFacility, relationshipRole, isPartnerVerified, sector, esgBadges, estimatedScope12Tco2e,
               defaultCarryingCostPct, annualElectricityMwh, renewableElectricityPct,
-              renewableInstrumentsVerified, annualRevenueEur
+              renewableInstrumentsVerified, annualRevenueEur, registryCode
        FROM Facility WHERE facilityId = :facilityId AND ownerOrgId = :orgId LIMIT 1`,
       { facilityId, orgId: safeOrgId },
     );
@@ -1115,6 +1118,11 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       ...(input.annualRevenueEur !== undefined
         ? { annualRevenueEur: input.annualRevenueEur }
         : {}),
+      ...(typeof input.registryCode === "string" && input.registryCode.trim().length > 0
+        ? { registryCode: input.registryCode.trim() }
+        : input.registryCode === null
+          ? { registryCode: null }
+          : {}),
     });
 
     const locationWkt = formatPointWkt(facility.lng, facility.lat);
@@ -1142,7 +1150,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         annualElectricityMwh = :annualElectricityMwh,
         renewableElectricityPct = :renewableElectricityPct,
         renewableInstrumentsVerified = :renewableInstrumentsVerified,
-        annualRevenueEur = :annualRevenueEur`,
+        annualRevenueEur = :annualRevenueEur,
+        registryCode = :registryCode`,
       {
         facilityId: facility.facilityId,
         ownerOrgId: facility.ownerOrgId,
@@ -1166,6 +1175,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         renewableInstrumentsVerified:
           facility.renewableInstrumentsVerified ?? null,
         annualRevenueEur: facility.annualRevenueEur ?? null,
+        registryCode: facility.registryCode ?? null,
       },
     );
 
@@ -1224,6 +1234,13 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
       ...(input.annualRevenueEur !== undefined
         ? { annualRevenueEur: input.annualRevenueEur }
         : {}),
+      ...(input.registryCode !== undefined
+        ? typeof input.registryCode === "string" && input.registryCode.trim().length > 0
+          ? { registryCode: input.registryCode.trim() }
+          : input.registryCode === null
+            ? { registryCode: null }
+            : {}
+        : {}),
     });
 
     const locationWkt = formatPointWkt(updated.lng, updated.lat);
@@ -1247,7 +1264,8 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         annualElectricityMwh = :annualElectricityMwh,
         renewableElectricityPct = :renewableElectricityPct,
         renewableInstrumentsVerified = :renewableInstrumentsVerified,
-        annualRevenueEur = :annualRevenueEur
+        annualRevenueEur = :annualRevenueEur,
+        registryCode = :registryCode
        WHERE facilityId = :facilityId AND ownerOrgId = :orgId`,
       {
         name: updated.name,
@@ -1269,6 +1287,7 @@ export class ArcadeDbWorkspaceRepository implements WorkspaceRepository {
         renewableInstrumentsVerified:
           updated.renewableInstrumentsVerified ?? null,
         annualRevenueEur: updated.annualRevenueEur ?? null,
+        registryCode: updated.registryCode ?? null,
         facilityId,
         orgId: safeOrgId,
       },
@@ -3185,6 +3204,11 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
       ...(input.annualRevenueEur !== undefined
         ? { annualRevenueEur: input.annualRevenueEur }
         : {}),
+      ...(typeof input.registryCode === "string" && input.registryCode.trim().length > 0
+        ? { registryCode: input.registryCode.trim() }
+        : input.registryCode === null
+          ? { registryCode: null }
+          : {}),
     });
     this.facilities.set(facility.facilityId, {
       facility,
@@ -3244,6 +3268,13 @@ export class InMemoryWorkspaceRepository implements WorkspaceRepository {
         : {}),
       ...(input.annualRevenueEur !== undefined
         ? { annualRevenueEur: input.annualRevenueEur }
+        : {}),
+      ...(input.registryCode !== undefined
+        ? typeof input.registryCode === "string" && input.registryCode.trim().length > 0
+          ? { registryCode: input.registryCode.trim() }
+          : input.registryCode === null
+            ? { registryCode: null }
+            : {}
         : {}),
     });
 

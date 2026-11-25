@@ -37,6 +37,7 @@ import {
   X,
 } from "lucide-react";
 import { useEffect, useMemo, useState, type FormEvent } from "react";
+import { getFacilityAlternatives } from "../lib/api.js";
 import { LaneContractsDrawerSection } from "./LaneContractsDrawerSection.js";
 
 export interface NodeInspectorDrawerProps {
@@ -54,6 +55,7 @@ export interface NodeInspectorDrawerProps {
   onClose: () => void;
   onViewOnMap: (facilityId: string) => void;
   onOpenDirectory: (capability?: string) => void;
+  onOpenFacilityAlternatives?: (facilityId: string, facilityName: string) => void;
   onUpdateFacility: (
     facilityId: string,
     input: UpdateFacilityInput,
@@ -123,6 +125,7 @@ export function NodeInspectorDrawer({
   onClose,
   onViewOnMap,
   onOpenDirectory,
+  onOpenFacilityAlternatives,
   onUpdateFacility,
   onDeleteFacility,
   onCreateLane,
@@ -133,6 +136,45 @@ export function NodeInspectorDrawer({
   onContractsChanged,
 }: NodeInspectorDrawerProps) {
   const role = resolveFacilityRole(facility);
+  const [alternativesCount, setAlternativesCount] = useState<number | null>(
+    null,
+  );
+  const [alternativesError, setAlternativesError] = useState(false);
+
+  const connectedLanesSig = useMemo(() => {
+    return lanes
+      .filter(
+        (l) =>
+          l.fromFacilityId === facility.facilityId ||
+          l.toFacilityId === facility.facilityId,
+      )
+      .map((l) => `${l.laneId}_${l.materialCategory}_${l.volumeUnit}`)
+      .join("|");
+  }, [lanes, facility.facilityId]);
+
+  useEffect(() => {
+    if (role !== "SUPPLIER") {
+      setAlternativesCount(null);
+      setAlternativesError(false);
+      return;
+    }
+    let cancelled = false;
+    setAlternativesCount(null);
+    setAlternativesError(false);
+    getFacilityAlternatives(facility.facilityId)
+      .then((res) => {
+        if (!cancelled) setAlternativesCount(res.count);
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setAlternativesCount(null);
+          setAlternativesError(true);
+        }
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [facility.facilityId, role, facility.sector, facility.name, connectedLanesSig]);
   const facilitiesById = useMemo(
     () => new Map(allFacilities.map((f) => [f.facilityId, f])),
     [allFacilities],
@@ -555,11 +597,20 @@ export function NodeInspectorDrawer({
         {role === "SUPPLIER" && (
           <button
             type="button"
-            onClick={() => onOpenDirectory(facility.sector ?? undefined)}
-            className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/35 bg-sky-500/10 hover:bg-sky-500/20 px-2.5 py-1 text-[11px] text-sky-200 cursor-pointer"
+            data-testid="see-alternatives-btn"
+            onClick={() =>
+              onOpenFacilityAlternatives
+                ? onOpenFacilityAlternatives(facility.facilityId, facility.name)
+                : onOpenDirectory(facility.sector ?? undefined)
+            }
+            className="inline-flex items-center gap-1.5 rounded-md border border-sky-500/35 bg-sky-500/10 hover:bg-sky-500/20 px-2.5 py-1 text-[11px] font-medium text-sky-200 cursor-pointer"
           >
             <Search className="h-3.5 w-3.5" />
-            See Alternatives
+            {alternativesError
+              ? "See alternatives"
+              : alternativesCount !== null
+                ? `See alternatives (${alternativesCount})`
+                : "See alternatives (...)"}
           </button>
         )}
       </div>

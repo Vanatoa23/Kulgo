@@ -143,6 +143,9 @@ function mapOrganizationRow(row: Record<string, unknown>): Organization {
       : [],
     openToNewBuyers: Boolean(row.openToNewBuyers),
     capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
+    ...(typeof row.registryCode === "string" && row.registryCode.trim().length > 0
+      ? { registryCode: row.registryCode.trim() }
+      : {}),
     createdAt: row.createdAt,
   });
 }
@@ -353,7 +356,7 @@ export class ArcadeDbAuthRepository implements AuthRepository {
   async findOrganizationById(orgId: string): Promise<Organization | null> {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, scope2MarketTco2e, annualRevenueEur, targetMarkets, enabledCompliancePacks, openToNewBuyers, capabilities, createdAt FROM Organization WHERE orgId = :orgId LIMIT 1",
+      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, scope2MarketTco2e, annualRevenueEur, targetMarkets, enabledCompliancePacks, openToNewBuyers, capabilities, registryCode, createdAt FROM Organization WHERE orgId = :orgId LIMIT 1",
       { orgId },
     );
     const row = rows[0];
@@ -410,6 +413,10 @@ export class ArcadeDbAuthRepository implements AuthRepository {
       input.capabilities !== undefined
         ? dedupeList(input.capabilities)
         : existing.capabilities;
+    const nextRegistryCode =
+      input.registryCode !== undefined
+        ? input.registryCode
+        : (existing.registryCode ?? null);
 
     await this.db.command(
       "sql",
@@ -422,7 +429,8 @@ export class ArcadeDbAuthRepository implements AuthRepository {
         enabledCompliancePacks = :enabledCompliancePacks,
         esgBadges = :esgBadges,
         openToNewBuyers = :openToNewBuyers,
-        capabilities = :capabilities
+        capabilities = :capabilities,
+        registryCode = :registryCode
        WHERE orgId = :orgId`,
       {
         scope1Tco2e: nextScope1,
@@ -434,6 +442,7 @@ export class ArcadeDbAuthRepository implements AuthRepository {
         esgBadges: nextEsgBadges,
         openToNewBuyers: nextOpenToNewBuyers,
         capabilities: nextCapabilities,
+        registryCode: nextRegistryCode,
         orgId,
       },
     );
@@ -455,7 +464,7 @@ export class ArcadeDbAuthRepository implements AuthRepository {
     // Privacy invariant: NEVER select annualRevenueEur for cross-org directory listings
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
-      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, openToNewBuyers, capabilities, createdAt FROM Organization WHERE openToNewBuyers = true",
+      "SELECT orgId, name, slug, countryCode, sector, esgBadges, scope1Tco2e, scope2Tco2e, openToNewBuyers, capabilities, registryCode, createdAt FROM Organization WHERE openToNewBuyers = true",
     );
     return rows.map(mapOrganizationRow);
   }
@@ -841,6 +850,9 @@ export class InMemoryAuthRepository implements AuthRepository {
         input.capabilities !== undefined
           ? dedupeList(input.capabilities)
           : existing.capabilities,
+      ...(input.registryCode !== undefined
+        ? { registryCode: input.registryCode }
+        : {}),
     });
     this.organizations.set(orgId, updated);
     return {

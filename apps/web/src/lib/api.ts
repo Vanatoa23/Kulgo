@@ -4,19 +4,27 @@ import {
   AlertNotificationPreferenceSchema,
   AnalyticsSummarySchema,
   AuthMeResponseSchema,
+  BulkCatalogueImportResultSchema,
   BulkImportSummarySchema,
+  CatalogueItemResponseSchema,
+  CompanyRegistrySearchResponseSchema,
   ContractLineSchema,
   ContractSchema,
   CreateInviteResponseSchema,
+  CreateRelationshipDeclarationResponseSchema,
   DirectoryAlternativesResponseSchema,
   EsgLedgerResponseSchema,
   ExecutiveReportSchema,
+  FacilityAlternativesResponseSchema,
   type EsgLedgerResponse,
   FacilitySchema,
   HealthResponseSchema,
+  IntroRequestResponseSchema,
   ListAuditEventsResponseSchema,
+  ListCatalogueItemsResponseSchema,
   ListInvitesResponseSchema,
   ListOrgMembersResponseSchema,
+  ListRelationshipDeclarationsResponseSchema,
   OrgAlertAckSchema,
   ProductSchema,
   RemoveOrgMemberResponseSchema,
@@ -36,23 +44,32 @@ import {
   type AnalyticsSummary,
   type AuditEvent,
   type AuthMeResponse,
+  type BulkCatalogueImportResult,
   type BulkImportJsonRequest,
   type BulkImportSummary,
+  type CatalogueItem,
   type ChokepointCode,
+  type CompanyRegistrySearchInput,
+  type CompanyRegistrySearchResponse,
   type Contract,
   type ContractLine,
+  type CreateCatalogueItemInput,
   type CreateContractInput,
   type CreateContractLineInput,
   type CreateFacilityInput,
   type CreateInviteInput,
   type CreateInviteResponse,
   type CreateProductInput,
+  type CreateRelationshipDeclarationInput,
   type CreateSupplyInputInput,
   type CreateSupplyLaneInput,
   type ExecutiveReport,
   type Facility,
+  type FacilityAlternativesResponse,
   type FinancialViewMode,
   type HealthResponse,
+  type IntroRequestInput,
+  type IntroRequestResponse,
   type Invitation,
   type LoginInput,
   type Organization,
@@ -61,6 +78,7 @@ import {
   type OrgMember,
   type Product,
   type RegisterInput,
+  type RelationshipDeclaration,
   type RemoveOrgMemberResponse,
   type RevokeInviteResponse,
   type RiskSignal,
@@ -70,6 +88,7 @@ import {
   type SimulateAnalyticsResponse,
   type SupplyInput,
   type SupplyLane,
+  type UpdateCatalogueItemInput,
   type UpdateContractInput,
   type UpdateContractLineInput,
   type UpdateFacilityInput,
@@ -259,6 +278,31 @@ export async function seedDemo(): Promise<WorkspaceNetworkResponse> {
     { method: "POST" },
     (payload) => parseWithSchema(WorkspaceNetworkResponseSchema, payload),
   );
+}
+
+// --- Private Relationship Declarations (issue #29) ---
+
+export async function listRelationshipDeclarations(): Promise<
+  RelationshipDeclaration[]
+> {
+  const result = await apiRequest(
+    "/api/v1/workspace/relationship-declarations",
+    { method: "GET" },
+    (payload) => parseWithSchema(ListRelationshipDeclarationsResponseSchema, payload),
+  );
+  return result.declarations;
+}
+
+export async function createRelationshipDeclaration(
+  input: CreateRelationshipDeclarationInput,
+): Promise<RelationshipDeclaration> {
+  const result = await apiRequest(
+    "/api/v1/workspace/relationship-declarations",
+    { method: "POST", body: input },
+    (payload) =>
+      parseWithSchema(CreateRelationshipDeclarationResponseSchema, payload),
+  );
+  return result.declaration;
 }
 
 // --- Products ---
@@ -877,6 +921,116 @@ export async function triggerAlertSweep(): Promise<{
     };
   });
 }
+
+// --- Sub-Project 5: Company Registry Search, Product Catalogue & Alternatives ---
+
+export async function searchCompanyRegistry(
+  input: CompanyRegistrySearchInput,
+): Promise<CompanyRegistrySearchResponse> {
+  return apiRequest(
+    "/api/v1/workspace/company-registry/search",
+    { method: "POST", body: input },
+    (payload) => parseWithSchema(CompanyRegistrySearchResponseSchema, payload),
+  );
+}
+
+export async function listCatalogueItems(): Promise<CatalogueItem[]> {
+  const result = await apiRequest(
+    "/api/v1/directory/catalogue",
+    { method: "GET" },
+    (payload) => parseWithSchema(ListCatalogueItemsResponseSchema, payload),
+  );
+  return result.items;
+}
+
+export async function createCatalogueItem(
+  input: CreateCatalogueItemInput,
+): Promise<CatalogueItem> {
+  const result = await apiRequest(
+    "/api/v1/directory/catalogue",
+    { method: "POST", body: input },
+    (payload) => parseWithSchema(CatalogueItemResponseSchema, payload),
+  );
+  return result.item;
+}
+
+export async function updateCatalogueItem(
+  itemId: string,
+  input: UpdateCatalogueItemInput,
+): Promise<CatalogueItem> {
+  const result = await apiRequest(
+    `/api/v1/directory/catalogue/${encodeURIComponent(itemId)}`,
+    { method: "PATCH", body: input },
+    (payload) => parseWithSchema(CatalogueItemResponseSchema, payload),
+  );
+  return result.item;
+}
+
+export async function deleteCatalogueItem(itemId: string): Promise<void> {
+  await apiRequest(
+    `/api/v1/directory/catalogue/${encodeURIComponent(itemId)}`,
+    { method: "DELETE" },
+    () => undefined,
+  );
+}
+
+export async function importCatalogueSpreadsheet(payload: {
+  csv?: string;
+  xlsxBase64?: string;
+}): Promise<BulkCatalogueImportResult> {
+  return apiRequest(
+    "/api/v1/directory/catalogue/import",
+    { method: "POST", body: payload },
+    (res) => parseWithSchema(BulkCatalogueImportResultSchema, res),
+  );
+}
+
+export async function getFacilityAlternatives(
+  facilityId: string,
+): Promise<FacilityAlternativesResponse> {
+  return apiRequest(
+    `/api/v1/directory/alternatives/for-facility/${encodeURIComponent(facilityId)}`,
+    { method: "GET" },
+    (payload) => parseWithSchema(FacilityAlternativesResponseSchema, payload),
+  );
+}
+
+export async function requestSupplierIntro(
+  input: IntroRequestInput,
+): Promise<IntroRequestResponse> {
+  return apiRequest(
+    "/api/v1/directory/request-intro",
+    { method: "POST", body: input },
+    (payload) => parseWithSchema(IntroRequestResponseSchema, payload),
+  );
+}
+
+export async function downloadAuthenticatedTemplate(
+  path: string,
+  filename: string,
+): Promise<void> {
+  const url = `${getApiBaseUrl()}${path}`;
+  const response = await fetch(url, {
+    method: "GET",
+    credentials: "include",
+  });
+  if (!response.ok) {
+    throw new ApiError(
+      response.status,
+      `Template download failed with status ${response.status}`,
+    );
+  }
+  const blob = await response.blob();
+  const objectUrl = URL.createObjectURL(blob);
+  const link = document.createElement("a");
+  link.href = objectUrl;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(objectUrl);
+}
+
 
 
 

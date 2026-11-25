@@ -9,12 +9,16 @@ import { Hono } from "hono";
 import { createRequireAuth, type AuthVariables } from "../auth/middleware.js";
 
 import type { AuthRepository } from "../auth/repository.js";
+import type { OutreachService } from "../outreach/service.js";
 
 import type { RelationshipDeclarationRepository } from "./repository.js";
+import type { CompanyRegistrySearchService } from "../registry/service.js";
 
 export interface DeclarationRoutesDependencies {
   authRepo: AuthRepository;
   declarationRepo: RelationshipDeclarationRepository;
+  outreachService?: OutreachService;
+  registrySearch?: CompanyRegistrySearchService;
 }
 
 /**
@@ -25,6 +29,7 @@ export interface DeclarationRoutesDependencies {
 export function createDeclarationRoutes({
   authRepo,
   declarationRepo,
+  outreachService,
 }: DeclarationRoutesDependencies): Hono<{ Variables: AuthVariables }> {
   const routes = new Hono<{ Variables: AuthVariables }>();
   const requireAuth = createRequireAuth(authRepo);
@@ -32,7 +37,8 @@ export function createDeclarationRoutes({
   routes.use("*", requireAuth);
 
   routes.post("/", async (c) => {
-    const orgId = c.get("auth").organization.orgId;
+    const auth = c.get("auth");
+    const orgId = auth.organization.orgId;
     let body: unknown;
     try {
       body = await c.req.json();
@@ -49,6 +55,29 @@ export function createDeclarationRoutes({
     }
 
     const declaration = await declarationRepo.createDeclaration(orgId, parsed.data);
+
+    // Automatic background outreach for declared suppliers with a contact email
+    // (strict dedupe, global suppression, rate limits; never blocks declaration save).
+    if (
+      outreachService &&
+      declaration.role === "SUPPLIER" &&
+      declaration.contactEmail
+    ) {
+      void outreachService
+        .dispatchSupplierOutreach({
+          fromOrgId: orgId,
+          fromOrgName: auth.organization.name,
+          actorUserId: auth.user.userId,
+          actorEmail: auth.user.email,
+          supplierName: declaration.name,
+          recipientEmail: declaration.contactEmail,
+          referenceId: declaration.declarationId,
+        })
+        .catch(() => {
+          // Non-fatal: outreach failures never disrupt declaration creation
+        });
+    }
+
     return c.json(
       CreateRelationshipDeclarationResponseSchema.parse({ declaration }),
       201,

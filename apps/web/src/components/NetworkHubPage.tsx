@@ -7,6 +7,7 @@ import {
   type CreateInviteInput,
   type CreateInviteResponse,
   type CreateProductInput,
+  type CreateRelationshipDeclarationInput,
   type CreateSupplyInputInput,
   type CreateSupplyLaneInput,
   type Facility,
@@ -14,6 +15,7 @@ import {
   type FacilityRelationshipRole,
   type Invitation,
   type Product,
+  type RelationshipDeclaration,
   type RiskStatus,
   type SupplyInput,
   type SupplyLane,
@@ -33,6 +35,11 @@ import {
   Users,
 } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
+import {
+  CompanyDeclarationsSection,
+  type DeclarationsLoadStatus,
+} from "./CompanyDeclarationsSection.js";
+
 import { NodeInspectorDrawer } from "./NodeInspectorDrawer.js";
 
 export interface NetworkHubPageProps {
@@ -46,12 +53,21 @@ export interface NetworkHubPageProps {
   analytics: AnalyticsSummary | null;
   userRole: UserRole;
   busy: boolean;
+  declarations: readonly RelationshipDeclaration[];
+  declarationsLoadStatus: DeclarationsLoadStatus;
+  declarationSaveError: string | null;
+  onRetryDeclarations: () => void;
+  onCreateDeclaration: (
+    input: CreateRelationshipDeclarationInput,
+  ) => Promise<boolean>;
   seedingDemo: boolean;
   selectedFacilityId: string | null;
   selectedLaneId: string | null;
   onSelectFacility: (facilityId: string | null) => void;
   onViewFacilityOnMap: (facilityId: string) => void;
   onOpenDirectory: (capability?: string) => void;
+  onOpenFacilityAlternatives?: (facilityId: string, facilityName: string) => void;
+  onOpenImportExport?: () => void;
   onSeedDemo: () => void;
   onCreateFacility: (input: CreateFacilityInput) => Promise<boolean>;
   onUpdateFacility: (
@@ -139,12 +155,19 @@ export function NetworkHubPage({
   analytics,
   userRole,
   busy,
+  declarations,
+  declarationsLoadStatus,
+  declarationSaveError,
+  onRetryDeclarations,
+  onCreateDeclaration,
   seedingDemo,
   selectedFacilityId,
   selectedLaneId,
   onSelectFacility,
   onViewFacilityOnMap,
   onOpenDirectory,
+  onOpenFacilityAlternatives,
+  onOpenImportExport,
   onSeedDemo,
   onCreateFacility,
   onUpdateFacility,
@@ -369,6 +392,16 @@ export function NetworkHubPage({
             </p>
           </div>
           <div className="flex items-center gap-2 flex-wrap">
+            {onOpenImportExport && (
+              <button
+                type="button"
+                data-testid="hub-import-suppliers-btn"
+                onClick={onOpenImportExport}
+                className="inline-flex items-center gap-1.5 rounded-lg border border-sky-500/40 bg-sky-950/40 hover:bg-sky-900/50 px-2.5 py-1.5 text-xs font-medium text-sky-200 cursor-pointer shadow-sm"
+              >
+                Import .xlsx / .csv
+              </button>
+            )}
             <button
               type="button"
               onClick={() => {
@@ -514,6 +547,16 @@ export function NetworkHubPage({
             </button>
           </div>
         )}
+
+        {/* Private declared companies (issue #29): name-only supplier/buyer entry + list */}
+        <CompanyDeclarationsSection
+          declarations={declarations}
+          loadStatus={declarationsLoadStatus}
+          saveError={declarationSaveError}
+          busy={busy}
+          onRetryLoad={onRetryDeclarations}
+          onCreateDeclaration={onCreateDeclaration}
+        />
 
         {/* 3-Column Flow Layout: Suppliers → My Facilities → Clients */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
@@ -767,6 +810,7 @@ export function NetworkHubPage({
           onClose={() => onSelectFacility(null)}
           onViewOnMap={onViewFacilityOnMap}
           onOpenDirectory={onOpenDirectory}
+          onOpenFacilityAlternatives={onOpenFacilityAlternatives}
           onUpdateFacility={onUpdateFacility}
           onDeleteFacility={onDeleteFacility}
           onCreateLane={onCreateLane}

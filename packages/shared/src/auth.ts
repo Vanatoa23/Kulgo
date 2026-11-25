@@ -20,6 +20,7 @@ export const OrganizationSchema = z
     enabledCompliancePacks: z.array(CompliancePackIdSchema).optional(),
     openToNewBuyers: z.boolean().default(false),
     capabilities: z.array(z.string()).default([]),
+    registryCode: z.string().trim().min(1).max(64).nullable().optional(),
     createdAt: z.string().datetime(),
   })
   .strict();
@@ -70,6 +71,7 @@ export const UpdateOrganizationProfileInputSchema = z
     esgBadges: z.array(z.string().trim().min(1).max(64)).max(20).optional(),
     openToNewBuyers: z.boolean().optional(),
     capabilities: z.array(z.string().trim().min(1).max(80)).max(30).optional(),
+    registryCode: z.string().trim().min(1).max(64).nullable().optional(),
   })
   .strict();
 export type UpdateOrganizationProfileInput = z.infer<
@@ -133,6 +135,8 @@ export const AuditActionSchema = z.enum([
   "INVITE_REVOKED",
   "CSRD_REPORT_EXPORTED",
   "ESG_LEDGER_EXPORTED",
+  "CATALOGUE_UPDATED",
+  "INTRO_REQUESTED",
 ]);
 export type AuditAction = z.infer<typeof AuditActionSchema>;
 

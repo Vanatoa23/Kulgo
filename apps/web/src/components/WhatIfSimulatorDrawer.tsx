@@ -20,6 +20,17 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { simulateAnalytics } from "../lib/api.js";
 
+export interface WhatIfAlternativePreset {
+  facilityId: string;
+  alternativeName: string;
+  countryCode: string;
+  riskStatus: string;
+  switchPct: number;
+  estimatedDistanceKm?: number;
+  productEmissionFactorTco2ePerUnit?: number;
+  pcfVerified?: boolean;
+}
+
 export interface WhatIfSimulatorDrawerProps {
   open: boolean;
   lanes: readonly SupplyLane[];
@@ -28,6 +39,7 @@ export interface WhatIfSimulatorDrawerProps {
   activeProductId: string | null;
   activeInputId: string | null;
   financialViewMode?: FinancialViewMode;
+  initialAlternativePreset?: WhatIfAlternativePreset | null;
   onClose: () => void;
 }
 
@@ -85,6 +97,7 @@ export function WhatIfSimulatorDrawer({
   activeProductId,
   activeInputId,
   financialViewMode,
+  initialAlternativePreset = null,
   onClose,
 }: WhatIfSimulatorDrawerProps) {
   const [drafts, setDrafts] = useState<Record<string, DraftLaneOverride>>({});
@@ -101,12 +114,56 @@ export function WhatIfSimulatorDrawer({
     [inputs],
   );
 
-  // Reset drafts whenever visible lane set changes
+  const [activeAltSwitch, setActiveAltSwitch] = useState<WhatIfAlternativePreset | null>(
+    initialAlternativePreset,
+  );
+
+  // Reset drafts whenever visible lane set changes, or apply alternative preset
   useEffect(() => {
+    setActiveAltSwitch(initialAlternativePreset || null);
+    if (open && initialAlternativePreset) {
+      const next: Record<string, DraftLaneOverride> = {};
+      const clampedSwitch = Math.max(
+        30,
+        Math.min(100, initialAlternativePreset.switchPct),
+      );
+      for (const lane of lanes) {
+        if (lane.fromFacilityId === initialAlternativePreset.facilityId) {
+          const reducedShare = Math.max(
+            0,
+            Math.round(lane.volumeSharePct * (1 - clampedSwitch / 100)),
+          );
+          next[lane.laneId] = {
+            volumeSharePct:
+              reducedShare === lane.volumeSharePct
+                ? Math.max(0, lane.volumeSharePct - clampedSwitch)
+                : reducedShare,
+            transportMode: lane.transportMode,
+            safetyStockDays: lane.safetyStockDays ?? 7,
+          };
+        }
+      }
+      setDrafts(next);
+      setResult(null);
+      setError(null);
+      return;
+    }
     setDrafts({});
     setResult(null);
     setError(null);
-  }, [lanes, activeProductId, activeInputId]);
+  }, [lanes, activeProductId, activeInputId, open, initialAlternativePreset]);
+
+  // Escape key handler
+  useEffect(() => {
+    if (!open) return;
+    const handleKeyDown = (e: KeyboardEvent) => {
+      if (e.key === "Escape") {
+        onClose();
+      }
+    };
+    window.addEventListener("keydown", handleKeyDown);
+    return () => window.removeEventListener("keydown", handleKeyDown);
+  }, [open, onClose]);
 
   const laneChanges = useMemo<SimulatedLaneChange[]>(() => {
     const changes: SimulatedLaneChange[] = [];
@@ -146,6 +203,33 @@ export function WhatIfSimulatorDrawer({
         ...(activeInputId ? { inputId: activeInputId } : {}),
         ...(financialViewMode ? { viewMode: financialViewMode } : {}),
         laneChanges,
+        ...(activeAltSwitch
+          ? {
+              alternativeSwitch: {
+                fromFacilityId: activeAltSwitch.facilityId,
+                alternativeName: activeAltSwitch.alternativeName,
+                countryCode: activeAltSwitch.countryCode,
+                riskStatus: (activeAltSwitch.riskStatus === "GREEN" ||
+                activeAltSwitch.riskStatus === "YELLOW" ||
+                activeAltSwitch.riskStatus === "RED"
+                  ? activeAltSwitch.riskStatus
+                  : "GREEN") as "GREEN" | "YELLOW" | "RED",
+                switchPct: activeAltSwitch.switchPct,
+                ...(activeAltSwitch.estimatedDistanceKm !== undefined
+                  ? { estimatedDistanceKm: activeAltSwitch.estimatedDistanceKm }
+                  : {}),
+                ...(activeAltSwitch.productEmissionFactorTco2ePerUnit !== undefined
+                  ? {
+                      productEmissionFactorTco2ePerUnit:
+                        activeAltSwitch.productEmissionFactorTco2ePerUnit,
+                    }
+                  : {}),
+                ...(activeAltSwitch.pcfVerified !== undefined
+                  ? { pcfVerified: activeAltSwitch.pcfVerified }
+                  : {}),
+              },
+            }
+          : {}),
       })
         .then((res) => {
           if (!cancelled) {
@@ -318,6 +402,46 @@ export function WhatIfSimulatorDrawer({
           Reset
         </button>
       </div>
+
+      {/* Alternative Switch Banner */}
+      {activeAltSwitch && (
+        <div
+          data-testid="whatif-alt-switch-banner"
+          className="mx-4 mt-3 rounded-xl border border-indigo-500/40 bg-indigo-950/30 p-3 space-y-2 shrink-0"
+        >
+          <div className="flex items-center justify-between gap-2">
+            <span className="text-xs font-medium text-indigo-200">
+              Simulating {activeAltSwitch.switchPct}% switch to {activeAltSwitch.alternativeName} ({activeAltSwitch.countryCode})
+            </span>
+            <button
+              type="button"
+              onClick={() => setActiveAltSwitch(null)}
+              className="text-slate-400 hover:text-white"
+            >
+              <X className="h-3.5 w-3.5" />
+            </button>
+          </div>
+          <div className="space-y-1">
+            <div className="flex items-center justify-between text-[11px] text-slate-300">
+              <span>Switch %</span>
+              <span className="font-mono">{activeAltSwitch.switchPct}%</span>
+            </div>
+            <input
+              type="range"
+              min={10}
+              max={100}
+              step={5}
+              value={activeAltSwitch.switchPct}
+              onChange={(e) =>
+                setActiveAltSwitch((prev) =>
+                  prev ? { ...prev, switchPct: Number(e.target.value) } : null,
+                )
+              }
+              className="w-full accent-indigo-400 cursor-pointer"
+            />
+          </div>
+        </div>
+      )}
 
       {/* Live Delta Preview Strip */}
       <div className="px-4 py-3 border-b border-slate-800 bg-slate-900/30 shrink-0">

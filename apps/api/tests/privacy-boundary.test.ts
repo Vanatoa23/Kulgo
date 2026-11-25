@@ -1,6 +1,7 @@
 import {
   AnalyticsSummarySchema,
   AnonymizedRiskAlertSchema,
+  CompanyRegistrySearchResponseSchema,
   CreateRelationshipDeclarationResponseSchema,
   EsgLedgerResponseSchema,
   ExecutiveReportSchema,
@@ -10,6 +11,7 @@ import {
   WorkspaceExportJsonSchema,
   WorkspaceNetworkResponseSchema,
 } from "@kulgo/shared";
+import { fileURLToPath } from "node:url";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "../src/app.js";
 import { parseCsvRecords } from "../src/workspace/import-export.js";
@@ -3150,4 +3152,224 @@ describe("Privacy Boundary Contract (Relationship Declarations)", () => {
 });
 
 
+
+
+describe("Privacy Boundary Contract (Company Registry Search)", () => {
+  const REGISTRY_SEARCH_PATH = "/api/v1/workspace/company-registry/search";
+  const EE_FIXTURE = fileURLToPath(
+    new URL("./fixtures/registry/ee-official-format.csv", import.meta.url),
+  );
+
+  function postSearch(app: ReturnType<typeof createTestApp>, cookie: string | null, body: unknown) {
+    return app.request(REGISTRY_SEARCH_PATH, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        ...(cookie ? { Cookie: cookie } : {}),
+      },
+      body: JSON.stringify(body),
+    });
+  }
+
+  it("returns 401 for anonymous company-registry search", async () => {
+    const app = createTestApp({ EE_REGISTRY_SNAPSHOT_PATH: EE_FIXTURE });
+    expect((await postSearch(app, null, { name: "Nordic Alloys OÜ" })).status).toBe(401);
+  });
+
+  it("returns only strict public registry data and never echoes tenant identity or terms", async () => {
+    const app = createTestApp({ EE_REGISTRY_SNAPSHOT_PATH: EE_FIXTURE });
+    const orgA = await registerOrg(app, "privacy-reg-a@kulgo.ee", "Privacy Registry A OU");
+    const orgB = await registerOrg(app, "privacy-reg-b@kulgo.ee", "Privacy Registry B OU");
+
+    const secretTerm = "SECRET_REGISTRY_TERM_OF_ORG_A_7Q";
+    const resA = await postSearch(app, orgA.cookie, {
+      name: secretTerm,
+      countryCode: "EE",
+      registryId: "10137319",
+    });
+    expect(resA.status).toBe(200);
+    const textA = await resA.text();
+    const parsedA = CompanyRegistrySearchResponseSchema.parse(JSON.parse(textA));
+    expect(parsedA.outcome).toBe("NO_MATCH");
+    expect(textA).not.toContain(orgA.orgId);
+    expect(textA).not.toContain(orgB.orgId);
+    expect(textA).not.toContain("privacy-reg-a@kulgo.ee");
+    expect(() =>
+      CompanyRegistrySearchResponseSchema.parse({ ...JSON.parse(textA), tier2Name: "leak" }),
+    ).toThrow();
+
+    // Org B's search response contains only public snapshot data — nothing about Org A.
+    const resB = await postSearch(app, orgB.cookie, {
+      name: "Nordic Alloys OÜ",
+      countryCode: "EE",
+    });
+    expect(resB.status).toBe(200);
+    const textB = await resB.text();
+    expect(textB).not.toContain(secretTerm);
+    expect(textB).not.toContain(orgA.orgId);
+    const parsedB = CompanyRegistrySearchResponseSchema.parse(JSON.parse(textB));
+    expect(parsedB.outcome).toBe("CONCLUSIVE_MATCH");
+    expect(parsedB.candidates[0]?.registryId).toBe("10137319");
+  });
+
+  it("reports SNAPSHOT_UNAVAILABLE for a missing snapshot without affecting workspace endpoints", async () => {
+    const app = createTestApp({
+      EE_REGISTRY_SNAPSHOT_PATH: "tests/fixtures/registry/definitely-missing.csv",
+    });
+    const org = await registerOrg(app, "privacy-reg-missing@kulgo.ee", "Privacy Registry Missing OU");
+
+    const res = await postSearch(app, org.cookie, { name: "Nordic Alloys OÜ" });
+    expect(res.status).toBe(200);
+    const parsed = CompanyRegistrySearchResponseSchema.parse(await res.json());
+    expect(parsed.outcome).toBe("SNAPSHOT_UNAVAILABLE");
+    expect(parsed.candidates).toEqual([]);
+
+    expect(
+      (
+        await app.request("/api/v1/workspace/network", {
+          headers: { Cookie: org.cookie },
+        })
+      ).status,
+    ).toBe(200);
+    expect((await app.request("/api/v1/health")).status).toBe(200);
+  });
+});
+
+describe("Sub-Project 5 Privacy Boundary — Product Catalogue Matches & Intro Requests", () => {
+  it("never leaks private supply links, Tier-2+ upstream suppliers, revenues, coordinates, or emails in facility alternatives or intro emails", async () => {
+    const { InMemoryCaptureEmailProvider } = await import(
+      "../src/intelligence/notifications.js"
+    );
+    const emailCapture = new InMemoryCaptureEmailProvider();
+    const app = createTestApp({}, { emailProvider: emailCapture });
+
+    // Opted-in Supplier with secret Tier-2 upstream supplier, revenue, and private coordinates
+    const supplier = await registerOrg(
+      app,
+      "secret-owner@cat-supplier.fi",
+      "Helsinki OptIn Extrusions Oy",
+    );
+    await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: supplier.cookie },
+      body: JSON.stringify({
+        openToNewBuyers: true,
+        annualRevenueEur: 48_765_432,
+        esgBadges: ["ISO 14001"],
+      }),
+    });
+    const supSecretFacRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: supplier.cookie },
+      body: JSON.stringify({
+        name: "Secret Tier2 Bauxite Smelter",
+        kind: "EXTRACTION",
+        countryCode: "RU",
+        lat: 56.1234,
+        lng: 38.9876,
+        isOwnFacility: false,
+        sector: "Mining",
+      }),
+    });
+    expect(supSecretFacRes.status).toBe(201);
+    const { facility: supSecretFac } = (await supSecretFacRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const catRes = await app.request("/api/v1/directory/catalogue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: supplier.cookie },
+      body: JSON.stringify({
+        standardizedCategory: "ALUMINUM_EXTRUSIONS",
+        productTitle: "6061-T6 Nordic Extrusions",
+        baseUnit: "TONNES",
+      }),
+    });
+    expect(catRes.status).toBe(201);
+
+    // Buyer with private existing supplier
+    const buyer = await registerOrg(
+      app,
+      "buyer-priv@tallinn-buyer.ee",
+      "Tallinn Buyer AS",
+    );
+    const ownRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        name: "Tallinn Assembly",
+        kind: "HQ",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: ownFac } = (await ownRes.json()) as {
+      facility: { facilityId: string };
+    };
+    const existingSupRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        name: "Confidential Incumbent Supplier GmbH",
+        kind: "FACTORY",
+        countryCode: "DE",
+        lat: 52.52,
+        lng: 13.405,
+        isOwnFacility: false,
+      }),
+    });
+    const { facility: existingSup } = (await existingSupRes.json()) as {
+      facility: { facilityId: string };
+    };
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        fromFacilityId: existingSup.facilityId,
+        toFacilityId: ownFac.facilityId,
+        materialCategory: "Aluminum Extrusions",
+        transportMode: "ROAD",
+        volumeSharePct: 100,
+      }),
+    });
+
+    // 1. Facility alternatives response must never leak supplier's Tier-2, email, revenue, or coordinates
+    const altRes = await app.request(
+      `/api/v1/directory/alternatives/for-facility/${existingSup.facilityId}`,
+      { headers: { Cookie: buyer.cookie } },
+    );
+    expect(altRes.status).toBe(200);
+    const altText = await altRes.text();
+    expect(altText).toContain("Helsinki OptIn Extrusions Oy");
+    expect(altText).not.toContain("Secret Tier2 Bauxite Smelter");
+    expect(altText).not.toContain(supSecretFac.facilityId);
+    expect(altText).not.toContain("48765432");
+    expect(altText).not.toContain("56.1234");
+    expect(altText).not.toContain("38.9876");
+    expect(altText).not.toContain("secret-owner@cat-supplier.fi");
+
+    // 2. Intro request response & email must never leak buyer's private supply graph or incumbent supplier
+    const introRes = await app.request("/api/v1/directory/request-intro", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        targetOrgId: supplier.orgId,
+        materialCategory: "Aluminum Extrusions",
+        volumeBand: "100-300 tonnes/year",
+      }),
+    });
+    expect(introRes.status).toBe(201);
+    const introText = await introRes.text();
+    expect(introText).not.toContain("secret-owner@cat-supplier.fi");
+    expect(introText).not.toContain("Confidential Incumbent Supplier GmbH");
+    expect(emailCapture.sent).toHaveLength(1);
+    expect(emailCapture.sent[0]!.text).not.toContain(
+      "Confidential Incumbent Supplier GmbH",
+    );
+    expect(emailCapture.sent[0]!.text).not.toContain(existingSup.facilityId);
+    expect(emailCapture.sent[0]!.text).not.toContain(ownFac.facilityId);
+  });
+});
 

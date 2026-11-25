@@ -232,6 +232,7 @@ export const FacilitySchema = z
     renewableElectricityPct: z.number().finite().min(0).max(100).nullable().optional(),
     renewableInstrumentsVerified: z.boolean().optional(),
     annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
+    registryCode: z.string().trim().min(1).max(64).nullable().optional(),
   })
   .strict();
 export type Facility = z.infer<typeof FacilitySchema>;
@@ -485,6 +486,7 @@ export const CreateFacilityInputSchema = z.object({
   renewableElectricityPct: z.number().finite().min(0).max(100).nullable().optional(),
   renewableInstrumentsVerified: z.boolean().optional(),
   annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
+  registryCode: z.string().trim().min(1).max(64).nullable().optional(),
 });
 export type CreateFacilityInput = z.infer<typeof CreateFacilityInputSchema>;
 
@@ -506,6 +508,7 @@ export const UpdateFacilityInputSchema = z.object({
   renewableElectricityPct: z.number().finite().min(0).max(100).nullable().optional(),
   renewableInstrumentsVerified: z.boolean().optional(),
   annualRevenueEur: z.number().finite().nonnegative().nullable().optional(),
+  registryCode: z.string().trim().min(1).max(64).nullable().optional(),
 });
 export type UpdateFacilityInput = z.infer<typeof UpdateFacilityInputSchema>;
 
@@ -698,6 +701,7 @@ export const BulkImportJsonRequestSchema = z.object({
   facilities: z.array(z.unknown()).max(500).optional(),
   lanes: z.array(z.unknown()).max(1000).optional(),
   csv: z.string().min(1).max(2_000_000).optional(),
+  xlsxBase64: z.string().min(1).max(3_000_000).optional(),
 });
 export type BulkImportJsonRequest = z.infer<typeof BulkImportJsonRequestSchema>;
 
