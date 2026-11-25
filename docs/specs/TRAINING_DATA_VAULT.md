@@ -1,6 +1,6 @@
 # Training Data Vault — Architecture, Schemas & Governance Spec (Issue #69)
 
-> **Status:** Proposed Spec (v1)  
+> **Status:** Implemented (v1)  
 > **Related:** [Issue #69](https://github.com/Vanatoa23/Kulgo/issues/69), [Issue #68](https://github.com/Vanatoa23/Kulgo/issues/68), [`docs/PRIVACY_CONTRACT.md`](../PRIVACY_CONTRACT.md), [`docs/research/AI_ORCHESTRATION_AND_KNOWLEDGE_SYNTHESIS.md`](../research/AI_ORCHESTRATION_AND_KNOWLEDGE_SYNTHESIS.md)
 
 ## 1. Goal & North-Star Product Vision
@@ -157,7 +157,7 @@ Captures both kept and dropped Stage 1 / Stage 2 items so we can measure pre-fil
 
 ### 4.2 `llm_extractions` (`global_public`)
 
-Captures every LLM extraction attempt (including validation failures) for evaluation, distillation (where permitted), and fine-tuning.
+Captures every LLM extraction attempt (including validation failures and true raw model output) for evaluation, distillation (where permitted), and fine-tuning.
 
 ```ts
 {
@@ -165,12 +165,12 @@ Captures every LLM extraction attempt (including validation failures) for evalua
   plane: "global_public",
   labelProvenance: "LLM_SILVER",
   sweepId: string,
-  articleContentSha256: string,
+  articleContentSha256s: string[], // Matches raw_feeds.contentSha256 for every article in the batch
   promptTemplateVersion: string,
   provider: string,           // e.g., "gemini", "openai", "anthropic"
   model: string,
   promptText: string,         // Public-only prompt (zero tenant context)
-  rawOutput: string,
+  rawOutput: string,          // True raw LLM response text (even on parse/validation failure)
   parsedCandidate: Record<string, unknown> | null,
   evidenceQuotes: string[],
   validationPassed: boolean,
@@ -184,7 +184,7 @@ Captures every LLM extraction attempt (including validation failures) for evalua
 
 ### 4.3 `signal_lifecycles` (`global_public`)
 
-Tracks deduplication merges, corroboration independence, and `PLANNED -> ACTIVE -> RESOLVED` transitions so the Supply Chain Gym can replay disruption evolution over time.
+Tracks deduplication merges, corroboration independence, and `PLANNED -> ACTIVE -> RESOLVED` transitions (including expiration-driven resolutions via `resolveExpired()`) so the Supply Chain Gym can replay disruption evolution and true observed durations over time.
 
 ```ts
 {
@@ -198,7 +198,8 @@ Tracks deduplication merges, corroboration independence, and `PLANNED -> ACTIVE 
   countryCodes: string[],
   lifecycleStatus: "PLANNED" | "ACTIVE" | "RESOLVED",
   previousStatus: "PLANNED" | "ACTIVE" | "RESOLVED" | null,
-  mergedArticleHashes: string[],
+  mergedSourceUrlHashes: string[],       // SHA-256 of canonical sourceUrls
+  mergedArticleContentSha256s: string[], // Matches raw_feeds.contentSha256 for articles in this sweep
   independentSourceCount: number,
   firstSeenAt: string,
   lastUpdatedAt: string,
@@ -269,15 +270,15 @@ Reserved for when Kulgo tracks mitigation actions and actual supplier/lane recov
 
 ---
 
-## 5. Planned Implementation Checklist (Next Step)
+## 5. Implementation Status (v1)
 
-1. **`packages/shared/src/training-vault.ts`:** Define `.strict()` Zod schemas and TypeScript types for all v1 datasets, including `labelProvenance` and the runtime invariant ensuring `fullText === null` whenever `contentPolicy === "EXCERPT_ONLY"`.
-2. **`apps/api/src/intelligence/training-vault.ts`:** Implement `TrainingVaultSink`, `LocalFsTrainingVaultSink`, `S3TrainingVaultSink` (`@aws-sdk/client-s3`), and `NoopTrainingVaultSink` with `.jsonl.gz` serialization and partitioned keys.
-3. **Per-Org Opt-Out Gate:** Add `allowAnonymizedTraining` (default `true`) to org settings / workspace config and enforce it before writing any Plane B record.
-4. **Pipeline Wiring:**
-   - Emit `raw_feeds`, `llm_extractions`, and `signal_lifecycles` batches from `IntelligenceRunner` (`apps/api/src/intelligence/runner.ts`).
-   - Emit `anonymized_alert_feedback` from `POST /api/alerts/:signalId/ack` (`apps/api/src/intelligence/routes.ts`).
-5. **Governance & Tests:**
-   - Add a **Training Data Vault** section to `docs/PRIVACY_CONTRACT.md`.
-   - Extend `apps/api/tests/privacy-boundary.test.ts` (`pnpm test:privacy`) to verify strict stripping of tenant/PII fields, `allowAnonymizedTraining: false` suppression, and `EXCERPT_ONLY` enforcement.
-   - Add unit tests for gzip JSONL writing, partition path generation, and non-blocking error handling.
+- [x] **`packages/shared/src/training-vault.ts`:** Defined `.strict()` Zod schemas and TypeScript types for all v1 datasets, including `labelProvenance`, aligned `contentSha256` join keys, and runtime enforcement ensuring `fullText === null` whenever `contentPolicy === "EXCERPT_ONLY"`.
+- [x] **`apps/api/src/intelligence/training-vault.ts`:** Implemented `TrainingVaultSink`, `LocalFsTrainingVaultSink`, `S3TrainingVaultSink` (`@aws-sdk/client-s3` with bounded timeouts), and `NoopTrainingVaultSink` with `.jsonl.gz` serialization and partitioned keys.
+- [x] **Per-Org Opt-Out Gate:** Added `allowAnonymizedTraining` (default `true`) to `AlertNotificationPreference` (`PATCH /api/v1/alerts/preferences`) and enforced it before writing any Plane B record.
+- [x] **Pipeline Wiring:**
+  - Emits `raw_feeds`, `llm_extractions`, and `signal_lifecycles` (including `resolveExpired()` transitions) from `IntelligenceRunner` (`apps/api/src/intelligence/runner.ts`).
+  - Emits `anonymized_alert_feedback` from `POST /api/v1/alerts/:signalId/ack` (`apps/api/src/intelligence/routes.ts`) inside a fault-isolated block using targeted `findById` lookup.
+- [x] **Governance & Tests:**
+  - Documented Training Data Vault invariants in `docs/PRIVACY_CONTRACT.md`.
+  - Extended `apps/api/tests/privacy-boundary.test.ts` (`pnpm test:privacy`) to verify strict forbidden-field rejection across all 6 dataset schemas, zero tenant leakage, and `allowAnonymizedTraining: false` suppression.
+  - Added `apps/api/tests/training-vault.test.ts` covering `.jsonl.gz` archival, S3 upload, join-key alignment, `resolveExpired()` transitions, and fault isolation.

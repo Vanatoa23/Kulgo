@@ -1,6 +1,5 @@
 import {
   AnalyticsSummarySchema,
-  AnonymizedAlertFeedbackVaultRecordSchema,
   AnonymizedRiskAlertSchema,
   CompanyRegistrySearchResponseSchema,
   CreateRelationshipDeclarationResponseSchema,
@@ -9,6 +8,7 @@ import {
   ListAuditEventsResponseSchema,
   ListRelationshipDeclarationsResponseSchema,
   SimulateAnalyticsResponseSchema,
+  TRAINING_VAULT_DATASET_SCHEMAS,
   TRAINING_VAULT_FORBIDDEN_FIELDS,
   TRAINING_VAULT_SCHEMA_VERSION,
   WorkspaceExportJsonSchema,
@@ -3381,26 +3381,124 @@ describe("Sub-Project 5 Privacy Boundary — Product Catalogue Matches & Intro R
   });
 
   it("enforces Training Data Vault two-plane privacy invariants, strict forbidden-field rejection, and per-org opt-out", async () => {
-    const baseFeedback = {
-      schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
-      plane: "anonymized_outcomes" as const,
-      labelProvenance: "HUMAN_VERIFIED" as const,
-      signalId: "sig-latvia-sanctions-01",
-      reasonCode: "WRONG_ENTITY_OR_SITE" as const,
-      eventCategory: "SANCTIONS",
-      severity: "RED",
-      countryCode: "LV",
-      timestampBucket: "2026-04-09",
-    };
+    const sampleHash = "a".repeat(64);
+    const validRecordsByDataset = {
+      raw_feeds: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "global_public" as const,
+        sweepId: "sweep-1",
+        sourceId: "gdacs",
+        stage: "STAGE_1" as const,
+        url: "https://www.gdacs.org/report.aspx?eventid=1",
+        publisherDomain: "gdacs.org",
+        fetchedAt: "2026-04-09T12:00:00.000Z",
+        publishedAt: "2026-04-09T10:00:00.000Z",
+        language: "en",
+        contentSha256: sampleHash,
+        contentPolicy: "FULL_TEXT" as const,
+        licenseTag: "OPEN_GOV" as const,
+        title: "Storm warning",
+        summary: "Public warning",
+        fullText: "Public warning body",
+        preFilterPassed: true,
+        preFilterReason: "STAGE_1_STRUCTURED",
+        matchedKeywords: [],
+      },
+      llm_extractions: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "global_public" as const,
+        labelProvenance: "LLM_SILVER" as const,
+        sweepId: "sweep-1",
+        articleContentSha256s: [sampleHash],
+        promptTemplateVersion: "stage2-v1",
+        provider: "gemini",
+        model: "gemini-2.5-flash-lite",
+        promptText: "[]",
+        rawOutput: '{"signals":[]}',
+        parsedCandidate: { signals: [] },
+        evidenceQuotes: [],
+        validationPassed: true,
+        validationErrors: [],
+        promptTokens: 10,
+        completionTokens: 5,
+        latencyMs: 50,
+        recordedAt: "2026-04-09T12:00:00.000Z",
+      },
+      signal_lifecycles: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "global_public" as const,
+        labelProvenance: "RULE_VERIFIED" as const,
+        sweepId: "sweep-1",
+        signalId: "sig-1",
+        eventCategory: "SANCTIONS",
+        severity: "RED",
+        countryCodes: ["LV"],
+        lifecycleStatus: "ACTIVE" as const,
+        previousStatus: null,
+        mergedSourceUrlHashes: [sampleHash],
+        mergedArticleContentSha256s: [sampleHash],
+        independentSourceCount: 1,
+        firstSeenAt: "2026-04-09T10:00:00.000Z",
+        lastUpdatedAt: "2026-04-09T12:00:00.000Z",
+        resolvedAt: null,
+        observedDurationHours: null,
+        recordedAt: "2026-04-09T12:00:00.000Z",
+      },
+      entity_resolution_pairs: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "global_public" as const,
+        labelProvenance: "RULE_VERIFIED" as const,
+        inputNormalized: "tallinna sadam",
+        inputLanguage: "et",
+        registrySource: "EE_ARIREGISTER",
+        registryId: "10137319",
+        canonicalName: "AS Tallinna Sadam",
+        countryCode: "EE",
+        resolutionMethod: "EXACT_ID" as const,
+        confidence: 1,
+        recordedAt: "2026-04-09T12:00:00.000Z",
+      },
+      anonymized_alert_feedback: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "anonymized_outcomes" as const,
+        labelProvenance: "HUMAN_VERIFIED" as const,
+        signalId: "sig-latvia-sanctions-01",
+        reasonCode: "WRONG_ENTITY_OR_SITE" as const,
+        eventCategory: "SANCTIONS",
+        severity: "RED",
+        countryCode: "LV",
+        timestampBucket: "2026-04-09",
+      },
+      anonymized_decision_outcomes: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "anonymized_outcomes" as const,
+        labelProvenance: "HUMAN_VERIFIED" as const,
+        signalId: "sig-latvia-sanctions-01",
+        eventCategory: "SANCTIONS",
+        transportMode: "ROAD",
+        regionBucket: "BALTIC",
+        predictedTtrBandDays: "7-14",
+        observedTtrBandDays: "10-14",
+        actionType: "REROUTE",
+        timestampBucket: "2026-04-09",
+      },
+    } as const;
 
-    // 1. Every forbidden tenant/PII/commercial field must be rejected by .strict()
-    for (const field of TRAINING_VAULT_FORBIDDEN_FIELDS) {
-      expect(() =>
-        AnonymizedAlertFeedbackVaultRecordSchema.parse({
-          ...baseFeedback,
-          [field]: "leaked-value",
-        }),
-      ).toThrow();
+    // 1. Every forbidden tenant/PII/commercial field must be rejected by .strict() across ALL 6 dataset schemas
+    for (const [dataset, validRecord] of Object.entries(validRecordsByDataset)) {
+      const schema =
+        TRAINING_VAULT_DATASET_SCHEMAS[
+          dataset as keyof typeof TRAINING_VAULT_DATASET_SCHEMAS
+        ];
+      expect(() => schema.parse(validRecord)).not.toThrow();
+      for (const field of TRAINING_VAULT_FORBIDDEN_FIELDS) {
+        expect(() =>
+          schema.parse({
+            ...validRecord,
+            [field]: "leaked-value",
+          }),
+        ).toThrow();
+      }
     }
 
     // 2. End-to-end alert ack emits gzipped Plane B JSONL containing zero tenant/user/note strings

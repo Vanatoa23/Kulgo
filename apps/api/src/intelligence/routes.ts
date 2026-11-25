@@ -170,40 +170,51 @@ export function createAlertRoutes({
     });
 
     // Plane B anonymized operational feedback archival (strictly gated by per-org opt-out).
+    // Entire enrichment + write path is fault-isolated so it can never fail an ack response.
     if (trainingVault && ack.reason) {
-      const storedPref = await alertRepo.getNotificationPreference(
-        auth.organization.orgId,
-      );
-      if (storedPref.preference.allowAnonymizedTraining) {
-        let eventCategory: string | null = null;
-        let severity: string | null = null;
-        let countryCode: string | null = null;
-        if (riskSignalRepo) {
-          const activeSignals = await riskSignalRepo.listActive();
-          const matched = activeSignals.find((s) => s.signalId === signalId);
-          if (matched) {
-            eventCategory = matched.kind;
-            severity = matched.severity;
-            countryCode = matched.affectedCountryCodes[0] ?? null;
+      try {
+        const storedPref = await alertRepo.getNotificationPreference(
+          auth.organization.orgId,
+        );
+        if (storedPref.preference.allowAnonymizedTraining) {
+          let eventCategory: string | null = null;
+          let severity: string | null = null;
+          let countryCode: string | null = null;
+          if (riskSignalRepo) {
+            const matched = riskSignalRepo.findById
+              ? await riskSignalRepo.findById(signalId)
+              : (await riskSignalRepo.listActive()).find(
+                  (s) => s.signalId === signalId,
+                ) ?? null;
+            if (matched) {
+              eventCategory = matched.kind;
+              severity = matched.severity;
+              countryCode = matched.affectedCountryCodes[0] ?? null;
+            }
           }
+          await safeWriteVaultBatch(
+            trainingVault,
+            "anonymized_alert_feedback",
+            [
+              {
+                schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+                plane: "anonymized_outcomes",
+                labelProvenance: "HUMAN_VERIFIED",
+                signalId: ack.signalId,
+                reasonCode: ack.reason,
+                eventCategory,
+                severity,
+                countryCode,
+                timestampBucket: toUtcDayBucket(ack.acknowledgedAt),
+              },
+            ],
+            { batchId: generateBatchId("fb") },
+          );
         }
-        await safeWriteVaultBatch(
-          trainingVault,
-          "anonymized_alert_feedback",
-          [
-            {
-              schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
-              plane: "anonymized_outcomes",
-              labelProvenance: "HUMAN_VERIFIED",
-              signalId: ack.signalId,
-              reasonCode: ack.reason,
-              eventCategory,
-              severity,
-              countryCode,
-              timestampBucket: toUtcDayBucket(ack.acknowledgedAt),
-            },
-          ],
-          { batchId: generateBatchId("fb") },
+      } catch (err) {
+        console.warn(
+          "[kulgo-training-vault] Failed to enrich/archive anonymized_alert_feedback:",
+          err instanceof Error ? err.message : String(err),
         );
       }
     }

@@ -14,8 +14,8 @@ import {
   computeCanonicalDedupeKey,
   trigramJaccardSimilarity,
 } from "../dedupe.js";
-import type { LlmRouter } from "../llm-router.js";
-import { sha256Hex } from "../training-vault.js";
+import { LlmRouterAllFailedError, type LlmRouter } from "../llm-router.js";
+import { computeFeedContentSha256 } from "../training-vault.js";
 
 export interface UnstructuredFeedItem {
   articleId?: string;
@@ -376,7 +376,7 @@ function resolveLifecycleFromEventWindow(
 }
 
 export interface Stage2ExtractionAuditEntry {
-  articleContentSha256: string;
+  articleContentSha256s: string[];
   promptTemplateVersion: string;
   provider: string;
   model: string;
@@ -422,6 +422,7 @@ export async function classifyUnstructuredItems(
   for (let i = 0; i < items.length; i += batchSize) {
     const batch = items.slice(i, i + batchSize);
     const articleById = new Map<string, UnstructuredFeedItem>();
+    const articleContentSha256s: string[] = [];
     const promptBatch: Array<{
       articleId: string;
       title: string;
@@ -437,6 +438,13 @@ export async function classifyUnstructuredItems(
           ? preferredId
           : `art-${i + idx + 1}`;
       articleById.set(articleId, article);
+      articleContentSha256s.push(
+        computeFeedContentSha256({
+          url: article.sourceUrl,
+          title: article.title,
+          summaryOrBody: article.summary,
+        }),
+      );
       promptBatch.push({
         articleId,
         title: article.title,
@@ -446,7 +454,6 @@ export async function classifyUnstructuredItems(
     }
 
     const userPrompt = JSON.stringify(promptBatch);
-    const batchContentHash = sha256Hex(userPrompt);
     const startedMs = Date.now();
 
     try {
@@ -546,12 +553,12 @@ export async function classifyUnstructuredItems(
       }
 
       extractions.push({
-        articleContentSha256: batchContentHash,
+        articleContentSha256s,
         promptTemplateVersion: STAGE2_PROMPT_TEMPLATE_VERSION,
         provider: result.provider,
         model: result.model,
         promptText: userPrompt,
-        rawOutput: JSON.stringify(result.data),
+        rawOutput: result.rawText,
         parsedCandidate: result.data as unknown as Record<string, unknown>,
         evidenceQuotes: batchEvidenceQuotes,
         validationPassed: batchValidationErrors.length === 0,
@@ -564,13 +571,27 @@ export async function classifyUnstructuredItems(
       const latencyMs = Math.max(0, Date.now() - startedMs);
       const message = err instanceof Error ? err.message : String(err);
       errors.push(`Stage2 batch ${i}: ${message}`);
+
+      let failedProvider = llmRouter.configuredProviders[0] ?? "unknown";
+      let failedModel = "unknown";
+      let failedRawOutput = "";
+      if (err instanceof LlmRouterAllFailedError && err.attempts.length > 0) {
+        const executedAttempts = err.attempts.filter((a) => !a.skippedReason);
+        const lastAttempt =
+          executedAttempts[executedAttempts.length - 1] ??
+          err.attempts[err.attempts.length - 1]!;
+        failedProvider = lastAttempt.provider;
+        failedModel = lastAttempt.model ?? "unknown";
+        failedRawOutput = lastAttempt.rawText ?? "";
+      }
+
       extractions.push({
-        articleContentSha256: batchContentHash,
+        articleContentSha256s,
         promptTemplateVersion: STAGE2_PROMPT_TEMPLATE_VERSION,
-        provider: llmRouter.configuredProviders[0] ?? "unknown",
-        model: "unknown",
+        provider: failedProvider,
+        model: failedModel,
         promptText: userPrompt,
-        rawOutput: "",
+        rawOutput: failedRawOutput,
         parsedCandidate: null,
         evidenceQuotes: [],
         validationPassed: false,

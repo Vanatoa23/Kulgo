@@ -39,16 +39,29 @@ export interface LlmProviderAdapter {
 
 export interface LlmRouterAttempt {
   provider: LlmProviderName;
+  model?: string;
+  rawText?: string;
   error?: string;
   skippedReason?: string;
 }
 
 export interface LlmRouterResult<T> {
   data: T;
+  rawText: string;
   provider: LlmProviderName;
   model: string;
   usage: LlmTokenUsage;
   attempts: LlmRouterAttempt[];
+}
+
+export class LlmRouterAllFailedError extends Error {
+  constructor(
+    message: string,
+    readonly attempts: readonly LlmRouterAttempt[],
+  ) {
+    super(message);
+    this.name = "LlmRouterAllFailedError";
+  }
 }
 
 export interface LlmRouterOptions {
@@ -455,10 +468,12 @@ export class LlmRouter {
       this.assertWithinDailyBudget(nowMs);
       this.dailyUsage.requests += 1;
 
+      let capturedRawText: string | undefined;
       try {
         const rawOutput = await provider.completeJson(requestWithDefaults);
         const text =
           typeof rawOutput === "string" ? rawOutput : rawOutput.text;
+        capturedRawText = text;
         const usage =
           typeof rawOutput === "string"
             ? normalizeUsage(undefined)
@@ -476,9 +491,10 @@ export class LlmRouter {
           consecutiveFailures: 0,
           cooldownUntilMs: 0,
         });
-        attempts.push({ provider: provider.name });
+        attempts.push({ provider: provider.name, model: provider.model });
         return {
           data: validated,
+          rawText: text,
           provider: provider.name,
           model: provider.model,
           usage,
@@ -497,7 +513,12 @@ export class LlmRouter {
             cooldownUntilMs,
           });
         }
-        attempts.push({ provider: provider.name, error: message });
+        attempts.push({
+          provider: provider.name,
+          model: provider.model,
+          ...(capturedRawText !== undefined ? { rawText: capturedRawText } : {}),
+          error: message,
+        });
       }
     }
 
@@ -507,6 +528,9 @@ export class LlmRouter {
           `${a.provider}: ${a.error ?? (a.skippedReason ? `skipped (${a.skippedReason})` : "unknown")}`,
       )
       .join("; ");
-    throw new Error(`All AI API Centre providers failed (${summary})`);
+    throw new LlmRouterAllFailedError(
+      `All AI API Centre providers failed (${summary})`,
+      attempts,
+    );
   }
 }

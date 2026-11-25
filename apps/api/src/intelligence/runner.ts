@@ -40,6 +40,7 @@ import {
   type OrgSignalMatchBundle,
 } from "./notifications.js";
 import {
+  computeFeedContentSha256,
   extractPublisherDomain,
   safeWriteVaultBatch,
   sha256Hex,
@@ -351,10 +352,18 @@ export class IntelligenceRunner {
         : await fetchStage1Signals({ fetchFn: this.deps.fetchFn, nowIso: startedAt });
       errors.push(...stage1.errors);
 
+      const contentSha256ByUrl = new Map<string, string>();
+
       for (const sig of stage1.signals) {
         const sourceUrl = sig.sourceUrls[0] ?? `kulgo://stage1/${sig.signalId}`;
         const publishedMs = sig.publishedAt ? Date.parse(sig.publishedAt) : Number.NaN;
         const fullText = sig.description ?? sig.title;
+        const contentSha256 = computeFeedContentSha256({
+          url: sourceUrl,
+          title: sig.title,
+          summaryOrBody: fullText,
+        });
+        contentSha256ByUrl.set(sourceUrl, contentSha256);
         rawFeedRecords.push({
           schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
           plane: "global_public",
@@ -368,9 +377,7 @@ export class IntelligenceRunner {
             ? new Date(publishedMs).toISOString()
             : null,
           language: null,
-          contentSha256: sha256Hex(`${sourceUrl}
-${sig.title}
-${fullText}`),
+          contentSha256,
           contentPolicy: "FULL_TEXT",
           licenseTag: "OPEN_GOV",
           title: sig.title,
@@ -419,6 +426,12 @@ ${fullText}`),
         );
         for (const decision of decisions) {
           const pubMs = Date.parse(decision.item.publishedAt);
+          const contentSha256 = computeFeedContentSha256({
+            url: decision.item.sourceUrl,
+            title: decision.item.title,
+            summaryOrBody: decision.item.summary,
+          });
+          contentSha256ByUrl.set(decision.item.sourceUrl, contentSha256);
           rawFeedRecords.push({
             schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
             plane: "global_public",
@@ -432,11 +445,7 @@ ${fullText}`),
               ? new Date(pubMs).toISOString()
               : null,
             language: null,
-            contentSha256: sha256Hex(
-              `${decision.item.sourceUrl}
-${decision.item.title}
-${decision.item.summary}`,
-            ),
+            contentSha256,
             contentPolicy: "EXCERPT_ONLY",
             licenseTag: "COPYRIGHTED_EXCERPT",
             title: decision.item.title,
@@ -473,31 +482,34 @@ ${decision.item.summary}`,
         errors.push(...classified.errors);
       }
 
-      let upsertedNew = 0;
-      let upsertedMerged = 0;
-      const allIncoming = [...stage1.signals, ...stage2Signals];
-      for (const sig of allIncoming) {
-        const res = await this.deps.riskSignalRepo.upsertSignal(sig);
-        if (res.created) upsertedNew++;
-        else upsertedMerged++;
-
-        const stored = res.signal;
-        const previousStatus = previousLifecycleBySignalId.get(stored.signalId) ?? null;
+      const buildLifecycleRecord = (
+        stored: RiskSignal,
+        previousStatus: RiskSignal["lifecycle"] | null,
+        lifecycleStatus: RiskSignal["lifecycle"] = stored.lifecycle,
+        resolvedAtOverride?: string | null,
+      ): SignalLifecycleVaultRecord => {
         const firstSeenAt = stored.publishedAt ?? stored.lastSeenAt ?? startedAt;
         const lastUpdatedAt = stored.lastSeenAt ?? startedAt;
-        const resolvedAt = stored.resolvedAt ?? null;
+        const resolvedAt =
+          resolvedAtOverride !== undefined
+            ? resolvedAtOverride
+            : (stored.resolvedAt ?? null);
         let observedDurationHours: number | null = null;
         if (resolvedAt) {
           const startMs = Date.parse(stored.eventStartAt ?? firstSeenAt);
           const endMs = Date.parse(resolvedAt);
           if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs) {
-            observedDurationHours = Math.round(((endMs - startMs) / 3_600_000) * 100) / 100;
+            observedDurationHours =
+              Math.round(((endMs - startMs) / 3_600_000) * 100) / 100;
           }
         }
         const uniqueDomains = new Set(
           stored.sourceUrls.map((u) => extractPublisherDomain(u)),
         );
-        lifecycleRecords.push({
+        const mergedArticleContentSha256s = stored.sourceUrls
+          .map((u) => contentSha256ByUrl.get(u))
+          .filter((h): h is string => typeof h === "string");
+        return {
           schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
           plane: "global_public",
           labelProvenance: stored.signalId.startsWith("sig-s2-")
@@ -508,20 +520,72 @@ ${decision.item.summary}`,
           eventCategory: stored.kind,
           severity: stored.severity,
           countryCodes: stored.affectedCountryCodes,
-          lifecycleStatus: stored.lifecycle,
+          lifecycleStatus,
           previousStatus,
-          mergedArticleHashes: stored.sourceUrls.map((u) => sha256Hex(u)),
+          mergedSourceUrlHashes: stored.sourceUrls.map((u) => sha256Hex(u)),
+          mergedArticleContentSha256s,
           independentSourceCount: uniqueDomains.size,
           firstSeenAt,
           lastUpdatedAt,
           resolvedAt,
           observedDurationHours,
           recordedAt: startedAt,
-        });
+        };
+      };
+
+      const activeBeforeResolve = new Map<string, RiskSignal>(
+        preUpsertActiveSignals.map((sig) => [sig.signalId, sig]),
+      );
+
+      let upsertedNew = 0;
+      let upsertedMerged = 0;
+      const allIncoming = [...stage1.signals, ...stage2Signals];
+      for (const sig of allIncoming) {
+        const res = await this.deps.riskSignalRepo.upsertSignal(sig);
+        if (res.created) upsertedNew++;
+        else upsertedMerged++;
+
+        const stored = res.signal;
+        const previousStatus = previousLifecycleBySignalId.get(stored.signalId) ?? null;
+        lifecycleRecords.push(buildLifecycleRecord(stored, previousStatus));
+        if (stored.active && stored.lifecycle !== "RESOLVED") {
+          activeBeforeResolve.set(stored.signalId, stored);
+        } else {
+          activeBeforeResolve.delete(stored.signalId);
+        }
       }
 
       const resolvedExpired =
         await this.deps.riskSignalRepo.resolveExpired(startedAt);
+
+      // Capture PLANNED -> ACTIVE and ACTIVE/PLANNED -> RESOLVED transitions
+      // performed by resolveExpired() so observedDurationHours is archived.
+      const hadPlannedBeforeResolve = Array.from(
+        activeBeforeResolve.values(),
+      ).some((sig) => sig.lifecycle === "PLANNED");
+      if (resolvedExpired > 0 || hadPlannedBeforeResolve) {
+        const postResolveActive = await this.deps.riskSignalRepo.listActive();
+        const postResolveById = new Map(
+          postResolveActive.map((sig) => [sig.signalId, sig]),
+        );
+        for (const [signalId, prevSig] of activeBeforeResolve.entries()) {
+          const after = postResolveById.get(signalId);
+          if (!after) {
+            lifecycleRecords.push(
+              buildLifecycleRecord(
+                prevSig,
+                prevSig.lifecycle,
+                "RESOLVED",
+                startedAt,
+              ),
+            );
+          } else if (after.lifecycle !== prevSig.lifecycle) {
+            lifecycleRecords.push(
+              buildLifecycleRecord(after, prevSig.lifecycle, after.lifecycle),
+            );
+          }
+        }
+      }
 
       // Best-effort, non-blocking archival to the Training Data Vault (Plane A)
       if (this.deps.trainingVault) {

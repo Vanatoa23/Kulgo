@@ -361,27 +361,194 @@ describe("Training Data Vault (Issue #69)", () => {
     expect(droppedStage2.preFilterReason).toBe("NO_DISRUPTION_KEYWORD");
     expect(droppedStage2.fullText).toBeNull();
 
-    // 2. llm_extractions: 1 batch with LLM_SILVER provenance + token usage
+    // 2. llm_extractions: 1 batch with LLM_SILVER provenance + token usage + aligned contentSha256 join key
     const extractions = await readDataset("llm_extractions");
     expect(extractions).toHaveLength(1);
     expect(extractions[0]!.labelProvenance).toBe("LLM_SILVER");
     expect(extractions[0]!.provider).toBe("mock-gemini");
     expect(extractions[0]!.promptTokens).toBe(120);
     expect(extractions[0]!.validationPassed).toBe(true);
+    expect(extractions[0]!.articleContentSha256s).toEqual([
+      passedStage2.contentSha256,
+    ]);
+    expect(String(extractions[0]!.rawOutput)).toContain(
+      "Port of Tallinn Dockworker Strike",
+    );
 
-    // 3. signal_lifecycles: 2 upserted signals (1 RULE_VERIFIED Stage 1 + 1 LLM_SILVER Stage 2)
+    // 3. signal_lifecycles: 2 upserted signals with aligned mergedArticleContentSha256s
     const lifecycles = await readDataset("signal_lifecycles");
     expect(lifecycles).toHaveLength(2);
-    expect(
-      lifecycles.find((l) => l.signalId === "sig-gdacs-01")?.labelProvenance,
-    ).toBe("RULE_VERIFIED");
-    expect(
-      lifecycles.find((l) => String(l.signalId).startsWith("sig-s2-"))
-        ?.labelProvenance,
-    ).toBe("LLM_SILVER");
+    const stage1Lifecycle = lifecycles.find(
+      (l) => l.signalId === "sig-gdacs-01",
+    )!;
+    expect(stage1Lifecycle.labelProvenance).toBe("RULE_VERIFIED");
+    expect(stage1Lifecycle.mergedArticleContentSha256s).toEqual([
+      stage1Feed.contentSha256,
+    ]);
+    const stage2Lifecycle = lifecycles.find((l) =>
+      String(l.signalId).startsWith("sig-s2-"),
+    )!;
+    expect(stage2Lifecycle.labelProvenance).toBe("LLM_SILVER");
+    expect(stage2Lifecycle.mergedArticleContentSha256s).toEqual([
+      passedStage2.contentSha256,
+    ]);
   });
 
-  it("archives Plane B anonymized_alert_feedback and respects per-org allowAnonymizedTraining opt-out", async () => {
+  it("records ACTIVE -> RESOLVED transitions and observedDurationHours from resolveExpired()", async () => {
+    const dir = await makeTempDir();
+    const trainingVault = new LocalFsTrainingVaultSink(dir);
+    const authRepo = new InMemoryAuthRepository();
+    const workspaceRepo = new InMemoryWorkspaceRepository();
+    const inviteRepo = new InMemoryInvitationRepository({
+      authRepo,
+      workspaceRepo,
+    });
+    const expiringSignal = RiskSignalSchema.parse({
+      signalId: "sig-expiring-01",
+      kind: "PORT_CONGESTION",
+      severity: "RED",
+      title: "Temporary Port Closure",
+      description: "Berths closed for 48 hours.",
+      regionCode: "EE",
+      affectedCountryCodes: ["EE"],
+      affectedChokepoints: ["BALTIC_SEA"],
+      polygonWkt: "POLYGON EMPTY",
+      sourceUrls: ["https://www.gdacs.org/report.aspx?eventid=99"],
+      publishedAt: "2026-04-07T12:00:00.000Z",
+      lastSeenAt: "2026-04-07T12:00:00.000Z",
+      expiresAt: "2026-04-09T11:00:00.000Z",
+      verificationStatus: "CONFIRMED",
+      lifecycle: "ACTIVE",
+      active: true,
+    });
+    const riskSignalRepo = new InMemoryRiskSignalRepository([expiringSignal]);
+    const alertRepo = new InMemoryAlertRepository();
+
+    const runner = new IntelligenceRunner({
+      authRepo,
+      workspaceRepo,
+      inviteRepo,
+      riskSignalRepo,
+      alertRepo,
+      llmRouter: new LlmRouter([]),
+      trainingVault,
+      fromEmail: "alerts@kulgo.eu",
+      fetchStage1: async () => ({ signals: [], errors: [] }),
+    });
+
+    const result = await runner.runSweep({
+      nowIso: "2026-04-09T12:00:00.000Z",
+      leaseKey: "2026-04-09T12",
+    });
+    expect(result.resolvedExpired).toBe(1);
+
+    const file = join(
+      dir,
+      "training-vault/v1/global_public/signal_lifecycles/year=2026/month=04/day=09/2026-04-09T12.jsonl.gz",
+    );
+    const lines = gunzipSync(await readFile(file))
+      .toString("utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(lines).toHaveLength(1);
+    expect(lines[0]!.signalId).toBe("sig-expiring-01");
+    expect(lines[0]!.previousStatus).toBe("ACTIVE");
+    expect(lines[0]!.lifecycleStatus).toBe("RESOLVED");
+    expect(lines[0]!.resolvedAt).toBe("2026-04-09T12:00:00.000Z");
+    expect(lines[0]!.observedDurationHours).toBe(48);
+  });
+
+  it("preserves actual failing fallback provider, model, and malformed rawOutput in llm_extractions", async () => {
+    const dir = await makeTempDir();
+    const trainingVault = new LocalFsTrainingVaultSink(dir);
+    const authRepo = new InMemoryAuthRepository();
+    const workspaceRepo = new InMemoryWorkspaceRepository();
+    const inviteRepo = new InMemoryInvitationRepository({
+      authRepo,
+      workspaceRepo,
+    });
+    const riskSignalRepo = new InMemoryRiskSignalRepository([]);
+    const alertRepo = new InMemoryAlertRepository();
+
+    const llmRouter = new LlmRouter([
+      {
+        name: "gemini",
+        model: "gemini-2.5-flash-lite",
+        async completeJson() {
+          throw new Error("Gemini HTTP 503");
+        },
+      },
+      {
+        name: "groq",
+        model: "llama-3.3-70b-versatile",
+        async completeJson() {
+          return { text: "{broken-json-output" };
+        },
+      },
+    ]);
+
+    const runner = new IntelligenceRunner({
+      authRepo,
+      workspaceRepo,
+      inviteRepo,
+      riskSignalRepo,
+      alertRepo,
+      llmRouter,
+      trainingVault,
+      fromEmail: "alerts@kulgo.eu",
+      fetchStage1: async () => ({ signals: [], errors: [] }),
+      fetchStage2Raw: async () => [
+        {
+          articleId: "art-fail",
+          title: "Port strike halts Baltic container terminal",
+          summary: "Port strike halts Baltic container terminal operations.",
+          sourceUrl: "https://news.err.ee/port-strike-fail",
+          publishedAt: "2026-04-09T10:00:00.000Z",
+        },
+      ],
+    });
+
+    await runner.runSweep({
+      nowIso: "2026-04-09T12:00:00.000Z",
+      leaseKey: "2026-04-09T12",
+    });
+
+    const file = join(
+      dir,
+      "training-vault/v1/global_public/llm_extractions/year=2026/month=04/day=09/2026-04-09T12.jsonl.gz",
+    );
+    const [extraction] = gunzipSync(await readFile(file))
+      .toString("utf8")
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l) as Record<string, unknown>);
+    expect(extraction!.validationPassed).toBe(false);
+    expect(extraction!.provider).toBe("groq");
+    expect(extraction!.model).toBe("llama-3.3-70b-versatile");
+    expect(extraction!.rawOutput).toBe("{broken-json-output");
+  });
+
+  it("handles empty TRAINING_VAULT_S3_FORCE_PATH_STYLE and rejects half-configured S3 credentials", async () => {
+    const { loadConfig } = await import("../src/config.js");
+    const cfg = loadConfig({
+      NODE_ENV: "test",
+      TRAINING_VAULT_S3_FORCE_PATH_STYLE: "",
+      TRAINING_VAULT_S3_REGION: "",
+    });
+    expect(cfg.TRAINING_VAULT_S3_FORCE_PATH_STYLE).toBe(true);
+    expect(cfg.TRAINING_VAULT_S3_REGION).toBe("eu-central-1");
+
+    expect(() =>
+      loadConfig({
+        NODE_ENV: "test",
+        TRAINING_VAULT_S3_BUCKET: "kulgo-eu-vault",
+        TRAINING_VAULT_S3_ACCESS_KEY_ID: "only-key-id",
+      }),
+    ).toThrow(/TRAINING_VAULT_S3_ACCESS_KEY_ID/);
+  });
+
+  it("archives Plane B anonymized_alert_feedback (including resolved signals) and respects per-org allowAnonymizedTraining opt-out", async () => {
     const writtenBatches: Array<{ dataset: string; records: unknown[] }> = [];
     const captureSink: TrainingVaultSink = {
       kind: "local_fs",

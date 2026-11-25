@@ -36,6 +36,18 @@ export function sha256Hex(input: string): string {
   return createHash("sha256").update(input, "utf8").digest("hex");
 }
 
+/**
+ * Canonical content hash shared across raw_feeds, llm_extractions, and
+ * signal_lifecycles so append-only .jsonl.gz datasets join cleanly on contentSha256.
+ */
+export function computeFeedContentSha256(parts: {
+  url: string;
+  title: string;
+  summaryOrBody: string;
+}): string {
+  return sha256Hex(`${parts.url}\n${parts.title}\n${parts.summaryOrBody}`);
+}
+
 export function extractPublisherDomain(rawUrl: string): string {
   try {
     const host = new URL(rawUrl).hostname.toLowerCase();
@@ -149,8 +161,13 @@ export class LocalFsTrainingVaultSink implements TrainingVaultSink {
 }
 
 export interface S3TrainingVaultClientLike {
-  send(command: PutObjectCommand): Promise<unknown>;
+  send(
+    command: PutObjectCommand,
+    options?: { abortSignal?: AbortSignal },
+  ): Promise<unknown>;
 }
+
+export const DEFAULT_S3_UPLOAD_TIMEOUT_MS = 5_000;
 
 export interface S3TrainingVaultConfig {
   bucket: string;
@@ -159,22 +176,26 @@ export interface S3TrainingVaultConfig {
   accessKeyId?: string;
   secretAccessKey?: string;
   forcePathStyle?: boolean;
+  timeoutMs?: number;
   client?: S3TrainingVaultClientLike;
 }
 
 export class S3TrainingVaultSink implements TrainingVaultSink {
   readonly kind = "s3" as const;
   private readonly bucket: string;
+  private readonly timeoutMs: number;
   private readonly client: S3TrainingVaultClientLike;
 
   constructor(config: S3TrainingVaultConfig) {
     this.bucket = config.bucket;
+    this.timeoutMs = config.timeoutMs ?? DEFAULT_S3_UPLOAD_TIMEOUT_MS;
     this.client =
       config.client ??
       new S3Client({
         region: config.region ?? "eu-central-1",
         endpoint: config.endpoint,
         forcePathStyle: config.forcePathStyle ?? true,
+        maxAttempts: 2,
         ...(config.accessKeyId && config.secretAccessKey
           ? {
               credentials: {
@@ -212,6 +233,7 @@ export class S3TrainingVaultSink implements TrainingVaultSink {
         ContentType: "application/x-ndjson",
         ContentEncoding: "gzip",
       }),
+      { abortSignal: AbortSignal.timeout(this.timeoutMs) },
     );
 
     return {
