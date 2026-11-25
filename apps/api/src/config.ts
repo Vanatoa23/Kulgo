@@ -94,9 +94,38 @@ const RawEnvSchema = z.object({
     .trim()
     .min(1)
     .default("data/ettevotja_rekvisiidid__lihtandmed.csv"),
+  // --- Training Data Vault (issue #69) ---
+  // Append-only gzip JSONL archive for future internal model training & Supply Chain Gym.
+  TRAINING_VAULT_DIR: optionalIntegrationKey,
+  TRAINING_VAULT_S3_BUCKET: optionalIntegrationKey,
+  TRAINING_VAULT_S3_ENDPOINT: optionalIntegrationKey,
+  TRAINING_VAULT_S3_REGION: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z.string().trim().min(1).default("eu-central-1"),
+  ),
+  TRAINING_VAULT_S3_ACCESS_KEY_ID: optionalIntegrationKey,
+  TRAINING_VAULT_S3_SECRET_ACCESS_KEY: optionalIntegrationKey,
+  TRAINING_VAULT_S3_FORCE_PATH_STYLE: z.preprocess(
+    (value) => (typeof value === "string" && value.trim() === "" ? undefined : value),
+    z
+      .enum(["true", "false"])
+      .optional()
+      .transform((v) => v !== "false"),
+  ),
 });
 
 const EnvSchema = RawEnvSchema.superRefine((data, ctx) => {
+  if (
+    Boolean(data.TRAINING_VAULT_S3_ACCESS_KEY_ID) !==
+    Boolean(data.TRAINING_VAULT_S3_SECRET_ACCESS_KEY)
+  ) {
+    ctx.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["TRAINING_VAULT_S3_ACCESS_KEY_ID"],
+      message:
+        "TRAINING_VAULT_S3_ACCESS_KEY_ID and TRAINING_VAULT_S3_SECRET_ACCESS_KEY must both be set or both be omitted",
+    });
+  }
   if (data.NODE_ENV === "production") {
     if (
       data.SESSION_SECRET === DEFAULT_SESSION_SECRET ||

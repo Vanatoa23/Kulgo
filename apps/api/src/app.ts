@@ -39,6 +39,10 @@ import {
 } from "./intelligence/notifications.js";
 import { createAlertRoutes } from "./intelligence/routes.js";
 import { IntelligenceRunner } from "./intelligence/runner.js";
+import {
+  createTrainingVaultSinkFromConfig,
+  type TrainingVaultSink,
+} from "./intelligence/training-vault.js";
 import type { WebhookDnsLookup } from "./intelligence/webhook-security.js";
 import {
   ArcadeDbInvitationRepository,
@@ -100,6 +104,7 @@ export interface AppDependencies {
   analyticsRepo?: AnalyticsRepository;
   alertRepo?: AlertRepository;
   registrySearch?: CompanyRegistrySearchService;
+  trainingVault?: TrainingVaultSink;
   intelligenceRunner?: IntelligenceRunner;
   webhookDnsLookup?: WebhookDnsLookup;
   webhookValidationTimeoutMs?: number;
@@ -153,6 +158,7 @@ export function createApp({
   registrySearch = createEeCompanyRegistrySearchService(
     config.EE_REGISTRY_SNAPSHOT_PATH,
   ),
+  trainingVault = createTrainingVaultSinkFromConfig(config),
   webhookDnsLookup,
   webhookValidationTimeoutMs,
   intelligenceRunner = new IntelligenceRunner({
@@ -161,6 +167,7 @@ export function createApp({
     inviteRepo,
     riskSignalRepo,
     alertRepo,
+    trainingVault,
     llmRouter: LlmRouter.fromConfig({
       geminiApiKey: config.GEMINI_API_KEY,
       groqApiKey: config.GROQ_API_KEY,
@@ -328,6 +335,8 @@ export function createApp({
       authRepo,
       alertRepo,
       intelligenceRunner,
+      riskSignalRepo,
+      trainingVault,
       webhookDnsLookup,
       webhookValidationTimeoutMs,
     }),
@@ -350,6 +359,7 @@ export interface CreateTestAppOptions {
   fetchFn?: typeof fetch;
   registrySearch?: CompanyRegistrySearchService;
   emailProvider?: EmailProvider | null;
+  trainingVault?: TrainingVaultSink;
 }
 
 const DEFAULT_TEST_WEBHOOK_DNS_LOOKUP: WebhookDnsLookup = async () => [
@@ -421,12 +431,15 @@ export function createTestApp(
   });
   const webhookDnsLookup =
     options.webhookDnsLookup ?? DEFAULT_TEST_WEBHOOK_DNS_LOOKUP;
+  const trainingVault =
+    options.trainingVault ?? createTrainingVaultSinkFromConfig(config);
   const intelligenceRunner = new IntelligenceRunner({
     authRepo,
     workspaceRepo,
     inviteRepo,
     riskSignalRepo,
     alertRepo,
+    trainingVault,
     llmRouter: new LlmRouter([]),
     fromEmail: config.ALERT_FROM_EMAIL,
     fetchStage1: async () => ({ signals: [], errors: [] }),
@@ -451,6 +464,7 @@ export function createTestApp(
     registrySearch:
       options.registrySearch ??
       createEeCompanyRegistrySearchService(config.EE_REGISTRY_SNAPSHOT_PATH),
+    trainingVault,
     intelligenceRunner,
     webhookDnsLookup,
     webhookValidationTimeoutMs: options.webhookValidationTimeoutMs,

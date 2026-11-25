@@ -52,6 +52,7 @@ export interface UpsertSignalResult {
 
 export interface RiskSignalRepository {
   listActive(): Promise<RiskSignal[]>;
+  findById?(signalId: string): Promise<RiskSignal | null>;
   ensureDemoSignals(): Promise<RiskSignal[]>;
   upsertSignal(signal: RiskSignal): Promise<UpsertSignalResult>;
   resolveExpired(nowIso: string): Promise<number>;
@@ -164,6 +165,18 @@ export class ArcadeDbRiskSignalRepository implements RiskSignalRepository {
        WHERE active = true`,
     );
     return rows.map(mapRiskSignalRow);
+  }
+
+  async findById(signalId: string): Promise<RiskSignal | null> {
+    const rows = await this.db.query<Record<string, unknown>>(
+      "sql",
+      `SELECT ${RISK_SIGNAL_SELECT_FIELDS}
+       FROM RiskSignal
+       WHERE signalId = :signalId
+       LIMIT 1`,
+      { signalId },
+    );
+    return rows.length > 0 ? mapRiskSignalRow(rows[0]!) : null;
   }
 
   async ensureDemoSignals(): Promise<RiskSignal[]> {
@@ -318,6 +331,10 @@ export class InMemoryRiskSignalRepository implements RiskSignalRepository {
     return Array.from(this.signals.values()).filter(
       (s) => s.active && s.lifecycle !== "RESOLVED",
     );
+  }
+
+  async findById(signalId: string): Promise<RiskSignal | null> {
+    return this.signals.get(signalId) ?? null;
   }
 
   async ensureDemoSignals(): Promise<RiskSignal[]> {

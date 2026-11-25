@@ -9,3 +9,4 @@ export * from "./entity-alias.js";
 
 export * from "./registry.js";
 export * from "./catalogue.js";
+export * from "./training-vault.js";

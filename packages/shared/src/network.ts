@@ -357,6 +357,7 @@ export const AlertNotificationPreferenceSchema = z
     emailRecipients: z.array(z.string().email()).max(20).default([]),
     webhookUrl: z.string().url().nullable().default(null),
     webhookSecretConfigured: z.boolean().default(false),
+    allowAnonymizedTraining: z.boolean().default(true),
     updatedAt: z.string().datetime(),
   })
   .strict();

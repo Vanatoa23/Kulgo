@@ -8,12 +8,20 @@ import {
   ListAuditEventsResponseSchema,
   ListRelationshipDeclarationsResponseSchema,
   SimulateAnalyticsResponseSchema,
+  TRAINING_VAULT_DATASET_SCHEMAS,
+  TRAINING_VAULT_FORBIDDEN_FIELDS,
+  TRAINING_VAULT_SCHEMA_VERSION,
   WorkspaceExportJsonSchema,
   WorkspaceNetworkResponseSchema,
 } from "@kulgo/shared";
 import { fileURLToPath } from "node:url";
+import { gunzipSync } from "node:zlib";
 import { describe, expect, it } from "vitest";
 import { createTestApp } from "../src/app.js";
+import {
+  serializeRecordsToJsonlGzip,
+  type TrainingVaultSink,
+} from "../src/intelligence/training-vault.js";
 import { parseCsvRecords } from "../src/workspace/import-export.js";
 
 /**
@@ -3370,6 +3378,201 @@ describe("Sub-Project 5 Privacy Boundary — Product Catalogue Matches & Intro R
     );
     expect(emailCapture.sent[0]!.text).not.toContain(existingSup.facilityId);
     expect(emailCapture.sent[0]!.text).not.toContain(ownFac.facilityId);
+  });
+
+  it("enforces Training Data Vault two-plane privacy invariants, strict forbidden-field rejection, and per-org opt-out", async () => {
+    const sampleHash = "a".repeat(64);
+    const validRecordsByDataset = {
+      raw_feeds: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "global_public" as const,
+        sweepId: "sweep-1",
+        sourceId: "gdacs",
+        stage: "STAGE_1" as const,
+        url: "https://www.gdacs.org/report.aspx?eventid=1",
+        publisherDomain: "gdacs.org",
+        fetchedAt: "2026-04-09T12:00:00.000Z",
+        publishedAt: "2026-04-09T10:00:00.000Z",
+        language: "en",
+        contentSha256: sampleHash,
+        contentPolicy: "FULL_TEXT" as const,
+        licenseTag: "OPEN_GOV" as const,
+        title: "Storm warning",
+        summary: "Public warning",
+        fullText: "Public warning body",
+        preFilterPassed: true,
+        preFilterReason: "STAGE_1_STRUCTURED",
+        matchedKeywords: [],
+      },
+      llm_extractions: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "global_public" as const,
+        labelProvenance: "LLM_SILVER" as const,
+        sweepId: "sweep-1",
+        articleContentSha256s: [sampleHash],
+        promptTemplateVersion: "stage2-v1",
+        provider: "gemini",
+        model: "gemini-2.5-flash-lite",
+        promptText: "[]",
+        rawOutput: '{"signals":[]}',
+        parsedCandidate: { signals: [] },
+        evidenceQuotes: [],
+        validationPassed: true,
+        validationErrors: [],
+        promptTokens: 10,
+        completionTokens: 5,
+        latencyMs: 50,
+        recordedAt: "2026-04-09T12:00:00.000Z",
+      },
+      signal_lifecycles: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "global_public" as const,
+        labelProvenance: "RULE_VERIFIED" as const,
+        sweepId: "sweep-1",
+        signalId: "sig-1",
+        eventCategory: "SANCTIONS",
+        severity: "RED",
+        countryCodes: ["LV"],
+        lifecycleStatus: "ACTIVE" as const,
+        previousStatus: null,
+        mergedSourceUrlHashes: [sampleHash],
+        mergedArticleContentSha256s: [sampleHash],
+        independentSourceCount: 1,
+        firstSeenAt: "2026-04-09T10:00:00.000Z",
+        lastUpdatedAt: "2026-04-09T12:00:00.000Z",
+        resolvedAt: null,
+        observedDurationHours: null,
+        recordedAt: "2026-04-09T12:00:00.000Z",
+      },
+      entity_resolution_pairs: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "global_public" as const,
+        labelProvenance: "RULE_VERIFIED" as const,
+        inputNormalized: "tallinna sadam",
+        inputLanguage: "et",
+        registrySource: "EE_ARIREGISTER",
+        registryId: "10137319",
+        canonicalName: "AS Tallinna Sadam",
+        countryCode: "EE",
+        resolutionMethod: "EXACT_ID" as const,
+        confidence: 1,
+        recordedAt: "2026-04-09T12:00:00.000Z",
+      },
+      anonymized_alert_feedback: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "anonymized_outcomes" as const,
+        labelProvenance: "HUMAN_VERIFIED" as const,
+        signalId: "sig-latvia-sanctions-01",
+        reasonCode: "WRONG_ENTITY_OR_SITE" as const,
+        eventCategory: "SANCTIONS",
+        severity: "RED",
+        countryCode: "LV",
+        timestampBucket: "2026-04-09",
+      },
+      anonymized_decision_outcomes: {
+        schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+        plane: "anonymized_outcomes" as const,
+        labelProvenance: "HUMAN_VERIFIED" as const,
+        signalId: "sig-latvia-sanctions-01",
+        eventCategory: "SANCTIONS",
+        transportMode: "ROAD",
+        regionBucket: "BALTIC",
+        predictedTtrBandDays: "7-14",
+        observedTtrBandDays: "10-14",
+        actionType: "REROUTE",
+        timestampBucket: "2026-04-09",
+      },
+    } as const;
+
+    // 1. Every forbidden tenant/PII/commercial field must be rejected by .strict() across ALL 6 dataset schemas
+    for (const [dataset, validRecord] of Object.entries(validRecordsByDataset)) {
+      const schema =
+        TRAINING_VAULT_DATASET_SCHEMAS[
+          dataset as keyof typeof TRAINING_VAULT_DATASET_SCHEMAS
+        ];
+      expect(() => schema.parse(validRecord)).not.toThrow();
+      for (const field of TRAINING_VAULT_FORBIDDEN_FIELDS) {
+        expect(() =>
+          schema.parse({
+            ...validRecord,
+            [field]: "leaked-value",
+          }),
+        ).toThrow();
+      }
+    }
+
+    // 2. End-to-end alert ack emits gzipped Plane B JSONL containing zero tenant/user/note strings
+    const capturedPayloads: string[] = [];
+    const sink: TrainingVaultSink = {
+      kind: "local_fs",
+      async writeBatch(dataset, records) {
+        const gz = serializeRecordsToJsonlGzip(dataset, records);
+        capturedPayloads.push(gunzipSync(gz).toString("utf8"));
+        return {
+          key: `test/${dataset}.jsonl.gz`,
+          recordCount: records.length,
+          bytesWritten: gz.byteLength,
+        };
+      },
+    };
+
+    const app = createTestApp({}, { trainingVault: sink });
+    const reg = await app.request("/api/v1/auth/register", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({
+        organizationName: "Private Foundry OÜ",
+        email: "ciso@private-foundry.ee",
+        password: "StrongPassword123!",
+      }),
+    });
+    expect(reg.status).toBe(201);
+    const cookie = reg.headers.get("set-cookie")!.split(";")[0]!;
+    const regBody = (await reg.json()) as {
+      organization: { orgId: string };
+      user: { userId: string };
+    };
+
+    const ackRes = await app.request("/api/v1/alerts/sig-latvia-sanctions-01/ack", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({
+        status: "MUTED",
+        reason: "NOT_RELEVANT_TO_LANE",
+        note: "Internal plant coordinates 59.437, 24.7536 and €9M contract",
+      }),
+    });
+    expect(ackRes.status).toBe(200);
+    expect(capturedPayloads).toHaveLength(1);
+    const payload = capturedPayloads[0]!;
+    expect(payload).not.toContain(regBody.organization.orgId);
+    expect(payload).not.toContain(regBody.user.userId);
+    expect(payload).not.toContain("Private Foundry");
+    expect(payload).not.toContain("ciso@private-foundry.ee");
+    expect(payload).not.toContain("59.437");
+    expect(payload).not.toContain("€9M");
+
+    // 3. Opting out via PATCH /api/v1/alerts/preferences suppresses all Plane B emissions
+    const optOut = await app.request("/api/v1/alerts/preferences", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: cookie },
+      body: JSON.stringify({ allowAnonymizedTraining: false }),
+    });
+    expect(optOut.status).toBe(200);
+
+    const ackAfterOptOut = await app.request(
+      "/api/v1/alerts/sig-china-corridor-01/ack",
+      {
+        method: "POST",
+        headers: { "Content-Type": "application/json", Cookie: cookie },
+        body: JSON.stringify({
+          status: "ACKNOWLEDGED",
+          reason: "HANDLED",
+        }),
+      },
+    );
+    expect(ackAfterOptOut.status).toBe(200);
+    expect(capturedPayloads).toHaveLength(1);
   });
 });
 
