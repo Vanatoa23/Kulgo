@@ -6,13 +6,21 @@ import {
   RiskSignalKindSchema,
   RiskSignalSchema,
   RiskStatusSchema,
+  TRAINING_VAULT_SCHEMA_VERSION,
+  toUtcDayBucket,
 } from "@kulgo/shared";
 import { Hono } from "hono";
 import { z } from "zod";
+import type { RiskSignalRepository } from "../analytics/risk-signals.js";
 import { createRequireAuth, type AuthVariables } from "../auth/middleware.js";
 import type { AuthRepository } from "../auth/repository.js";
 import type { AlertRepository } from "./alert-repository.js";
 import type { IntelligenceRunner } from "./runner.js";
+import {
+  generateBatchId,
+  safeWriteVaultBatch,
+  type TrainingVaultSink,
+} from "./training-vault.js";
 import {
   DEFAULT_WEBHOOK_TIMEOUT_MS,
   MAX_WEBHOOK_URL_LENGTH,
@@ -41,6 +49,7 @@ const UpdateNotificationPreferenceRequestSchema = z
       .nullable()
       .optional(),
     webhookSecret: z.string().min(16).max(256).nullable().optional(),
+    allowAnonymizedTraining: z.boolean().optional(),
   })
   .strict();
 
@@ -88,6 +97,8 @@ export interface AlertRoutesDependencies {
   authRepo: AuthRepository;
   alertRepo: AlertRepository;
   intelligenceRunner: IntelligenceRunner;
+  riskSignalRepo?: RiskSignalRepository;
+  trainingVault?: TrainingVaultSink;
   webhookDnsLookup?: WebhookDnsLookup;
   webhookValidationTimeoutMs?: number;
 }
@@ -96,6 +107,8 @@ export function createAlertRoutes({
   authRepo,
   alertRepo,
   intelligenceRunner,
+  riskSignalRepo,
+  trainingVault,
   webhookDnsLookup,
   webhookValidationTimeoutMs = DEFAULT_WEBHOOK_TIMEOUT_MS,
 }: AlertRoutesDependencies): Hono<{ Variables: AuthVariables }> {
@@ -145,6 +158,7 @@ export function createAlertRoutes({
       );
     }
 
+    const acknowledgedAt = new Date().toISOString();
     const ack = await alertRepo.upsertAlertAck({
       orgId: auth.organization.orgId,
       signalId,
@@ -152,8 +166,47 @@ export function createAlertRoutes({
       acknowledgedByUserId: auth.user.userId,
       reason: parsed.data.reason ?? null,
       note: parsed.data.note ?? null,
-      acknowledgedAt: new Date().toISOString(),
+      acknowledgedAt,
     });
+
+    // Plane B anonymized operational feedback archival (strictly gated by per-org opt-out).
+    if (trainingVault && ack.reason) {
+      const storedPref = await alertRepo.getNotificationPreference(
+        auth.organization.orgId,
+      );
+      if (storedPref.preference.allowAnonymizedTraining) {
+        let eventCategory: string | null = null;
+        let severity: string | null = null;
+        let countryCode: string | null = null;
+        if (riskSignalRepo) {
+          const activeSignals = await riskSignalRepo.listActive();
+          const matched = activeSignals.find((s) => s.signalId === signalId);
+          if (matched) {
+            eventCategory = matched.kind;
+            severity = matched.severity;
+            countryCode = matched.affectedCountryCodes[0] ?? null;
+          }
+        }
+        await safeWriteVaultBatch(
+          trainingVault,
+          "anonymized_alert_feedback",
+          [
+            {
+              schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+              plane: "anonymized_outcomes",
+              labelProvenance: "HUMAN_VERIFIED",
+              signalId: ack.signalId,
+              reasonCode: ack.reason,
+              eventCategory,
+              severity,
+              countryCode,
+              timestampBucket: toUtcDayBucket(ack.acknowledgedAt),
+            },
+          ],
+          { batchId: generateBatchId("fb") },
+        );
+      }
+    }
 
     return c.json(OrgAlertAckSchema.parse(ack), 200);
   });

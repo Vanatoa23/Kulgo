@@ -94,6 +94,18 @@ const RawEnvSchema = z.object({
     .trim()
     .min(1)
     .default("data/ettevotja_rekvisiidid__lihtandmed.csv"),
+  // --- Training Data Vault (issue #69) ---
+  // Append-only gzip JSONL archive for future internal model training & Supply Chain Gym.
+  TRAINING_VAULT_DIR: optionalIntegrationKey,
+  TRAINING_VAULT_S3_BUCKET: optionalIntegrationKey,
+  TRAINING_VAULT_S3_ENDPOINT: optionalIntegrationKey,
+  TRAINING_VAULT_S3_REGION: z.string().trim().min(1).default("eu-central-1"),
+  TRAINING_VAULT_S3_ACCESS_KEY_ID: optionalIntegrationKey,
+  TRAINING_VAULT_S3_SECRET_ACCESS_KEY: optionalIntegrationKey,
+  TRAINING_VAULT_S3_FORCE_PATH_STYLE: z
+    .enum(["true", "false"])
+    .optional()
+    .transform((v) => v !== "false"),
 });
 
 const EnvSchema = RawEnvSchema.superRefine((data, ctx) => {

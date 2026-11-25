@@ -67,6 +67,7 @@ export interface UpsertNotificationPreferenceInput {
   emailRecipients?: string[];
   webhookUrl?: string | null;
   webhookSecret?: string | null;
+  allowAnonymizedTraining?: boolean;
 }
 
 export interface AlertRepository {
@@ -103,6 +104,7 @@ function defaultPreference(orgId: string): StoredNotificationPreference {
       emailRecipients: [],
       webhookUrl: null,
       webhookSecretConfigured: false,
+      allowAnonymizedTraining: true,
       updatedAt: new Date(0).toISOString(),
     }),
     webhookSecret: null,
@@ -128,7 +130,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
     const rows = await this.db.query<Record<string, unknown>>(
       "sql",
       `SELECT orgId, instantRedEmailEnabled, dailyAmberDigestEnabled,
-              emailRecipients, webhookUrl, webhookSecret, updatedAt
+              emailRecipients, webhookUrl, webhookSecret, allowAnonymizedTraining, updatedAt
        FROM AlertNotificationPreference
        WHERE orgId = :orgId
        LIMIT 1`,
@@ -152,6 +154,11 @@ export class ArcadeDbAlertRepository implements AlertRepository {
           : [],
         webhookUrl: typeof row.webhookUrl === "string" ? row.webhookUrl : null,
         webhookSecretConfigured: secret !== null,
+        allowAnonymizedTraining:
+          row.allowAnonymizedTraining !== undefined &&
+          row.allowAnonymizedTraining !== null
+            ? Boolean(row.allowAnonymizedTraining)
+            : true,
         updatedAt:
           typeof row.updatedAt === "string"
             ? row.updatedAt
@@ -184,6 +191,9 @@ export class ArcadeDbAlertRepository implements AlertRepository {
           ? input.webhookUrl
           : current.preference.webhookUrl,
       webhookSecretConfigured: Boolean(nextSecret && nextSecret.length > 0),
+      allowAnonymizedTraining:
+        input.allowAnonymizedTraining ??
+        current.preference.allowAnonymizedTraining,
       updatedAt,
     });
 
@@ -199,6 +209,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
       emailRecipients: nextPref.emailRecipients,
       webhookUrl: nextPref.webhookUrl,
       webhookSecret: nextSecret,
+      allowAnonymizedTraining: nextPref.allowAnonymizedTraining,
       updatedAt: nextPref.updatedAt,
     };
 
@@ -211,6 +222,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
           emailRecipients = :emailRecipients,
           webhookUrl = :webhookUrl,
           webhookSecret = :webhookSecret,
+          allowAnonymizedTraining = :allowAnonymizedTraining,
           updatedAt = :updatedAt
          WHERE orgId = :orgId`,
         params,
@@ -225,6 +237,7 @@ export class ArcadeDbAlertRepository implements AlertRepository {
           emailRecipients = :emailRecipients,
           webhookUrl = :webhookUrl,
           webhookSecret = :webhookSecret,
+          allowAnonymizedTraining = :allowAnonymizedTraining,
           updatedAt = :updatedAt`,
         params,
       );
@@ -620,6 +633,9 @@ export class InMemoryAlertRepository implements AlertRepository {
           ? input.webhookUrl
           : current.preference.webhookUrl,
       webhookSecretConfigured: Boolean(nextSecret && nextSecret.length > 0),
+      allowAnonymizedTraining:
+        input.allowAnonymizedTraining ??
+        current.preference.allowAnonymizedTraining,
       updatedAt: new Date().toISOString(),
     });
     const stored: StoredNotificationPreference = {

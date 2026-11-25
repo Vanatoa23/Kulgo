@@ -8,10 +8,14 @@ import {
   type FacilitySignalMatch,
   type LaneSignalMatch,
 } from "@kulgo/engine";
-import type {
-  ChokepointCode,
-  RiskSignal,
-  WorkspaceNetworkResponse,
+import {
+  TRAINING_VAULT_SCHEMA_VERSION,
+  type ChokepointCode,
+  type LlmExtractionVaultRecord,
+  type RawFeedVaultRecord,
+  type RiskSignal,
+  type SignalLifecycleVaultRecord,
+  type WorkspaceNetworkResponse,
 } from "@kulgo/shared";
 import {
   MAX_TRAVERSAL_DEPTH,
@@ -25,7 +29,7 @@ import type { AlertRepository } from "./alert-repository.js";
 import { fetchStage1Signals } from "./feeds/stage1.js";
 import {
   classifyUnstructuredItems,
-  preFilterUnstructuredItems,
+  preFilterUnstructuredItemsWithAudit,
   type UnstructuredFeedItem,
 } from "./feeds/stage2.js";
 import type { LlmRouter } from "./llm-router.js";
@@ -35,6 +39,12 @@ import {
   type EmailProvider,
   type OrgSignalMatchBundle,
 } from "./notifications.js";
+import {
+  extractPublisherDomain,
+  safeWriteVaultBatch,
+  sha256Hex,
+  type TrainingVaultSink,
+} from "./training-vault.js";
 import type { WebhookDnsLookup } from "./webhook-security.js";
 
 export const DEFAULT_SWEEP_LEASE_KEY = "global-intelligence-sweep";
@@ -68,6 +78,7 @@ export interface IntelligenceRunnerDeps {
   riskSignalRepo: RiskSignalRepository;
   alertRepo: AlertRepository;
   llmRouter: LlmRouter;
+  trainingVault?: TrainingVaultSink;
   redEmailProvider?: EmailProvider | null;
   digestEmailProvider?: EmailProvider | null;
   fromEmail: string;
@@ -323,18 +334,63 @@ export class IntelligenceRunner {
     }
 
     const errors: string[] = [];
+    const sweepId =
+      leaseKey !== DEFAULT_SWEEP_LEASE_KEY
+        ? leaseKey
+        : `sweep-${startedAt.replace(/[:.]/g, "-")}-${ownerId.slice(0, 8)}`;
+    const rawFeedRecords: RawFeedVaultRecord[] = [];
+    const llmExtractionRecords: LlmExtractionVaultRecord[] = [];
+    const lifecycleRecords: SignalLifecycleVaultRecord[] = [];
+    const sweepDate = Number.isNaN(Date.parse(startedAt))
+      ? new Date()
+      : new Date(startedAt);
+
     try {
       const stage1 = this.deps.fetchStage1
         ? await this.deps.fetchStage1()
         : await fetchStage1Signals({ fetchFn: this.deps.fetchFn, nowIso: startedAt });
       errors.push(...stage1.errors);
 
+      for (const sig of stage1.signals) {
+        const sourceUrl = sig.sourceUrls[0] ?? `kulgo://stage1/${sig.signalId}`;
+        const publishedMs = sig.publishedAt ? Date.parse(sig.publishedAt) : Number.NaN;
+        const fullText = sig.description ?? sig.title;
+        rawFeedRecords.push({
+          schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+          plane: "global_public",
+          sweepId,
+          sourceId: sig.kind.toLowerCase(),
+          stage: "STAGE_1",
+          url: sourceUrl,
+          publisherDomain: extractPublisherDomain(sourceUrl),
+          fetchedAt: startedAt,
+          publishedAt: !Number.isNaN(publishedMs)
+            ? new Date(publishedMs).toISOString()
+            : null,
+          language: null,
+          contentSha256: sha256Hex(`${sourceUrl}
+${sig.title}
+${fullText}`),
+          contentPolicy: "FULL_TEXT",
+          licenseTag: "OPEN_GOV",
+          title: sig.title,
+          summary: sig.description,
+          fullText,
+          preFilterPassed: true,
+          preFilterReason: "STAGE_1_STRUCTURED",
+          matchedKeywords: [],
+        });
+      }
+
+      const preUpsertActiveSignals = await this.deps.riskSignalRepo.listActive();
+      const previousLifecycleBySignalId = new Map(
+        preUpsertActiveSignals.map((sig) => [sig.signalId, sig.lifecycle]),
+      );
+
       let stage2Signals: RiskSignal[] = [];
       if (this.deps.fetchStage2Raw) {
-        const [rawItems, activeSignals] = await Promise.all([
-          this.deps.fetchStage2Raw(),
-          this.deps.riskSignalRepo.listActive(),
-        ]);
+        const rawItems = await this.deps.fetchStage2Raw();
+        const activeSignals = preUpsertActiveSignals;
         const cutoffMs = Date.parse(startedAt) - 72 * 3_600_000;
         const recentSignals = activeSignals.filter((sig) => {
           const refIso = sig.lastSeenAt ?? sig.publishedAt;
@@ -355,17 +411,58 @@ export class IntelligenceRunner {
         }
         const recentTitles = [...recentSignals, ...stage1.signals]
           .map((sig) => sig.title).filter(Boolean);
-        const filtered = preFilterUnstructuredItems(
+        const { accepted: filtered, decisions } = preFilterUnstructuredItemsWithAudit(
           rawItems,
           seenUrls,
           recentTitles,
           changedUrls,
         );
+        for (const decision of decisions) {
+          const pubMs = Date.parse(decision.item.publishedAt);
+          rawFeedRecords.push({
+            schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+            plane: "global_public",
+            sweepId,
+            sourceId: extractPublisherDomain(decision.item.sourceUrl),
+            stage: "STAGE_2",
+            url: decision.item.sourceUrl,
+            publisherDomain: extractPublisherDomain(decision.item.sourceUrl),
+            fetchedAt: startedAt,
+            publishedAt: !Number.isNaN(pubMs)
+              ? new Date(pubMs).toISOString()
+              : null,
+            language: null,
+            contentSha256: sha256Hex(
+              `${decision.item.sourceUrl}
+${decision.item.title}
+${decision.item.summary}`,
+            ),
+            contentPolicy: "EXCERPT_ONLY",
+            licenseTag: "COPYRIGHTED_EXCERPT",
+            title: decision.item.title,
+            summary: decision.item.summary || null,
+            fullText: null,
+            preFilterPassed: decision.passed,
+            preFilterReason: decision.reason,
+            matchedKeywords: decision.matchedKeywords,
+          });
+        }
+
         const classified = await classifyUnstructuredItems(
           filtered,
           this.deps.llmRouter,
           startedAt,
         );
+        for (const ext of classified.extractions) {
+          llmExtractionRecords.push({
+            schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+            plane: "global_public",
+            labelProvenance: "LLM_SILVER",
+            sweepId,
+            ...ext,
+            recordedAt: startedAt,
+          });
+        }
         // Do not cache failed or unconfigured classifications: they must be retried.
         if (classified.errors.length === 0 && classified.providersUsed.length > 0) {
           for (const item of filtered) {
@@ -383,10 +480,70 @@ export class IntelligenceRunner {
         const res = await this.deps.riskSignalRepo.upsertSignal(sig);
         if (res.created) upsertedNew++;
         else upsertedMerged++;
+
+        const stored = res.signal;
+        const previousStatus = previousLifecycleBySignalId.get(stored.signalId) ?? null;
+        const firstSeenAt = stored.publishedAt ?? stored.lastSeenAt ?? startedAt;
+        const lastUpdatedAt = stored.lastSeenAt ?? startedAt;
+        const resolvedAt = stored.resolvedAt ?? null;
+        let observedDurationHours: number | null = null;
+        if (resolvedAt) {
+          const startMs = Date.parse(stored.eventStartAt ?? firstSeenAt);
+          const endMs = Date.parse(resolvedAt);
+          if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs) {
+            observedDurationHours = Math.round(((endMs - startMs) / 3_600_000) * 100) / 100;
+          }
+        }
+        const uniqueDomains = new Set(
+          stored.sourceUrls.map((u) => extractPublisherDomain(u)),
+        );
+        lifecycleRecords.push({
+          schemaVersion: TRAINING_VAULT_SCHEMA_VERSION,
+          plane: "global_public",
+          labelProvenance: stored.signalId.startsWith("sig-s2-")
+            ? "LLM_SILVER"
+            : "RULE_VERIFIED",
+          sweepId,
+          signalId: stored.signalId,
+          eventCategory: stored.kind,
+          severity: stored.severity,
+          countryCodes: stored.affectedCountryCodes,
+          lifecycleStatus: stored.lifecycle,
+          previousStatus,
+          mergedArticleHashes: stored.sourceUrls.map((u) => sha256Hex(u)),
+          independentSourceCount: uniqueDomains.size,
+          firstSeenAt,
+          lastUpdatedAt,
+          resolvedAt,
+          observedDurationHours,
+          recordedAt: startedAt,
+        });
       }
 
       const resolvedExpired =
         await this.deps.riskSignalRepo.resolveExpired(startedAt);
+
+      // Best-effort, non-blocking archival to the Training Data Vault (Plane A)
+      if (this.deps.trainingVault) {
+        await Promise.all([
+          safeWriteVaultBatch(this.deps.trainingVault, "raw_feeds", rawFeedRecords, {
+            batchId: sweepId,
+            recordedAt: sweepDate,
+          }),
+          safeWriteVaultBatch(
+            this.deps.trainingVault,
+            "llm_extractions",
+            llmExtractionRecords,
+            { batchId: sweepId, recordedAt: sweepDate },
+          ),
+          safeWriteVaultBatch(
+            this.deps.trainingVault,
+            "signal_lifecycles",
+            lifecycleRecords,
+            { batchId: sweepId, recordedAt: sweepDate },
+          ),
+        ]);
+      }
 
       // Match & dispatch for target orgs
       const orgIds = options.orgIds ?? [];

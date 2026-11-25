@@ -13,6 +13,7 @@ import {
 } from "./intelligence/notifications.js";
 import { IntelligenceRunner } from "./intelligence/runner.js";
 import { startIntelligenceScheduler } from "./intelligence/scheduler.js";
+import { createTrainingVaultSinkFromConfig } from "./intelligence/training-vault.js";
 import { ArcadeDbInvitationRepository } from "./invites/repository.js";
 import { ArcadeDbWorkspaceRepository } from "./workspace/repository.js";
 
@@ -37,12 +38,14 @@ async function startServer() {
     workspaceRepo,
   });
   const alertRepo = new ArcadeDbAlertRepository(db);
+  const trainingVault = createTrainingVaultSinkFromConfig(config);
   const intelligenceRunner = new IntelligenceRunner({
     authRepo,
     workspaceRepo,
     inviteRepo,
     riskSignalRepo,
     alertRepo,
+    trainingVault,
     llmRouter: LlmRouter.fromConfig({
       geminiApiKey: config.GEMINI_API_KEY,
       groqApiKey: config.GROQ_API_KEY,
@@ -104,6 +107,7 @@ async function startServer() {
     riskSignalRepo,
     inviteRepo,
     alertRepo,
+    trainingVault,
     intelligenceRunner,
   });
 

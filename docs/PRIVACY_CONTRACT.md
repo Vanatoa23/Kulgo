@@ -28,3 +28,11 @@ Accepting a pending, unexpired invitation consumes it and creates its verified p
 
 ## Opt-In Alternative Supplier Directory
 Suppliers joining Kulgo may explicitly opt in (`openToNewBuyers = true`) to appear in Kulgo's alternative-supplier directory. Directory profiles expose only self-declared public capability info (name, country, capabilities, ESG badges) and **never** reveal existing buyers or private supply links.
+
+## Training Data Vault (Two-Plane Isolation & Copyright Hygiene)
+Kulgo archives append-only `.jsonl.gz` batches for future internal model training and Supply Chain Gym simulation under a strict two-plane boundary (see [`docs/specs/TRAINING_DATA_VAULT.md`](./specs/TRAINING_DATA_VAULT.md)):
+1. **Plane A (`global_public`):** Contains strictly public world feeds, pre-filter decisions, public-only LLM extractions, signal lifecycles, and verified public-registry entity pairs. Zero tenant identifiers, zero customer supply graphs, and zero unresolved free-text supplier strings may ever enter Plane A. Open/public-domain sources (`FULL_TEXT`) are archived in full; copyrighted news sources (`EXCERPT_ONLY`) store only feed-provided titles, summaries, verbatim `evidenceQuote` spans, URLs, and SHA-256 hashes with `fullText: null` enforced at schema validation time.
+2. **Plane B (`anonymized_outcomes`):** Stores strictly non-invertible, day-bucketed (`YYYY-MM-DD`) operational feedback (e.g., alert dismissal reason codes) with all `orgId`, `userId`, `facilityId`, coordinates, notes, financials, and Tier-2+ partner topology stripped before serialization.
+3. **Per-Organization Opt-Out (`allowAnonymizedTraining`):** Organization owners may set `allowAnonymizedTraining = false` via `PATCH /api/v1/alerts/preferences`. When disabled, **zero** Plane B records are emitted for that organization.
+4. **Contract & CI Enforcement:** All Training Data Vault schemas in `@kulgo/shared` use `.strict()` Zod validation before compression, and `pnpm test:privacy` blocks merge if any forbidden tenant/PII field or `EXCERPT_ONLY` full-text violation can be serialized.
+

@@ -161,6 +161,7 @@ export const KULGO_SCHEMA_STATEMENTS: readonly string[] = [
   "CREATE PROPERTY AlertNotificationPreference.emailRecipients IF NOT EXISTS LIST",
   "CREATE PROPERTY AlertNotificationPreference.webhookUrl IF NOT EXISTS STRING",
   "CREATE PROPERTY AlertNotificationPreference.webhookSecret IF NOT EXISTS STRING",
+  "CREATE PROPERTY AlertNotificationPreference.allowAnonymizedTraining IF NOT EXISTS BOOLEAN",
   "CREATE PROPERTY AlertNotificationPreference.updatedAt IF NOT EXISTS STRING",
   "CREATE INDEX IF NOT EXISTS ON AlertNotificationPreference (orgId) UNIQUE",
 

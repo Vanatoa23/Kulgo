@@ -15,6 +15,7 @@ import {
   trigramJaccardSimilarity,
 } from "../dedupe.js";
 import type { LlmRouter } from "../llm-router.js";
+import { sha256Hex } from "../training-vault.js";
 
 export interface UnstructuredFeedItem {
   articleId?: string;
@@ -181,6 +182,103 @@ export const DISRUPTION_KEYWORD_PATTERN = new RegExp(
   "iu",
 );
 
+export type PreFilterDecisionReason =
+  | "PASSED"
+  | "SEEN_URL"
+  | "NO_DISRUPTION_KEYWORD"
+  | "NEAR_DUPLICATE_TITLE";
+
+export interface PreFilterDecision {
+  item: UnstructuredFeedItem;
+  passed: boolean;
+  reason: PreFilterDecisionReason;
+  matchedKeywords: string[];
+}
+
+export function extractMatchedDisruptionKeywords(text: string): string[] {
+  const normalized = text.normalize("NFKC");
+  const globalPattern = new RegExp(
+    DISRUPTION_KEYWORD_PATTERN.source,
+    `${DISRUPTION_KEYWORD_PATTERN.flags.replace(/g/g, "")}g`,
+  );
+  const matches = new Set<string>();
+  let match: RegExpExecArray | null;
+  while ((match = globalPattern.exec(normalized)) !== null) {
+    const token = match[0].trim().replace(/^[^\p{L}\p{N}]+/u, "").toLowerCase();
+    if (token.length > 0) {
+      matches.add(token);
+    }
+    if (match[0].length === 0) {
+      globalPattern.lastIndex += 1;
+    }
+  }
+  return Array.from(matches);
+}
+
+/**
+ * Zero-token pre-filter with full pass/drop audit decisions for the Training Data Vault.
+ */
+export function preFilterUnstructuredItemsWithAudit(
+  items: readonly UnstructuredFeedItem[],
+  seenUrls: ReadonlySet<string> = new Set(),
+  recentTitles: readonly string[] = [],
+  changedUrls: ReadonlySet<string> = new Set(),
+): { accepted: UnstructuredFeedItem[]; decisions: PreFilterDecision[] } {
+  const accepted: UnstructuredFeedItem[] = [];
+  const decisions: PreFilterDecision[] = [];
+  const acceptedTitles = [...recentTitles];
+  const localUrls = new Set(seenUrls);
+
+  for (const item of items) {
+    if (localUrls.has(item.sourceUrl)) {
+      decisions.push({
+        item,
+        passed: false,
+        reason: "SEEN_URL",
+        matchedKeywords: [],
+      });
+      continue;
+    }
+
+    const haystack = `${item.title} ${item.summary}`.normalize("NFKC");
+    const matchedKeywords = extractMatchedDisruptionKeywords(haystack);
+    if (matchedKeywords.length === 0) {
+      decisions.push({
+        item,
+        passed: false,
+        reason: "NO_DISRUPTION_KEYWORD",
+        matchedKeywords: [],
+      });
+      continue;
+    }
+
+    const isNearDuplicate = acceptedTitles.some(
+      (existing) => trigramJaccardSimilarity(existing, item.title) >= 0.75,
+    );
+    if (isNearDuplicate && !changedUrls.has(item.sourceUrl)) {
+      decisions.push({
+        item,
+        passed: false,
+        reason: "NEAR_DUPLICATE_TITLE",
+        matchedKeywords,
+      });
+      continue;
+    }
+
+    localUrls.add(item.sourceUrl);
+    acceptedTitles.push(item.title);
+    accepted.push(item);
+    decisions.push({
+      item,
+      passed: true,
+      reason: "PASSED",
+      matchedKeywords,
+    });
+  }
+
+  return { accepted, decisions };
+}
+
 /**
  * Zero-token pre-filter:
  * 1. Drops already-seen URLs
@@ -193,30 +291,15 @@ export function preFilterUnstructuredItems(
   recentTitles: readonly string[] = [],
   changedUrls: ReadonlySet<string> = new Set(),
 ): UnstructuredFeedItem[] {
-  const accepted: UnstructuredFeedItem[] = [];
-  const acceptedTitles = [...recentTitles];
-  const localUrls = new Set(seenUrls);
-
-  for (const item of items) {
-    if (localUrls.has(item.sourceUrl)) continue;
-
-    const haystack = `${item.title} ${item.summary}`.normalize("NFKC");
-    if (!DISRUPTION_KEYWORD_PATTERN.test(haystack)) {
-      continue;
-    }
-
-    const isNearDuplicate = acceptedTitles.some(
-      (existing) => trigramJaccardSimilarity(existing, item.title) >= 0.75,
-    );
-    if (isNearDuplicate && !changedUrls.has(item.sourceUrl)) continue;
-
-    localUrls.add(item.sourceUrl);
-    acceptedTitles.push(item.title);
-    accepted.push(item);
-  }
-
-  return accepted;
+  return preFilterUnstructuredItemsWithAudit(
+    items,
+    seenUrls,
+    recentTitles,
+    changedUrls,
+  ).accepted;
 }
+
+export const STAGE2_PROMPT_TEMPLATE_VERSION = "stage2-v1";
 
 const STAGE2_SYSTEM_PROMPT = `You are Kulgo's Supply Chain Disruption Intelligence classifier.
 Extract ONLY real, operational supply-chain disruptions (sanctions, maritime chokepoints, port congestion, extreme weather, labor strikes, factory/grid outages, logistics cyberattacks, or corporate insolvencies).
@@ -292,6 +375,22 @@ function resolveLifecycleFromEventWindow(
   return extractedLifecycle;
 }
 
+export interface Stage2ExtractionAuditEntry {
+  articleContentSha256: string;
+  promptTemplateVersion: string;
+  provider: string;
+  model: string;
+  promptText: string;
+  rawOutput: string;
+  parsedCandidate: Record<string, unknown> | null;
+  evidenceQuotes: string[];
+  validationPassed: boolean;
+  validationErrors: string[];
+  promptTokens: number | null;
+  completionTokens: number | null;
+  latencyMs: number;
+}
+
 /**
  * Classifies pre-filtered unstructured feed items in batches of 10-15 via the
  * AI API Centre (`LlmRouter`). Single-source unstructured detections are marked
@@ -303,13 +402,19 @@ export async function classifyUnstructuredItems(
   llmRouter: LlmRouter,
   nowIso = new Date().toISOString(),
   batchSize = 12,
-): Promise<{ signals: RiskSignal[]; providersUsed: string[]; errors: string[] }> {
+): Promise<{
+  signals: RiskSignal[];
+  providersUsed: string[];
+  errors: string[];
+  extractions: Stage2ExtractionAuditEntry[];
+}> {
   const signals: RiskSignal[] = [];
   const providersUsed = new Set<string>();
   const errors: string[] = [];
+  const extractions: Stage2ExtractionAuditEntry[] = [];
 
   if (items.length === 0 || llmRouter.configuredProviders.length === 0) {
-    return { signals, providersUsed: [], errors };
+    return { signals, providersUsed: [], errors, extractions };
   }
 
   const nowMs = Date.parse(nowIso);
@@ -341,6 +446,8 @@ export async function classifyUnstructuredItems(
     }
 
     const userPrompt = JSON.stringify(promptBatch);
+    const batchContentHash = sha256Hex(userPrompt);
+    const startedMs = Date.now();
 
     try {
       const result = await llmRouter.generateStructured(
@@ -350,22 +457,26 @@ export async function classifyUnstructuredItems(
           userPrompt,
         },
       );
+      const latencyMs = Math.max(0, Date.now() - startedMs);
       providersUsed.add(`${result.provider}:${result.model}`);
+      const batchValidationErrors: string[] = [];
+      const batchEvidenceQuotes: string[] = [];
 
       for (const item of result.data.signals) {
         const matchedArticle = articleById.get(item.articleId);
         if (!matchedArticle) {
-          errors.push(
-            `Stage2 batch ${i}: rejected extraction with unknown articleId "${item.articleId}"`,
-          );
+          const msg = `Stage2 batch ${i}: rejected extraction with unknown articleId "${item.articleId}"`;
+          errors.push(msg);
+          batchValidationErrors.push(msg);
           continue;
         }
         if (!isVerbatimEvidenceQuote(item.evidenceQuote, matchedArticle)) {
-          errors.push(
-            `Stage2 batch ${i}: rejected extraction for "${item.articleId}" with non-verbatim evidenceQuote`,
-          );
+          const msg = `Stage2 batch ${i}: rejected extraction for "${item.articleId}" with non-verbatim evidenceQuote`;
+          errors.push(msg);
+          batchValidationErrors.push(msg);
           continue;
         }
+        batchEvidenceQuotes.push(item.evidenceQuote.trim());
         if (item.severity === "GREEN") continue;
 
         const parsedPublishedMs = Date.parse(matchedArticle.publishedAt);
@@ -433,10 +544,41 @@ export async function classifyUnstructuredItems(
           }),
         );
       }
+
+      extractions.push({
+        articleContentSha256: batchContentHash,
+        promptTemplateVersion: STAGE2_PROMPT_TEMPLATE_VERSION,
+        provider: result.provider,
+        model: result.model,
+        promptText: userPrompt,
+        rawOutput: JSON.stringify(result.data),
+        parsedCandidate: result.data as unknown as Record<string, unknown>,
+        evidenceQuotes: batchEvidenceQuotes,
+        validationPassed: batchValidationErrors.length === 0,
+        validationErrors: batchValidationErrors,
+        promptTokens: result.usage.promptTokens,
+        completionTokens: result.usage.completionTokens,
+        latencyMs,
+      });
     } catch (err) {
-      errors.push(
-        `Stage2 batch ${i}: ${err instanceof Error ? err.message : String(err)}`,
-      );
+      const latencyMs = Math.max(0, Date.now() - startedMs);
+      const message = err instanceof Error ? err.message : String(err);
+      errors.push(`Stage2 batch ${i}: ${message}`);
+      extractions.push({
+        articleContentSha256: batchContentHash,
+        promptTemplateVersion: STAGE2_PROMPT_TEMPLATE_VERSION,
+        provider: llmRouter.configuredProviders[0] ?? "unknown",
+        model: "unknown",
+        promptText: userPrompt,
+        rawOutput: "",
+        parsedCandidate: null,
+        evidenceQuotes: [],
+        validationPassed: false,
+        validationErrors: [message],
+        promptTokens: null,
+        completionTokens: null,
+        latencyMs,
+      });
     }
   }
 
@@ -444,6 +586,7 @@ export async function classifyUnstructuredItems(
     signals,
     providersUsed: Array.from(providersUsed),
     errors,
+    extractions,
   };
 }
 
