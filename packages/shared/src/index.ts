@@ -8,3 +8,4 @@ export * from "./analytics.js";
 export * from "./entity-alias.js";
 
 export * from "./registry.js";
+export * from "./catalogue.js";

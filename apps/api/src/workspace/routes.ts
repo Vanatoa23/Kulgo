@@ -23,12 +23,16 @@ import { z } from "zod";
 import { createRequireAuth, type AuthVariables } from "../auth/middleware.js";
 import type { AuthRepository } from "../auth/repository.js";
 import type { RiskSignalRepository } from "../analytics/risk-signals.js";
+import type { OutreachService } from "../outreach/service.js";
 import {
   buildWorkspaceExportJson,
   executeBulkImport,
   parseBulkImportCsv,
+  parseBulkImportMatrix,
   serializeNetworkToCsv,
+  SUPPLIER_ONBOARDING_TEMPLATE_ROWS,
 } from "./import-export.js";
+import { buildXlsxBuffer, parseXlsxBuffer } from "./xlsx.js";
 import {
   WorkspaceConflictError,
   WorkspaceValidationError,
@@ -40,6 +44,7 @@ export interface WorkspaceRoutesDependencies {
   authRepo: AuthRepository;
   workspaceRepo: WorkspaceRepository;
   riskSignalRepo?: RiskSignalRepository;
+  outreachService?: OutreachService;
 }
 
 const NetworkQuerySchema = z.object({
@@ -51,6 +56,7 @@ export function createWorkspaceRoutes({
   authRepo,
   workspaceRepo,
   riskSignalRepo,
+  outreachService,
 }: WorkspaceRoutesDependencies): Hono<{ Variables: AuthVariables }> {
   const routes = new Hono<{ Variables: AuthVariables }>();
   const requireAuth = createRequireAuth(authRepo);
@@ -102,14 +108,63 @@ export function createWorkspaceRoutes({
     );
   });
 
-  // --- Bulk Import (JSON or CSV) ---
+  // --- Supplier Onboarding Templates (CSV & Excel .xlsx) ---
+  routes.get("/templates/suppliers.csv", (c) => {
+    const csv = SUPPLIER_ONBOARDING_TEMPLATE_ROWS.map((row) =>
+      row.join(","),
+    ).join("\n");
+    c.header("Content-Type", "text/csv; charset=utf-8");
+    c.header(
+      "Content-Disposition",
+      'attachment; filename="kulgo-suppliers-template.csv"',
+    );
+    return c.body(csv, 200);
+  });
+
+  routes.get("/templates/suppliers.xlsx", (c) => {
+    const xlsx = buildXlsxBuffer(
+      "Suppliers",
+      SUPPLIER_ONBOARDING_TEMPLATE_ROWS,
+    );
+    c.header(
+      "Content-Type",
+      "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+    );
+    c.header(
+      "Content-Disposition",
+      'attachment; filename="kulgo-suppliers-template.xlsx"',
+    );
+    return c.body(new Uint8Array(xlsx), 200);
+  });
+
+  // --- Bulk Import (JSON, CSV, or Excel .xlsx) ---
   routes.post("/import", async (c) => {
     const auth = c.get("auth");
     const orgId = auth.organization.orgId;
     const contentType = (c.req.header("content-type") ?? "").toLowerCase();
 
+    const triggerOutreachHints = (
+      hints: ReadonlyArray<{ supplierName: string; email: string }>,
+    ) => {
+      if (!outreachService || hints.length === 0) return;
+      for (const hint of hints) {
+        void outreachService
+          .dispatchSupplierOutreach({
+            fromOrgId: orgId,
+            fromOrgName: auth.organization.name,
+            actorUserId: auth.user.userId,
+            actorEmail: auth.user.email,
+            supplierName: hint.supplierName,
+            recipientEmail: hint.email,
+          })
+          .catch(() => {
+            // Non-fatal
+          });
+      }
+    };
+
     const recordBulkImportAudit = async (
-      format: "csv" | "json",
+      format: "csv" | "json" | "xlsx",
       summary: { createdFacilities: number; createdLanes: number; errors: unknown[] },
     ) => {
       await authRepo.recordAuditEvent({
@@ -129,6 +184,36 @@ export function createWorkspaceRoutes({
 
     try {
       if (
+        contentType.includes(
+          "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+        ) ||
+        contentType.includes("application/octet-stream")
+      ) {
+        const buf = Buffer.from(await c.req.arrayBuffer());
+        if (buf.length === 0) {
+          return c.json({ error: "XLSX payload must not be empty" }, 400);
+        }
+        let matrix: string[][];
+        try {
+          matrix = parseXlsxBuffer(buf);
+        } catch (err) {
+          return c.json(
+            { error: err instanceof Error ? err.message : "Invalid XLSX file" },
+            400,
+          );
+        }
+        const parsedXlsx = parseBulkImportMatrix(matrix);
+        const summary = await executeBulkImport(workspaceRepo, orgId, {
+          facilities: parsedXlsx.facilities,
+          lanes: parsedXlsx.lanes,
+          initialErrors: parsedXlsx.errors,
+        });
+        triggerOutreachHints(parsedXlsx.outreachHints);
+        await recordBulkImportAudit("xlsx", summary);
+        return c.json(summary, 200);
+      }
+
+      if (
         contentType.includes("text/csv") ||
         contentType.includes("text/plain")
       ) {
@@ -142,6 +227,7 @@ export function createWorkspaceRoutes({
           lanes: parsedCsv.lanes,
           initialErrors: parsedCsv.errors,
         });
+        triggerOutreachHints(parsedCsv.outreachHints);
         await recordBulkImportAudit("csv", summary);
         return c.json(summary, 200);
       }
@@ -161,6 +247,29 @@ export function createWorkspaceRoutes({
         );
       }
 
+      if (parsedBody.data.xlsxBase64) {
+        let matrix: string[][];
+        try {
+          matrix = parseXlsxBuffer(
+            Buffer.from(parsedBody.data.xlsxBase64, "base64"),
+          );
+        } catch (err) {
+          return c.json(
+            { error: err instanceof Error ? err.message : "Invalid XLSX file" },
+            400,
+          );
+        }
+        const parsedXlsx = parseBulkImportMatrix(matrix);
+        const summary = await executeBulkImport(workspaceRepo, orgId, {
+          facilities: parsedXlsx.facilities,
+          lanes: parsedXlsx.lanes,
+          initialErrors: parsedXlsx.errors,
+        });
+        triggerOutreachHints(parsedXlsx.outreachHints);
+        await recordBulkImportAudit("xlsx", summary);
+        return c.json(summary, 200);
+      }
+
       if (parsedBody.data.csv) {
         const parsedCsv = parseBulkImportCsv(parsedBody.data.csv);
         const summary = await executeBulkImport(workspaceRepo, orgId, {
@@ -168,6 +277,7 @@ export function createWorkspaceRoutes({
           lanes: parsedCsv.lanes,
           initialErrors: parsedCsv.errors,
         });
+        triggerOutreachHints(parsedCsv.outreachHints);
         await recordBulkImportAudit("csv", summary);
         return c.json(summary, 200);
       }
@@ -188,7 +298,7 @@ export function createWorkspaceRoutes({
         return c.json(
           {
             error:
-              "Import payload must contain at least one facility, lane, or csv string",
+              "Import payload must contain at least one facility, lane, csv, or xlsxBase64 payload",
           },
           400,
         );

@@ -143,6 +143,9 @@ function mapOrganizationRow(row: Record<string, unknown>): Organization {
       : [],
     openToNewBuyers: Boolean(row.openToNewBuyers),
     capabilities: Array.isArray(row.capabilities) ? row.capabilities : [],
+    ...(typeof row.registryCode === "string" && row.registryCode.trim().length > 0
+      ? { registryCode: row.registryCode.trim() }
+      : {}),
     createdAt: row.createdAt,
   });
 }
@@ -410,6 +413,10 @@ export class ArcadeDbAuthRepository implements AuthRepository {
       input.capabilities !== undefined
         ? dedupeList(input.capabilities)
         : existing.capabilities;
+    const nextRegistryCode =
+      input.registryCode !== undefined
+        ? input.registryCode
+        : (existing.registryCode ?? null);
 
     await this.db.command(
       "sql",
@@ -422,7 +429,8 @@ export class ArcadeDbAuthRepository implements AuthRepository {
         enabledCompliancePacks = :enabledCompliancePacks,
         esgBadges = :esgBadges,
         openToNewBuyers = :openToNewBuyers,
-        capabilities = :capabilities
+        capabilities = :capabilities,
+        registryCode = :registryCode
        WHERE orgId = :orgId`,
       {
         scope1Tco2e: nextScope1,
@@ -434,6 +442,7 @@ export class ArcadeDbAuthRepository implements AuthRepository {
         esgBadges: nextEsgBadges,
         openToNewBuyers: nextOpenToNewBuyers,
         capabilities: nextCapabilities,
+        registryCode: nextRegistryCode,
         orgId,
       },
     );
@@ -841,6 +850,9 @@ export class InMemoryAuthRepository implements AuthRepository {
         input.capabilities !== undefined
           ? dedupeList(input.capabilities)
           : existing.capabilities,
+      ...(input.registryCode !== undefined
+        ? { registryCode: input.registryCode }
+        : {}),
     });
     this.organizations.set(orgId, updated);
     return {

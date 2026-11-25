@@ -20,6 +20,12 @@ import {
 import { useEffect, useMemo, useState } from "react";
 import { simulateAnalytics } from "../lib/api.js";
 
+export interface WhatIfAlternativePreset {
+  facilityId: string;
+  alternativeName: string;
+  switchPct: number;
+}
+
 export interface WhatIfSimulatorDrawerProps {
   open: boolean;
   lanes: readonly SupplyLane[];
@@ -28,6 +34,7 @@ export interface WhatIfSimulatorDrawerProps {
   activeProductId: string | null;
   activeInputId: string | null;
   financialViewMode?: FinancialViewMode;
+  initialAlternativePreset?: WhatIfAlternativePreset | null;
   onClose: () => void;
 }
 
@@ -85,6 +92,7 @@ export function WhatIfSimulatorDrawer({
   activeProductId,
   activeInputId,
   financialViewMode,
+  initialAlternativePreset = null,
   onClose,
 }: WhatIfSimulatorDrawerProps) {
   const [drafts, setDrafts] = useState<Record<string, DraftLaneOverride>>({});
@@ -101,12 +109,39 @@ export function WhatIfSimulatorDrawer({
     [inputs],
   );
 
-  // Reset drafts whenever visible lane set changes
+  // Reset drafts whenever visible lane set changes, or apply alternative preset
   useEffect(() => {
+    if (open && initialAlternativePreset) {
+      const next: Record<string, DraftLaneOverride> = {};
+      const clampedSwitch = Math.max(
+        30,
+        Math.min(100, initialAlternativePreset.switchPct),
+      );
+      for (const lane of lanes) {
+        if (lane.fromFacilityId === initialAlternativePreset.facilityId) {
+          const reducedShare = Math.max(
+            0,
+            Math.round(lane.volumeSharePct * (1 - clampedSwitch / 100)),
+          );
+          next[lane.laneId] = {
+            volumeSharePct:
+              reducedShare === lane.volumeSharePct
+                ? Math.max(0, lane.volumeSharePct - clampedSwitch)
+                : reducedShare,
+            transportMode: lane.transportMode,
+            safetyStockDays: lane.safetyStockDays ?? 7,
+          };
+        }
+      }
+      setDrafts(next);
+      setResult(null);
+      setError(null);
+      return;
+    }
     setDrafts({});
     setResult(null);
     setError(null);
-  }, [lanes, activeProductId, activeInputId]);
+  }, [lanes, activeProductId, activeInputId, open, initialAlternativePreset]);
 
   const laneChanges = useMemo<SimulatedLaneChange[]>(() => {
     const changes: SimulatedLaneChange[] = [];

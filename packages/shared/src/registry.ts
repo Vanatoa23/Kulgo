@@ -116,3 +116,6 @@ export const CompanyRegistrySearchResponseSchema = z
   .strict();
 
 export type CompanyRegistrySearchResponse = z.infer<typeof CompanyRegistrySearchResponseSchema>;
+
+export const RegistryEnrichmentResultSchema = CompanyRegistrySearchResponseSchema;
+export type RegistryEnrichmentResult = CompanyRegistrySearchResponse;

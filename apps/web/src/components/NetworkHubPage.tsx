@@ -66,6 +66,7 @@ export interface NetworkHubPageProps {
   onSelectFacility: (facilityId: string | null) => void;
   onViewFacilityOnMap: (facilityId: string) => void;
   onOpenDirectory: (capability?: string) => void;
+  onOpenFacilityAlternatives?: (facilityId: string, facilityName: string) => void;
   onSeedDemo: () => void;
   onCreateFacility: (input: CreateFacilityInput) => Promise<boolean>;
   onUpdateFacility: (
@@ -164,6 +165,7 @@ export function NetworkHubPage({
   onSelectFacility,
   onViewFacilityOnMap,
   onOpenDirectory,
+  onOpenFacilityAlternatives,
   onSeedDemo,
   onCreateFacility,
   onUpdateFacility,
@@ -796,6 +798,7 @@ export function NetworkHubPage({
           onClose={() => onSelectFacility(null)}
           onViewOnMap={onViewFacilityOnMap}
           onOpenDirectory={onOpenDirectory}
+          onOpenFacilityAlternatives={onOpenFacilityAlternatives}
           onUpdateFacility={onUpdateFacility}
           onDeleteFacility={onDeleteFacility}
           onCreateLane={onCreateLane}

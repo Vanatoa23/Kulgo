@@ -34,6 +34,7 @@ import {
   updateAlertPreferences,
   updateOrganizationProfile,
 } from "../lib/api.js";
+import { ProductCatalogueSection } from "./ProductCatalogueSection.js";
 
 export type SettingsTab = "profile" | "organization" | "team" | "audit";
 
@@ -86,6 +87,8 @@ const AUDIT_ACTION_BADGE_STYLES: Record<AuditAction, string> = {
     "bg-violet-500/15 border-violet-500/40 text-violet-300",
   ESG_LEDGER_EXPORTED:
     "bg-emerald-500/15 border-emerald-500/40 text-emerald-300",
+  CATALOGUE_UPDATED: "bg-cyan-500/15 border-cyan-500/40 text-cyan-300",
+  INTRO_REQUESTED: "bg-amber-500/15 border-amber-500/40 text-amber-300",
 };
 
 function formatAuditTimestamp(iso: string): string {
@@ -747,6 +750,8 @@ export function SettingsPage({
                 </button>
               </div>
             </form>
+
+            <ProductCatalogueSection organization={organization} />
 
             {/* Alert Channels Card */}
             <form

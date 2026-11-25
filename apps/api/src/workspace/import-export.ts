@@ -169,14 +169,86 @@ function normalizeHeaderKey(raw: string): string {
   return raw.trim().toLowerCase().replace(/[\s_-]+/g, "");
 }
 
-interface ParsedCsvPayload {
+export const SUPPLIER_ONBOARDING_TEMPLATE_ROWS: readonly (readonly string[])[] = [
+  [
+    "supplier_name",
+    "registry_code",
+    "country_code",
+    "email",
+    "material_category",
+    "base_unit",
+    "annual_volume",
+    "annual_spend_eur",
+    "currency",
+    "contract_type",
+    "contract_end_date",
+    "warehouse_split",
+  ],
+  [
+    "Nordic AluWorks AB",
+    "556001-1234",
+    "SE",
+    "sales@nordicaluworks.example",
+    "Aluminum Extrusions",
+    "TONNES",
+    "450",
+    "620000",
+    "EUR",
+    "ESTIMATE",
+    "2027-12-31",
+    "100",
+  ],
+  [
+    "Baltic Precision PCB OÜ",
+    "14001234",
+    "EE",
+    "orders@balticpcb.example",
+    "PCB Assembly",
+    "UNITS",
+    "12000",
+    "240000",
+    "EUR",
+    "FRAMEWORK",
+    "2027-06-30",
+    "100",
+  ],
+];
+
+const IMPORT_COUNTRY_CENTROIDS: Readonly<Record<string, readonly [number, number]>> = {
+  EE: [59.437, 24.7536],
+  FI: [60.1699, 24.9384],
+  SE: [59.3293, 18.0686],
+  LV: [56.9496, 24.1052],
+  LT: [54.6872, 25.2797],
+  NO: [59.9139, 10.7522],
+  DK: [55.6761, 12.5683],
+  DE: [52.52, 13.405],
+  PL: [52.2297, 21.0122],
+  NL: [52.3676, 4.9041],
+  FR: [48.8566, 2.3522],
+  GB: [51.5074, -0.1278],
+  RO: [44.4268, 26.1025],
+  US: [39.8283, -98.5795],
+  CN: [31.2304, 121.4737],
+};
+
+export interface SupplierOutreachHint {
+  supplierName: string;
+  email: string;
+}
+
+export interface ParsedCsvPayload {
   facilities: Array<{ rowNumber: number; raw: Record<string, unknown> }>;
   lanes: Array<{ rowNumber: number; raw: Record<string, unknown> }>;
   errors: BulkImportError[];
+  outreachHints: SupplierOutreachHint[];
 }
 
 export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
-  const matrix = parseCsvRecords(csvText);
+  return parseBulkImportMatrix(parseCsvRecords(csvText));
+}
+
+export function parseBulkImportMatrix(matrix: string[][]): ParsedCsvPayload {
   if (matrix.length < 2) {
     return {
       facilities: [],
@@ -189,6 +261,7 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
             "CSV must include a header row and at least one data row.",
         },
       ],
+      outreachHints: [],
     };
   }
 
@@ -204,6 +277,7 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
     [];
   const lanes: Array<{ rowNumber: number; raw: Record<string, unknown> }> = [];
   const errors: BulkImportError[] = [];
+  const outreachHints: SupplierOutreachHint[] = [];
 
   for (let i = 1; i < matrix.length; i += 1) {
     const rowNumber = i + 1;
@@ -214,6 +288,81 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
       if (key) {
         record[key] = stripFormulaGuardOnImport((cells[col] ?? "").trim());
       }
+    }
+
+    // Path B — Supplier Onboarding Spreadsheet row (`supplier_name`)
+    if (headers.includes("suppliername") && !record.recordtype && !record.type) {
+      const supplierName = record.suppliername || "";
+      if (!supplierName) {
+        errors.push({
+          row: rowNumber,
+          entity: "FACILITY",
+          field: "supplier_name",
+          message: "supplier_name is required.",
+        });
+        continue;
+      }
+
+      const countryCode = (record.countrycode || "EE").toUpperCase();
+      if (!/^[A-Z]{2}$/.test(countryCode)) {
+        errors.push({
+          row: rowNumber,
+          entity: "FACILITY",
+          field: "country_code",
+          message: `Invalid country_code "${record.countrycode}". Expected 2-letter ISO code.`,
+        });
+        continue;
+      }
+
+      const centroid = IMPORT_COUNTRY_CENTROIDS[countryCode] ?? [59.437, 24.7536];
+      const lat = parseOptionalNumber(record.lat) ?? centroid[0];
+      const lng = parseOptionalNumber(record.lng) ?? centroid[1];
+      const refKey = `sup-row-${rowNumber}`;
+
+      facilities.push({
+        rowNumber,
+        raw: {
+          refKey,
+          name: supplierName,
+          kind: "FACTORY",
+          locationPrecision: "HQ_ESTIMATED",
+          countryCode,
+          regionCode: record.regioncode || null,
+          lat,
+          lng,
+          isOwnFacility: false,
+          relationshipRole: "SUPPLIER",
+          sector: record.materialcategory || null,
+          registryCode: record.registrycode || null,
+        },
+      });
+
+      if (record.email && record.email.includes("@")) {
+        outreachHints.push({ supplierName, email: record.email });
+      }
+
+      if (record.materialcategory) {
+        const splitPct = parseOptionalNumber(record.warehousesplit);
+        lanes.push({
+          rowNumber,
+          raw: {
+            fromFacilityRef: refKey,
+            toFacilityRef: "__OWN_PRIMARY__",
+            direction: "UPSTREAM",
+            materialCategory: record.materialcategory,
+            transportMode: (record.transportmode || "ROAD").toUpperCase(),
+            volumeSharePct: splitPct ?? 100,
+            allocationSplitPct: splitPct ?? null,
+            annualVolume: parseOptionalNumber(record.annualvolume) ?? null,
+            volumeUnit: (record.baseunit || record.volumeunit || "TONNES").toUpperCase(),
+            annualSpendEur: parseOptionalNumber(record.annualspendeur) ?? null,
+            contractEndDate: record.contractenddate || null,
+            contractTerms: record.contracttype || null,
+            riskStatus: "GREEN",
+          },
+        });
+      }
+      continue;
     }
 
     const explicitType = (
@@ -329,7 +478,7 @@ export function parseBulkImportCsv(csvText: string): ParsedCsvPayload {
     }
   }
 
-  return { facilities, lanes, errors };
+  return { facilities, lanes, errors, outreachHints };
 }
 
 function facilityDedupeKey(input: {
@@ -483,10 +632,18 @@ export async function executeBulkImport(
     }
   }
 
+  const ownFacilitiesNow = (await workspaceRepo.listFacilities(orgId)).filter(
+    (f) => f.isOwnFacility,
+  );
+  const primaryOwnFacilityId = ownFacilitiesNow[0]?.facilityId ?? null;
+
   const resolveFacilityRef = (
     explicitId: string | undefined,
     ref: string | undefined,
   ): string | null => {
+    if (ref === "__OWN_PRIMARY__") {
+      return primaryOwnFacilityId;
+    }
     if (explicitId) {
       const direct = refToFacilityId.get(explicitId);
       if (direct) return direct;

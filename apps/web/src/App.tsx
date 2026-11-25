@@ -31,7 +31,10 @@ import { NetworkHubPage } from "./components/NetworkHubPage.js";
 import { SettingsPage } from "./components/SettingsPage.js";
 import { SupplyMap } from "./components/SupplyMap.js";
 import { TopContextBar } from "./components/TopContextBar.js";
-import { WhatIfSimulatorDrawer } from "./components/WhatIfSimulatorDrawer.js";
+import {
+  WhatIfSimulatorDrawer,
+  type WhatIfAlternativePreset,
+} from "./components/WhatIfSimulatorDrawer.js";
 import {
   ApiError,
   acknowledgeAlert,
@@ -167,6 +170,12 @@ export function App() {
   const [directoryOpen, setDirectoryOpen] = useState(false);
   const [directoryInitialCapability, setDirectoryInitialCapability] =
     useState("");
+  const [directoryFacilityContext, setDirectoryFacilityContext] = useState<{
+    facilityId: string;
+    facilityName: string;
+  } | null>(null);
+  const [simulatorAlternativePreset, setSimulatorAlternativePreset] =
+    useState<WhatIfAlternativePreset | null>(null);
   const [importExportOpen, setImportExportOpen] = useState(false);
 
   // Filter & selection state
@@ -851,7 +860,12 @@ export function App() {
                 navigateToPage("map");
               }}
               onOpenDirectory={(cap) => {
+                setDirectoryFacilityContext(null);
                 setDirectoryInitialCapability(cap ?? "");
+                setDirectoryOpen(true);
+              }}
+              onOpenFacilityAlternatives={(facilityId, facilityName) => {
+                setDirectoryFacilityContext({ facilityId, facilityName });
                 setDirectoryOpen(true);
               }}
               onSeedDemo={() => void handleSeedDemo()}
@@ -1056,7 +1070,11 @@ export function App() {
         activeProductId={activeProductId}
         activeInputId={activeInputId}
         financialViewMode={financialViewMode}
-        onClose={() => setSimulatorOpen(false)}
+        initialAlternativePreset={simulatorAlternativePreset}
+        onClose={() => {
+          setSimulatorOpen(false);
+          setSimulatorAlternativePreset(null);
+        }}
       />
 
       <AcceptInviteModal
@@ -1090,7 +1108,17 @@ export function App() {
       <AlternativeDirectoryModal
         open={directoryOpen}
         initialCapability={directoryInitialCapability}
-        onClose={() => setDirectoryOpen(false)}
+        facilityId={directoryFacilityContext?.facilityId ?? null}
+        facilityName={directoryFacilityContext?.facilityName ?? null}
+        onTestInWhatIf={(preset) => {
+          setDirectoryOpen(false);
+          setSimulatorAlternativePreset(preset);
+          setSimulatorOpen(true);
+        }}
+        onClose={() => {
+          setDirectoryOpen(false);
+          setDirectoryFacilityContext(null);
+        }}
       />
 
       <ImportExportModal

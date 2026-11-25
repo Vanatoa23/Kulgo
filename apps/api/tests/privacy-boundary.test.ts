@@ -3234,3 +3234,142 @@ describe("Privacy Boundary Contract (Company Registry Search)", () => {
     expect((await app.request("/api/v1/health")).status).toBe(200);
   });
 });
+
+describe("Sub-Project 5 Privacy Boundary — Product Catalogue Matches & Intro Requests", () => {
+  it("never leaks private supply links, Tier-2+ upstream suppliers, revenues, coordinates, or emails in facility alternatives or intro emails", async () => {
+    const { InMemoryCaptureEmailProvider } = await import(
+      "../src/intelligence/notifications.js"
+    );
+    const emailCapture = new InMemoryCaptureEmailProvider();
+    const app = createTestApp({}, { emailProvider: emailCapture });
+
+    // Opted-in Supplier with secret Tier-2 upstream supplier, revenue, and private coordinates
+    const supplier = await registerOrg(
+      app,
+      "secret-owner@cat-supplier.fi",
+      "Helsinki OptIn Extrusions Oy",
+    );
+    await app.request("/api/v1/auth/organization", {
+      method: "PATCH",
+      headers: { "Content-Type": "application/json", Cookie: supplier.cookie },
+      body: JSON.stringify({
+        openToNewBuyers: true,
+        annualRevenueEur: 48_765_432,
+        esgBadges: ["ISO 14001"],
+      }),
+    });
+    const supSecretFacRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: supplier.cookie },
+      body: JSON.stringify({
+        name: "Secret Tier2 Bauxite Smelter",
+        kind: "EXTRACTION",
+        countryCode: "RU",
+        lat: 56.1234,
+        lng: 38.9876,
+        isOwnFacility: false,
+        sector: "Mining",
+      }),
+    });
+    expect(supSecretFacRes.status).toBe(201);
+    const { facility: supSecretFac } = (await supSecretFacRes.json()) as {
+      facility: { facilityId: string };
+    };
+
+    const catRes = await app.request("/api/v1/directory/catalogue", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: supplier.cookie },
+      body: JSON.stringify({
+        standardizedCategory: "ALUMINUM_EXTRUSIONS",
+        productTitle: "6061-T6 Nordic Extrusions",
+        baseUnit: "TONNES",
+      }),
+    });
+    expect(catRes.status).toBe(201);
+
+    // Buyer with private existing supplier
+    const buyer = await registerOrg(
+      app,
+      "buyer-priv@tallinn-buyer.ee",
+      "Tallinn Buyer AS",
+    );
+    const ownRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        name: "Tallinn Assembly",
+        kind: "HQ",
+        countryCode: "EE",
+        lat: 59.437,
+        lng: 24.7536,
+        isOwnFacility: true,
+      }),
+    });
+    const { facility: ownFac } = (await ownRes.json()) as {
+      facility: { facilityId: string };
+    };
+    const existingSupRes = await app.request("/api/v1/workspace/facilities", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        name: "Confidential Incumbent Supplier GmbH",
+        kind: "FACTORY",
+        countryCode: "DE",
+        lat: 52.52,
+        lng: 13.405,
+        isOwnFacility: false,
+      }),
+    });
+    const { facility: existingSup } = (await existingSupRes.json()) as {
+      facility: { facilityId: string };
+    };
+    await app.request("/api/v1/workspace/lanes", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        fromFacilityId: existingSup.facilityId,
+        toFacilityId: ownFac.facilityId,
+        materialCategory: "Aluminum Extrusions",
+        transportMode: "ROAD",
+        volumeSharePct: 100,
+      }),
+    });
+
+    // 1. Facility alternatives response must never leak supplier's Tier-2, email, revenue, or coordinates
+    const altRes = await app.request(
+      `/api/v1/directory/alternatives/for-facility/${existingSup.facilityId}`,
+      { headers: { Cookie: buyer.cookie } },
+    );
+    expect(altRes.status).toBe(200);
+    const altText = await altRes.text();
+    expect(altText).toContain("Helsinki OptIn Extrusions Oy");
+    expect(altText).not.toContain("Secret Tier2 Bauxite Smelter");
+    expect(altText).not.toContain(supSecretFac.facilityId);
+    expect(altText).not.toContain("48765432");
+    expect(altText).not.toContain("56.1234");
+    expect(altText).not.toContain("38.9876");
+    expect(altText).not.toContain("secret-owner@cat-supplier.fi");
+
+    // 2. Intro request response & email must never leak buyer's private supply graph or incumbent supplier
+    const introRes = await app.request("/api/v1/directory/request-intro", {
+      method: "POST",
+      headers: { "Content-Type": "application/json", Cookie: buyer.cookie },
+      body: JSON.stringify({
+        targetOrgId: supplier.orgId,
+        materialCategory: "Aluminum Extrusions",
+        volumeBand: "100-300 tonnes/year",
+      }),
+    });
+    expect(introRes.status).toBe(201);
+    const introText = await introRes.text();
+    expect(introText).not.toContain("secret-owner@cat-supplier.fi");
+    expect(introText).not.toContain("Confidential Incumbent Supplier GmbH");
+    expect(emailCapture.sent).toHaveLength(1);
+    expect(emailCapture.sent[0]!.text).not.toContain(
+      "Confidential Incumbent Supplier GmbH",
+    );
+    expect(emailCapture.sent[0]!.text).not.toContain(existingSup.facilityId);
+    expect(emailCapture.sent[0]!.text).not.toContain(ownFac.facilityId);
+  });
+});
+

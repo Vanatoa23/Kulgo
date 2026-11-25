@@ -66,26 +66,26 @@ When a buyer clicks any supplier node (in the **Network Hub** or on the **Strate
 ## 5. Phased Execution Plan (Sub-Tasks)
 
 ### Phase 0 — Registry, Email & Taxonomy Research (Required Before Coding)
-- [ ] Research public business registry APIs and open datasets:
+- [x] Research public business registry APIs and open datasets:
   - **Estonia:** e-Business Register (*Äriregister* / `avaandmed.ariregister.rik.ee` open data & JSON/XML APIs).
   - **Nordics & EU:** Finland PRH/YTJ, Sweden Bolagsverket, Latvia Lursoft/UR, Lithuania Registrų Centras, EU BRIS, GLEIF (LEI), OpenCorporates.
   - Document rate limits, licensing, contact-email availability, and GDPR lawful basis for B2B outreach.
-- [ ] Evaluate transactional email providers (Resend / Postmark / AWS SES / SMTP) for automated outreach, bounce handling, and suppression lists.
-- [ ] Define v1 **Kulgo Standardized Material/Product Taxonomy** (mapped to 4/6-digit HS/CN codes for manufacturing).
-- [ ] Produce `docs/research/BUSINESS_REGISTRY_AND_CATALOGUE_TAXONOMY.md`.
+- [x] Evaluate transactional email providers (Resend / Postmark / AWS SES / SMTP) for automated outreach, bounce handling, and suppression lists.
+- [x] Define v1 **Kulgo Standardized Material/Product Taxonomy** (mapped to 4/6-digit HS/CN codes for manufacturing).
+- [x] Produce `docs/research/BUSINESS_REGISTRY_AND_CATALOGUE_TAXONOMY.md`.
 
 ### Phase 1 — Shared Contracts & ArcadeDB Schema (`@kulgo/shared` + `@kulgo/api`)
-- [ ] Add `CatalogueItemSchema`, `RegistryEnrichmentResultSchema`, `AlternativeMatchSchema`, and `IntroRequestInputSchema` (`.strict()`) in `packages/shared/src/`.
-- [ ] Add `registryCode` to `FacilitySchema` / `OrganizationSchema` and add `CatalogueItem` + `EmailSuppression` vertex types to `apps/api/src/db/schema.ts`.
+- [x] Add `CatalogueItemSchema`, `RegistryEnrichmentResultSchema`, `AlternativeMatchSchema`, and `IntroRequestInputSchema` (`.strict()`) in `packages/shared/src/`.
+- [x] Add `registryCode` to `FacilitySchema` / `OrganizationSchema` and add `CatalogueItem` + `EmailSuppression` vertex types to `apps/api/src/db/schema.ts`.
 
 ### Phase 2 — Registry Enrichment, Auto-Outreach & Catalogue API (`@kulgo/api`)
-- [ ] Implement pluggable `BusinessRegistryService` (Estonia Äriregister adapter + generic fallback) and background enrichment + automatic invite email dispatch with deduplication and suppression-list enforcement.
-- [ ] Add Supplier Catalogue CRUD & Excel/CSV upload endpoints (`/api/v1/directory/catalogue`).
-- [ ] Add `GET /api/v1/directory/alternatives/for-facility/:facilityId` (returns count `x` + ranked matches) and `POST /api/v1/directory/request-intro`.
-- [ ] Extend `apps/api/tests/privacy-boundary.test.ts` to guarantee zero private supply-link or Tier-2+ leakage in catalogue matches and intro emails.
+- [x] Implement pluggable `BusinessRegistryService` (Estonia Äriregister adapter + generic fallback) and background enrichment + automatic invite email dispatch with deduplication and suppression-list enforcement.
+- [x] Add Supplier Catalogue CRUD & Excel/CSV upload endpoints (`/api/v1/directory/catalogue`).
+- [x] Add `GET /api/v1/directory/alternatives/for-facility/:facilityId` (returns count `x` + ranked matches) and `POST /api/v1/directory/request-intro`.
+- [x] Extend `apps/api/tests/privacy-boundary.test.ts` to guarantee zero private supply-link or Tier-2+ leakage in catalogue matches and intro emails.
 
 ### Phase 3 — Frontend UI & E2E (`@kulgo/web`)
-- [ ] Add `.xlsx` (Excel) + CSV template download & upload alongside the "Add New" supplier form in Network Hub.
-- [ ] Add **My Public Product Catalogue** management section in Org Settings (for opted-in suppliers).
-- [ ] Add **`See alternatives (x)`** button to the Node Inspector Drawer with ranked comparison, **1-Click Test in What-If Simulator**, and **1-Click Request Intro / Quote**.
-- [ ] Add Playwright E2E coverage verifying catalogue upload → `"See alternatives (1)"` badge → What-If switch preview → Request Intro.
+- [x] Add `.xlsx` (Excel) + CSV template download & upload alongside the "Add New" supplier form in Network Hub.
+- [x] Add **My Public Product Catalogue** management section in Org Settings (for opted-in suppliers).
+- [x] Add **`See alternatives (x)`** button to the Node Inspector Drawer with ranked comparison, **1-Click Test in What-If Simulator**, and **1-Click Request Intro / Quote**.
+- [x] Add Playwright E2E coverage verifying catalogue upload → `"See alternatives (1)"` badge → What-If switch preview → Request Intro.

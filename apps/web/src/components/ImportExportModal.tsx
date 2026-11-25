@@ -18,6 +18,7 @@ import {
 import { useMemo, useState, type ChangeEvent } from "react";
 import {
   bulkImportWorkspace,
+  downloadAuthenticatedTemplate,
   exportWorkspaceCsv,
   exportWorkspaceJson,
   getExecutiveReport,
@@ -57,8 +58,18 @@ function triggerBrowserDownload(
   URL.revokeObjectURL(url);
 }
 
+function arrayBufferToBase64(buffer: ArrayBuffer): string {
+  const bytes = new Uint8Array(buffer);
+  let binary = "";
+  const chunkSize = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunkSize) {
+    binary += String.fromCharCode(...bytes.subarray(i, i + chunkSize));
+  }
+  return btoa(binary);
+}
+
 interface ParsedPreview {
-  format: "csv" | "json" | "invalid";
+  format: "csv" | "json" | "xlsx" | "invalid";
   summary: string;
   previewLines: string[];
   error?: string;
@@ -125,7 +136,11 @@ export function ImportExportModal({
 }: ImportExportModalProps) {
   const [tab, setTab] = useState<ModalTab>("import");
   const [rawInput, setRawInput] = useState("");
+  const [xlsxBase64, setXlsxBase64] = useState<string | null>(null);
   const [fileName, setFileName] = useState<string | null>(null);
+  const [downloadingTemplate, setDownloadingTemplate] = useState<
+    "xlsx" | "csv" | null
+  >(null);
 
   const [importing, setImporting] = useState(false);
   const [importResult, setImportResult] = useState<BulkImportSummary | null>(
@@ -139,7 +154,18 @@ export function ImportExportModal({
   const [exportError, setExportError] = useState<string | null>(null);
   const [csrdPreview, setCsrdPreview] = useState<ExecutiveReport | null>(null);
 
-  const preview = useMemo(() => buildInputPreview(rawInput), [rawInput]);
+  const preview = useMemo<ParsedPreview | null>(() => {
+    if (xlsxBase64 && fileName) {
+      return {
+        format: "xlsx",
+        summary: `Excel (.xlsx) file ready to import: ${fileName}`,
+        previewLines: [
+          `Excel (.xlsx) file ready to import: ${fileName}`,
+        ],
+      };
+    }
+    return buildInputPreview(rawInput);
+  }, [rawInput, xlsxBase64, fileName]);
 
   if (!open) {
     return null;
@@ -154,16 +180,61 @@ export function ImportExportModal({
     setImportResult(null);
     setImportError(null);
     const reader = new FileReader();
-    reader.onload = () => {
-      setRawInput(typeof reader.result === "string" ? reader.result : "");
-    };
-    reader.readAsText(file);
+    if (file.name.toLowerCase().endsWith(".xlsx")) {
+      reader.onload = () => {
+        if (reader.result instanceof ArrayBuffer) {
+          setRawInput("");
+          setXlsxBase64(arrayBufferToBase64(reader.result));
+        } else {
+          setImportError("Could not read Excel (.xlsx) file.");
+        }
+      };
+      reader.onerror = () => {
+        setImportError("Failed to read Excel (.xlsx) file.");
+      };
+      reader.readAsArrayBuffer(file);
+    } else {
+      reader.onload = () => {
+        setXlsxBase64(null);
+        setRawInput(typeof reader.result === "string" ? reader.result : "");
+      };
+      reader.onerror = () => {
+        setImportError("Failed to read file.");
+      };
+      reader.readAsText(file);
+    }
+  };
+
+  const handleDownloadSupplierTemplate = async (format: "xlsx" | "csv") => {
+    setDownloadingTemplate(format);
+    setImportError(null);
+    try {
+      if (format === "xlsx") {
+        await downloadAuthenticatedTemplate(
+          "/api/v1/workspace/templates/suppliers.xlsx",
+          "kulgo-supplier-onboarding-template.xlsx",
+        );
+      } else {
+        await downloadAuthenticatedTemplate(
+          "/api/v1/workspace/templates/suppliers.csv",
+          "kulgo-supplier-onboarding-template.csv",
+        );
+      }
+    } catch (err) {
+      setImportError(
+        err instanceof Error
+          ? err.message
+          : `Failed to download .${format} supplier template.`,
+      );
+    } finally {
+      setDownloadingTemplate(null);
+    }
   };
 
   const handleRunImport = async () => {
     const trimmed = rawInput.trim();
-    if (!trimmed) {
-      setImportError("Upload a CSV/JSON file or paste data to import.");
+    if (!xlsxBase64 && !trimmed) {
+      setImportError("Upload a CSV/XLSX/JSON file or paste data to import.");
       return;
     }
 
@@ -173,7 +244,9 @@ export function ImportExportModal({
 
     try {
       let result: BulkImportSummary;
-      if (trimmed.startsWith("{")) {
+      if (xlsxBase64) {
+        result = await bulkImportWorkspace({ xlsxBase64 });
+      } else if (trimmed.startsWith("{")) {
         const parsed = JSON.parse(trimmed) as {
           facilities?: unknown[];
           lanes?: unknown[];
@@ -279,8 +352,8 @@ export function ImportExportModal({
                 Import, Export &amp; CSRD Report
               </h2>
               <p className="text-[11px] text-slate-400">
-                Bulk CSV/JSON ingestion, network export, and anonymized CSRD
-                executive report
+                Bulk CSV/XLSX/JSON ingestion, network export, and anonymized
+                CSRD executive report
               </p>
             </div>
           </div>
@@ -306,7 +379,7 @@ export function ImportExportModal({
             }`}
           >
             <Upload className="h-3.5 w-3.5" />
-            <span>Bulk Import (CSV / JSON)</span>
+            <span>Bulk Import (CSV / XLSX / JSON)</span>
           </button>
           <button
             type="button"
@@ -329,10 +402,14 @@ export function ImportExportModal({
               <div className="flex flex-wrap items-center justify-between gap-2">
                 <label className="inline-flex items-center gap-2 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 px-3 py-1.5 text-xs font-medium text-slate-200 cursor-pointer">
                   <Upload className="h-3.5 w-3.5 text-sky-400" />
-                  <span>{fileName ? `File: ${fileName}` : "Choose .csv or .json file"}</span>
+                  <span>
+                    {fileName
+                      ? `File: ${fileName}`
+                      : "Choose .csv, .xlsx, or .json file"}
+                  </span>
                   <input
                     type="file"
-                    accept=".csv,.json,text/csv,application/json"
+                    accept=".csv,.json,.txt,.xlsx"
                     onChange={handleFileChange}
                     className="hidden"
                   />
@@ -342,6 +419,7 @@ export function ImportExportModal({
                   type="button"
                   onClick={() => {
                     setFileName("sample-network.csv");
+                    setXlsxBase64(null);
                     setRawInput(SAMPLE_CSV);
                     setImportResult(null);
                     setImportError(null);
@@ -352,15 +430,49 @@ export function ImportExportModal({
                 </button>
               </div>
 
+              {/* Supplier Onboarding Templates */}
+              <div className="flex flex-wrap items-center gap-2 rounded-xl border border-slate-800 bg-slate-900/50 px-3 py-2">
+                <span className="text-[11px] font-medium text-slate-400">
+                  Templates:
+                </span>
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadSupplierTemplate("xlsx")}
+                  disabled={downloadingTemplate !== null}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 px-2.5 py-1 text-[11px] font-medium text-slate-200 cursor-pointer"
+                >
+                  {downloadingTemplate === "xlsx" ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Download className="h-3 w-3 text-emerald-400" />
+                  )}
+                  <span>Supplier Onboarding Template (.xlsx)</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => void handleDownloadSupplierTemplate("csv")}
+                  disabled={downloadingTemplate !== null}
+                  className="inline-flex items-center gap-1.5 rounded-lg border border-slate-700 bg-slate-900 hover:bg-slate-800 disabled:opacity-50 px-2.5 py-1 text-[11px] font-medium text-slate-200 cursor-pointer"
+                >
+                  {downloadingTemplate === "csv" ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Download className="h-3 w-3 text-sky-400" />
+                  )}
+                  <span>Supplier Onboarding Template (.csv)</span>
+                </button>
+              </div>
+
               <textarea
                 value={rawInput}
                 onChange={(e) => {
+                  setXlsxBase64(null);
                   setRawInput(e.target.value);
                   setImportResult(null);
                   setImportError(null);
                 }}
                 rows={7}
-                placeholder="Paste CSV (with recordType=FACILITY / LANE) or JSON ({ facilities: [...], lanes: [...] })..."
+                placeholder="Paste CSV (with recordType=FACILITY / LANE) or JSON ({ facilities: [...], lanes: [...] }), or upload an .xlsx spreadsheet above..."
                 className="w-full rounded-xl border border-slate-800 bg-slate-900 p-3 font-mono text-[11px] text-slate-200 placeholder:text-slate-600 focus:border-emerald-500 focus:outline-none"
               />
 
@@ -443,7 +555,7 @@ export function ImportExportModal({
                   onClick={handleRunImport}
                   disabled={
                     importing ||
-                    !rawInput.trim() ||
+                    (!xlsxBase64 && !rawInput.trim()) ||
                     preview?.format === "invalid"
                   }
                   className="inline-flex items-center gap-1.5 rounded-lg bg-emerald-500 hover:bg-emerald-400 disabled:opacity-50 px-4 py-2 text-xs font-semibold text-slate-950 cursor-pointer"

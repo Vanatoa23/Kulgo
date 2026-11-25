@@ -1,13 +1,15 @@
 import {
+  type CompanyRegistrySearchResponse,
   type CreateRelationshipDeclarationInput,
   type RelationshipDeclaration,
   type RelationshipDeclarationRole,
   type RelationshipDeclarationStatus,
 } from "@kulgo/shared";
 
-import { Loader2, Plus, RefreshCw } from "lucide-react";
+import { Loader2, Plus, RefreshCw, Search } from "lucide-react";
 
 import { useEffect, useRef, useState, type FormEvent } from "react";
+import { searchCompanyRegistry } from "../lib/api.js";
 
 export type DeclarationsLoadStatus = "loading" | "error" | "ready";
 
@@ -75,6 +77,10 @@ export function CompanyDeclarationsSection({
   const [draft, setDraft] = useState<DeclarationDraft>(EMPTY_DRAFT);
   const [saving, setSaving] = useState(false);
   const [statusMessage, setStatusMessage] = useState<string | null>(null);
+  const [registrySearching, setRegistrySearching] = useState(false);
+  const [registryResult, setRegistryResult] =
+    useState<CompanyRegistrySearchResponse | null>(null);
+  const [registryError, setRegistryError] = useState<string | null>(null);
 
   const addButtonRef = useRef<HTMLButtonElement>(null);
   const nameInputRef = useRef<HTMLInputElement>(null);
@@ -82,6 +88,30 @@ export function CompanyDeclarationsSection({
 
   const updateDraft = (patch: Partial<DeclarationDraft>) => {
     setDraft((prev) => ({ ...prev, ...patch }));
+  };
+
+  const handleRegistryLookup = async () => {
+    const trimmedName = draft.name.trim();
+    if (!trimmedName) return;
+    setRegistrySearching(true);
+    setRegistryError(null);
+    setRegistryResult(null);
+    try {
+      const country = draft.countryCode.trim().toUpperCase();
+      const regId = draft.registryId.trim();
+      const result = await searchCompanyRegistry({
+        name: trimmedName,
+        ...(country.length === 2 ? { countryCode: country } : {}),
+        ...(regId.length > 0 ? { registryId: regId } : {}),
+      });
+      setRegistryResult(result);
+    } catch (err) {
+      setRegistryError(
+        err instanceof Error ? err.message : "Registry lookup failed.",
+      );
+    } finally {
+      setRegistrySearching(false);
+    }
   };
 
   // Move focus into the form when it opens. The Add company button only exists
@@ -208,9 +238,24 @@ export function CompanyDeclarationsSection({
             )}
 
             <div>
-              <label htmlFor="decl-name" className={labelClass}>
-                Company name
-              </label>
+              <div className="flex items-center justify-between gap-2 mb-1">
+                <label htmlFor="decl-name" className="block text-[11px] font-medium text-slate-300">
+                  Company name
+                </label>
+                <button
+                  type="button"
+                  disabled={registrySearching || draft.name.trim().length === 0}
+                  onClick={() => void handleRegistryLookup()}
+                  className="inline-flex items-center gap-1 rounded border border-slate-700 bg-slate-900 hover:bg-slate-800 disabled:opacity-40 px-2 py-0.5 text-[10px] text-sky-300 cursor-pointer"
+                >
+                  {registrySearching ? (
+                    <Loader2 className="h-3 w-3 animate-spin" />
+                  ) : (
+                    <Search className="h-3 w-3" />
+                  )}
+                  Lookup EE Registry
+                </button>
+              </div>
               <input
                 id="decl-name"
                 ref={nameInputRef}
@@ -218,9 +263,68 @@ export function CompanyDeclarationsSection({
                 required
                 maxLength={160}
                 value={draft.name}
-                onChange={(e) => updateDraft({ name: e.target.value })}
+                onChange={(e) => {
+                  updateDraft({ name: e.target.value });
+                  setRegistryResult(null);
+                }}
                 className={inputClass}
               />
+              {registryError && (
+                <p className="mt-1 text-[10px] text-amber-300">{registryError}</p>
+              )}
+              {registryResult && (
+                <div className="mt-2 rounded-lg border border-slate-800 bg-slate-900/70 p-2 space-y-1.5 text-[11px]">
+                  <div className="flex items-center justify-between text-[10px] text-slate-400">
+                    <span>
+                      {registryResult.outcome === "CONCLUSIVE_MATCH"
+                        ? "Exact match found in Estonian e-Business Register:"
+                        : registryResult.outcome === "CANDIDATES"
+                          ? "Select a matching company (optional):"
+                          : registryResult.outcome === "SNAPSHOT_UNAVAILABLE"
+                            ? "Local registry snapshot unavailable — you can still save manually."
+                            : registryResult.outcome === "UNSUPPORTED_COUNTRY"
+                              ? "Registry lookup currently supports Estonia (EE) — you can still save manually."
+                              : "No matching company found in registry snapshot."}
+                    </span>
+                    <span className="text-[9px] text-slate-500">
+                      {registryResult.source.licence}
+                    </span>
+                  </div>
+                  {registryResult.candidates.length > 0 && (
+                    <ul className="space-y-1">
+                      {registryResult.candidates.slice(0, 5).map((cand) => (
+                        <li
+                          key={`${cand.countryCode}-${cand.registryId}`}
+                          className="flex items-center justify-between gap-2 rounded border border-slate-800 bg-slate-950 px-2 py-1"
+                        >
+                          <div className="min-w-0 truncate">
+                            <span className="font-medium text-slate-100">
+                              {cand.legalName}
+                            </span>{" "}
+                            <span className="font-mono text-[10px] text-slate-400">
+                              ({cand.countryCode} · {cand.registryId} · {cand.status})
+                            </span>
+                          </div>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              updateDraft({
+                                name: cand.legalName,
+                                countryCode: cand.countryCode,
+                                registryId: cand.registryId,
+                              });
+                              setRegistryResult(null);
+                            }}
+                            className="shrink-0 rounded bg-sky-600/20 border border-sky-500/40 hover:bg-sky-600/30 px-2 py-0.5 text-[10px] text-sky-200 cursor-pointer"
+                          >
+                            Use
+                          </button>
+                        </li>
+                      ))}
+                    </ul>
+                  )}
+                </div>
+              )}
             </div>
 
             <fieldset>
