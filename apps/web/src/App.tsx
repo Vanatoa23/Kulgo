@@ -7,9 +7,11 @@ import type {
   CreateInviteInput,
   CreateInviteResponse,
   CreateProductInput,
+  CreateRelationshipDeclarationInput,
   CreateSupplyInputInput,
   CreateSupplyLaneInput,
   Invitation,
+  RelationshipDeclaration,
   UpdateFacilityInput,
   UpdateSupplyLaneInput,
   WorkspaceNetworkResponse,
@@ -38,6 +40,7 @@ import {
   createInvite,
   createLane,
   createProduct,
+  createRelationshipDeclaration,
   createSupplyInput,
   deleteFacility,
   deleteLane,
@@ -46,6 +49,7 @@ import {
   getMe,
   getNetwork,
   listInvites,
+  listRelationshipDeclarations,
   logout,
   seedDemo,
   triggerAlertSweep,
@@ -92,6 +96,21 @@ function writePageToLocation(page: AppPage): void {
   window.history.pushState({ page }, "", url.toString());
 }
 
+// Reconcile a server list response with the rows already held locally (e.g. a
+// declaration saved while the request was in flight). Server rows win for
+// shared ids so status updates land; locally held rows the response predates
+// are kept, deduplicated by declarationId, so a stale list response can never
+// hide a confirmed save and a fresh one can never duplicate it. Extras go
+// first, matching the prepend-on-save order.
+function mergeDeclarations(
+  serverList: readonly RelationshipDeclaration[],
+  current: readonly RelationshipDeclaration[],
+): RelationshipDeclaration[] {
+  const serverIds = new Set(serverList.map((d) => d.declarationId));
+  const extras = current.filter((d) => !serverIds.has(d.declarationId));
+  return [...extras, ...serverList];
+}
+
 export function App() {
   const [bootstrapping, setBootstrapping] = useState(true);
   const [session, setSession] = useState<AuthMeResponse | null>(null);
@@ -124,6 +143,17 @@ export function App() {
 
   // Partner Invites & Alternative Directory state
   const [invitations, setInvitations] = useState<Invitation[]>([]);
+
+  // Private relationship declarations (issue #29) state
+  const [declarations, setDeclarations] = useState<RelationshipDeclaration[]>(
+    [],
+  );
+  const [declarationsLoadStatus, setDeclarationsLoadStatus] = useState<
+    "loading" | "error" | "ready"
+  >("loading");
+  const [declarationSaveError, setDeclarationSaveError] = useState<
+    string | null
+  >(null);
   const [pendingInviteToken, setPendingInviteToken] = useState<string>(() =>
     typeof window !== "undefined"
       ? (extractInviteTokenFromSearch(window.location.search) ?? "")
@@ -158,6 +188,7 @@ export function App() {
   const networkGuard = useMemo(() => createRequestGuard(), []);
   const sessionGuard = useMemo(() => createRequestGuard(), []);
   const alertGuard = useMemo(() => createRequestGuard(), []);
+  const declarationsGuard = useMemo(() => createRequestGuard(), []);
 
   // Sync browser Back/Forward with activePage
   useEffect(() => {
@@ -210,6 +241,33 @@ export function App() {
     [networkGuard],
   );
 
+  // Private declarations list, guarded per workspace generation so a delayed
+  // response from a previous session can never populate the next one.
+  const loadDeclarations = useCallback(async (): Promise<boolean> => {
+    const ticket = declarationsGuard.begin();
+    setDeclarationsLoadStatus("loading");
+    try {
+      const list = await listRelationshipDeclarations();
+      if (!ticket.isCurrent()) return false;
+      // Merge instead of replace: a response that predates a successful save
+      // must add its older rows without dropping the just-saved one, and one
+      // that already includes it must not duplicate it (keyed by
+      // declarationId). An invalidated ticket (tenant change) still discards
+      // the response entirely, preserving session isolation.
+      setDeclarations((prev) => mergeDeclarations(list, prev));
+      setDeclarationsLoadStatus("ready");
+      return true;
+    } catch (err) {
+      if (!ticket.isCurrent()) return false;
+      if (err instanceof ApiError && err.status === 401) {
+        setSession(null);
+        return false;
+      }
+      setDeclarationsLoadStatus("error");
+      return false;
+    }
+  }, [declarationsGuard]);
+
   useEffect(() => {
     let active = true;
     const init = async () => {
@@ -218,6 +276,7 @@ export function App() {
         if (!active) return;
         setSession(me);
         await loadWorkspaceNetwork(true);
+        await loadDeclarations();
       } catch {
         if (!active) return;
         setSession(null);
@@ -229,7 +288,7 @@ export function App() {
     return () => {
       active = false;
     };
-  }, [loadWorkspaceNetwork]);
+  }, [loadWorkspaceNetwork, loadDeclarations]);
 
   const filtered = useMemo(
     () =>
@@ -338,14 +397,19 @@ export function App() {
     sessionGuard.invalidate();
     networkGuard.invalidate();
     alertGuard.invalidate();
+    declarationsGuard.invalidate();
     setNetwork(EMPTY_NETWORK);
     setInvitations([]);
+    setDeclarations([]);
+    setDeclarationsLoadStatus("loading");
+    setDeclarationSaveError(null);
     setAlertFeed(null);
     setAnalytics(null);
     setLoadingNetwork(false);
     setLoadingAlerts(false);
     setLoadingAnalytics(false);
     setSweepingAlerts(false);
+    setBusy(false);
   };
 
   const handleAuthenticated = (me: AuthMeResponse) => {
@@ -353,6 +417,7 @@ export function App() {
     setSession(me);
     setBannerError(null);
     void loadWorkspaceNetwork(true);
+    void loadDeclarations();
   };
 
   const handleLogout = async () => {
@@ -607,6 +672,53 @@ export function App() {
     }
   };
 
+  /**
+   * Saves a private supplier/buyer declaration. Returns `true` ONLY when the
+   * server confirms success in the current session, so the form preserves its
+   * draft on any failure (#47B convention).
+   */
+  const handleCreateDeclaration = async (
+    input: CreateRelationshipDeclarationInput,
+  ): Promise<boolean> => {
+    const sessionTicket = sessionGuard.capture();
+    setBusy(true);
+    setBannerError(null);
+    setDeclarationSaveError(null);
+    try {
+      const created = await createRelationshipDeclaration(input);
+      if (!sessionTicket.isCurrent()) return false;
+      // The list guard is deliberately left alone: a list GET still in flight
+      // keeps its ticket and is reconciled by mergeDeclarations when it
+      // resolves, so a pre-save response cannot drop this row and a post-save
+      // response dedupes by declarationId. Session isolation is unchanged —
+      // resetTenantState() invalidates the guard on login/logout.
+      setDeclarations((prev) => [
+        created,
+        ...prev.filter((d) => d.declarationId !== created.declarationId),
+      ]);
+      setDeclarationsLoadStatus("ready");
+      return true;
+    } catch (err) {
+      if (!sessionTicket.isCurrent()) return false;
+      if (err instanceof ApiError && err.status === 401) {
+        setSession(null);
+        return false;
+      }
+      const message =
+        err instanceof Error
+          ? err.message
+          : "Failed to save the company. Please try again.";
+      setDeclarationSaveError(message);
+      setBannerError(message);
+      return false;
+    } finally {
+      // Only the session that started the save may clear its busy flag; a
+      // stale save settling after a logout/login must not change the new
+      // session's busy status (resetTenantState clears it on tenant change).
+      if (sessionTicket.isCurrent()) setBusy(false);
+    }
+  };
+
   const clearInviteQueryParam = () => {
     if (typeof window !== "undefined") {
       const url = new URL(window.location.href);
@@ -721,6 +833,11 @@ export function App() {
               analytics={analytics}
               userRole={session.user.role}
               busy={busy}
+              declarations={declarations}
+              declarationsLoadStatus={declarationsLoadStatus}
+              declarationSaveError={declarationSaveError}
+              onRetryDeclarations={() => void loadDeclarations()}
+              onCreateDeclaration={handleCreateDeclaration}
               seedingDemo={seedingDemo}
               selectedFacilityId={selectedFacilityId}
               selectedLaneId={selectedLaneId}

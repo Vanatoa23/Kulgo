@@ -8,6 +8,7 @@ import {
   ContractLineSchema,
   ContractSchema,
   CreateInviteResponseSchema,
+  CreateRelationshipDeclarationResponseSchema,
   DirectoryAlternativesResponseSchema,
   EsgLedgerResponseSchema,
   ExecutiveReportSchema,
@@ -17,6 +18,7 @@ import {
   ListAuditEventsResponseSchema,
   ListInvitesResponseSchema,
   ListOrgMembersResponseSchema,
+  ListRelationshipDeclarationsResponseSchema,
   OrgAlertAckSchema,
   ProductSchema,
   RemoveOrgMemberResponseSchema,
@@ -47,6 +49,7 @@ import {
   type CreateInviteInput,
   type CreateInviteResponse,
   type CreateProductInput,
+  type CreateRelationshipDeclarationInput,
   type CreateSupplyInputInput,
   type CreateSupplyLaneInput,
   type ExecutiveReport,
@@ -61,6 +64,7 @@ import {
   type OrgMember,
   type Product,
   type RegisterInput,
+  type RelationshipDeclaration,
   type RemoveOrgMemberResponse,
   type RevokeInviteResponse,
   type RiskSignal,
@@ -259,6 +263,31 @@ export async function seedDemo(): Promise<WorkspaceNetworkResponse> {
     { method: "POST" },
     (payload) => parseWithSchema(WorkspaceNetworkResponseSchema, payload),
   );
+}
+
+// --- Private Relationship Declarations (issue #29) ---
+
+export async function listRelationshipDeclarations(): Promise<
+  RelationshipDeclaration[]
+> {
+  const result = await apiRequest(
+    "/api/v1/workspace/relationship-declarations",
+    { method: "GET" },
+    (payload) => parseWithSchema(ListRelationshipDeclarationsResponseSchema, payload),
+  );
+  return result.declarations;
+}
+
+export async function createRelationshipDeclaration(
+  input: CreateRelationshipDeclarationInput,
+): Promise<RelationshipDeclaration> {
+  const result = await apiRequest(
+    "/api/v1/workspace/relationship-declarations",
+    { method: "POST", body: input },
+    (payload) =>
+      parseWithSchema(CreateRelationshipDeclarationResponseSchema, payload),
+  );
+  return result.declaration;
 }
 
 // --- Products ---

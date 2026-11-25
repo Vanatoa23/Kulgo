@@ -7,6 +7,7 @@ import {
   type CreateInviteInput,
   type CreateInviteResponse,
   type CreateProductInput,
+  type CreateRelationshipDeclarationInput,
   type CreateSupplyInputInput,
   type CreateSupplyLaneInput,
   type Facility,
@@ -14,6 +15,7 @@ import {
   type FacilityRelationshipRole,
   type Invitation,
   type Product,
+  type RelationshipDeclaration,
   type RiskStatus,
   type SupplyInput,
   type SupplyLane,
@@ -33,6 +35,11 @@ import {
   Users,
 } from "lucide-react";
 import { useMemo, useState, type FormEvent } from "react";
+import {
+  CompanyDeclarationsSection,
+  type DeclarationsLoadStatus,
+} from "./CompanyDeclarationsSection.js";
+
 import { NodeInspectorDrawer } from "./NodeInspectorDrawer.js";
 
 export interface NetworkHubPageProps {
@@ -46,6 +53,13 @@ export interface NetworkHubPageProps {
   analytics: AnalyticsSummary | null;
   userRole: UserRole;
   busy: boolean;
+  declarations: readonly RelationshipDeclaration[];
+  declarationsLoadStatus: DeclarationsLoadStatus;
+  declarationSaveError: string | null;
+  onRetryDeclarations: () => void;
+  onCreateDeclaration: (
+    input: CreateRelationshipDeclarationInput,
+  ) => Promise<boolean>;
   seedingDemo: boolean;
   selectedFacilityId: string | null;
   selectedLaneId: string | null;
@@ -139,6 +153,11 @@ export function NetworkHubPage({
   analytics,
   userRole,
   busy,
+  declarations,
+  declarationsLoadStatus,
+  declarationSaveError,
+  onRetryDeclarations,
+  onCreateDeclaration,
   seedingDemo,
   selectedFacilityId,
   selectedLaneId,
@@ -514,6 +533,16 @@ export function NetworkHubPage({
             </button>
           </div>
         )}
+
+        {/* Private declared companies (issue #29): name-only supplier/buyer entry + list */}
+        <CompanyDeclarationsSection
+          declarations={declarations}
+          loadStatus={declarationsLoadStatus}
+          saveError={declarationSaveError}
+          busy={busy}
+          onRetryLoad={onRetryDeclarations}
+          onCreateDeclaration={onCreateDeclaration}
+        />
 
         {/* 3-Column Flow Layout: Suppliers → My Facilities → Clients */}
         <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 items-start">
